@@ -661,6 +661,7 @@ export async function processarSAEOU060(
   await new Promise((r) => setTimeout(r, 80));
 
   const resumo: ResumoImportacao = {
+    id: `imp-saeou-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
     tipo: 'SAEOU060',
     data_hora: dataHoraTimestamp,
     total_lidos,

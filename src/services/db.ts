@@ -99,7 +99,26 @@ export async function dbPutAll<T>(storeName: string, items: T[], clearFirst = tr
       store.clear();
     }
 
-    for (const item of items) {
+    const keyPath = typeof store.keyPath === 'string' ? store.keyPath : null;
+
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (!item || typeof item !== 'object') continue;
+
+      // Ensure keyPath property exists and has a valid value so store.put never throws keyPath errors
+      if (keyPath) {
+        const val = (item as any)[keyPath];
+        if (val === undefined || val === null || val === '') {
+          if (keyPath === 'id') {
+            (item as any).id = `id-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 7)}`;
+          } else if (keyPath === 'codigo_interno') {
+            (item as any).codigo_interno = (item as any).id || (item as any).codigo_original || `prod-${Date.now()}-${i}`;
+          } else if (keyPath === 'key') {
+            (item as any).key = `meta-${Date.now()}-${i}`;
+          }
+        }
+      }
+
       store.put(item);
     }
 
@@ -118,6 +137,21 @@ export async function dbPut<T>(storeName: string, item: T): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
+
+    const keyPath = typeof store.keyPath === 'string' ? store.keyPath : null;
+    if (keyPath && item && typeof item === 'object') {
+      const val = (item as any)[keyPath];
+      if (val === undefined || val === null || val === '') {
+        if (keyPath === 'id') {
+          (item as any).id = `id-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+        } else if (keyPath === 'codigo_interno') {
+          (item as any).codigo_interno = (item as any).id || (item as any).codigo_original || `prod-${Date.now()}`;
+        } else if (keyPath === 'key') {
+          (item as any).key = `meta-${Date.now()}`;
+        }
+      }
+    }
+
     store.put(item);
 
     tx.oncomplete = () => resolve();

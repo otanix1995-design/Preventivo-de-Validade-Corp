@@ -548,6 +548,7 @@ export async function processarSMGOI013(
   await saveProdutos(updatedProdutos);
 
   const resumo: ResumoImportacao = {
+    id: `imp-smg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
     tipo: 'SMGOI013',
     data_hora: timestamp,
     total_lidos,
@@ -951,6 +952,7 @@ export async function processarVinculosEAN(
   await saveVinculosEan(vinculosSalvos);
 
   const resumo: ResumoImportacao = {
+    id: `imp-ean-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
     tipo: 'VINCULOS_EAN',
     data_hora: timestampDisplay,
     total_lidos,

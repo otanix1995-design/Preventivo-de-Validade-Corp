@@ -917,13 +917,17 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
           ) : (
             historico.map((h, idx) => (
               <div
-                key={idx}
+                key={h.id || idx}
                 className="bg-white rounded-xl p-4 border border-gray-200 shadow-xs space-y-2"
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className={`px-2.5 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
-                      h.tipo === 'SMGOI013' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'
+                      h.tipo === 'SMGOI013'
+                        ? 'bg-blue-100 text-blue-800'
+                        : h.tipo === 'SAEOU060'
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-purple-100 text-purple-800'
                     }`}>
                       {h.tipo}
                     </span>

@@ -172,6 +172,7 @@ export interface DivergenciaRegistro {
 }
 
 export interface ResumoImportacao {
+  id?: string;
   tipo: 'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060';
   data_hora: string;
   total_lidos: number;

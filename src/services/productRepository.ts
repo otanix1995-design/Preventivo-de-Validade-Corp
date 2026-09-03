@@ -1304,6 +1304,15 @@ class ProductRepository {
   }
 
   public async addHistorico(resumo: ResumoImportacao): Promise<void> {
+    if (!resumo.id) {
+      resumo.id = `imp-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    }
+    // Ensure all items in history have a unique id for IndexedDB
+    this._historico.forEach((h, idx) => {
+      if (!h.id) {
+        h.id = `imp-hist-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 6)}`;
+      }
+    });
     this._historico.unshift(resumo);
     if (this._historico.length > 30) {
       this._historico = this._historico.slice(0, 30);
