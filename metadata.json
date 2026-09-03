@@ -1,0 +1,6 @@
+{
+  "name": "Controle de Vencimentos",
+  "description": "Aplicativo operacional mobile-first para controle de vencimentos, consulta de mercadorias, leitura EAN e gestão de estoque em supermercados.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
