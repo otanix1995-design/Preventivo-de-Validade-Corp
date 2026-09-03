@@ -249,7 +249,8 @@ export async function processarSMGOI013(
 
   const smgKeywords = [
     'CODIGO', 'COD', 'MERCADORIA', 'DESCRICAO', 'DESC', 'EMBALAGEM', 'EMB',
-    'ESTOQUE', 'SALDO', 'VENDAS', 'PRECO', 'ENTRADA', 'IDADE', 'COMPRADOR', 'SETOR'
+    'ESTOQUE', 'SALDO', 'VENDAS', 'PRECO', 'ENTRADA', 'IDADE', 'COMPRADOR', 'SETOR',
+    'SEMVENDA', 'DIASSEMVENDA'
   ];
 
   const headerRowIdx = findHeaderRowIndex(best2DRows, smgKeywords);
@@ -266,15 +267,29 @@ export async function processarSMGOI013(
   for (const key of Object.keys(sample)) {
     const norm = normalizeHeader(key);
 
-    // Match Código
+    // 1. Match Dias sem Venda (MUST BE EVALUATED FIRST because "SEMVENDA" contains "VENDA")
     if (
+      /^(DIASSEMVENDA|DIASSVENDA|SEMVENDA|DIASSEMGIRO|DIASPARADO|DIASSGIRO|SEMGIRO|DSVENDA)$/.test(norm) ||
+      norm.startsWith('SEMVENDA') ||
+      norm.includes('SEMVENDA') ||
+      norm.includes('DIASSEMVENDA') ||
+      norm.includes('DIASSVENDA') ||
+      norm.includes('DIASSEMGIRO') ||
+      norm.includes('SEMGIRO') ||
+      norm.includes('DIASPARADO') ||
+      (norm.includes('SEM') && norm.includes('VENDA'))
+    ) {
+      if (!headerMap['dias_sem_venda']) headerMap['dias_sem_venda'] = key;
+    }
+    // 2. Match Código
+    else if (
       /^(CODIGO|COD|CODMERCADORIA|MERCADORIA|CODIGOMERCADORIA|CODINTERNO|CODIGOINTERNO|ITEM|PLU|REFERENCIA|REF)$/.test(norm) ||
       norm.startsWith('CODIGO') ||
       norm.startsWith('CODMERC')
     ) {
       if (!headerMap['codigo']) headerMap['codigo'] = key;
     }
-    // Match Descrição
+    // 3. Match Descrição
     else if (
       /^(DESCRICAO|DESCRICAOMERCADORIA|DESC|PRODUTO|NOME|DESCRICAODOPRODUTO|ITEMDESC|DENOMINACAO)$/.test(norm) ||
       norm.includes('DESCRICAO') ||
@@ -282,11 +297,11 @@ export async function processarSMGOI013(
     ) {
       if (!headerMap['descricao']) headerMap['descricao'] = key;
     }
-    // Match Embalagem
+    // 4. Match Embalagem
     else if (/^(EMBALAGEM|EMB|TIPOEMB|UNIDADE|UNID|UN|APRESENTACAO)$/.test(norm) || norm.includes('EMBALAGEM')) {
       if (!headerMap['embalagem']) headerMap['embalagem'] = key;
     }
-    // Match Estoque Emb1 (Loja / Disponível / Geral)
+    // 5. Match Estoque Emb1 (Loja / Disponível / Geral)
     else if (
       /^(ESTOQUEEMB1|ESTOQUE1|ESTOQUELOJA|ESTOQUEDISPONIVEL|SALDOLOJA|ESTOQUEAREAVENDA|ESTOQUEGONDOLA|ESTOQUEFISICO|SALDO)$/.test(norm) ||
       (norm.includes('ESTOQUE') && norm.includes('1')) ||
@@ -294,7 +309,7 @@ export async function processarSMGOI013(
     ) {
       if (!headerMap['estoque_emb1']) headerMap['estoque_emb1'] = key;
     }
-    // Match Estoque Emb9 (Depósito / Reserva)
+    // 6. Match Estoque Emb9 (Depósito / Reserva)
     else if (
       /^(ESTOQUEEMB9|ESTOQUE9|ESTOQUEDEPOSITO|SALDODEPOSITO|ESTOQUERESERVA|ESTOQUEALMOXARIFADO)$/.test(norm) ||
       (norm.includes('ESTOQUE') && norm.includes('9')) ||
@@ -302,23 +317,42 @@ export async function processarSMGOI013(
     ) {
       if (!headerMap['estoque_emb9']) headerMap['estoque_emb9'] = key;
     }
-    // Match Estoque Total (caso venha apenas uma coluna)
+    // 7. Match Estoque Total (caso venha apenas uma coluna)
     else if (/^(ESTOQUETOTAL|SALDOTOTAL|SALDOATUAL|QTDTOTAL|TOTALESTOQUE|ESTOQUEGERAL|ESTOQUE)$/.test(norm)) {
       if (!headerMap['estoque_total_direto']) headerMap['estoque_total_direto'] = key;
     }
-    // Match Vendas Qtde 30d
+    // 8. Match Vendas Qtde 30d (MUST NOT BE SEMVENDA)
     else if (
-      /^(VENDASQTDE|VENDAS30D|QTDEVENDAS|VENDA30DIAS|VENDAS|QTDEVENDIDA|SAIDA30D|CONSUMO30D|GIRO30D)$/.test(norm) ||
-      norm.includes('VENDASQTDE') ||
-      (norm.includes('VENDA') && norm.includes('30'))
+      !norm.includes('SEMVENDA') &&
+      !norm.includes('SEMGIRO') &&
+      !norm.includes('SVENDA') &&
+      (
+        /^(VENDASQTDE|VENDAS30D|QTDEVENDAS|VENDA30DIAS|QTDEVENDIDA|SAIDA30D|CONSUMO30D|GIRO30D|VENDAS)$/.test(norm) ||
+        norm.includes('VENDASQTDE') ||
+        norm.includes('QTDEVEND') ||
+        norm.includes('VENDA30') ||
+        norm.includes('VENDAS30') ||
+        (norm.includes('VENDA') && (norm.includes('QTDE') || norm.includes('QTD'))) ||
+        (norm.includes('VENDA') && (norm.includes('30D') || norm.includes('30DIAS') || norm.includes('ULT30'))) ||
+        (/^VENDAS?Q/.test(norm))
+      )
     ) {
       if (!headerMap['vendas_qtde']) headerMap['vendas_qtde'] = key;
     }
-    // Match Vendas Preço
-    else if (/^(VENDASPRECO|PRECO|PRECOVENDA|VALOR|PRVENDA|VALORVENDA|PRUNITARIO)$/.test(norm) || norm.includes('PRECO')) {
+    // 9. Match Vendas Preço (MUST NOT BE SEMVENDA)
+    else if (
+      !norm.includes('SEMVENDA') &&
+      !norm.includes('SEMGIRO') &&
+      (
+        /^(VENDASPRECO|PRECO|PRECOVENDA|VALOR|PRVENDA|VALORVENDA|PRUNITARIO|VENDASVALOR)$/.test(norm) ||
+        (norm.includes('VENDA') && (norm.includes('PRECO') || norm.includes('PR') || norm.includes('VALOR'))) ||
+        (/^VENDAS?PR/.test(norm)) ||
+        norm.includes('PRECO')
+      )
+    ) {
       if (!headerMap['vendas_preco']) headerMap['vendas_preco'] = key;
     }
-    // Match Data Última Entrada
+    // 10. Match Data Última Entrada
     else if (
       /^(DATAULTIMAENTRADA|ULTIMAENTRADA|DTENTRADA|DTULTIMACOMPRA|DATAENTRADA|ULTIMACOMPRA)$/.test(norm) ||
       (norm.includes('DATA') && norm.includes('ENTRADA')) ||
@@ -326,7 +360,7 @@ export async function processarSMGOI013(
     ) {
       if (!headerMap['data_ultima_entrada']) headerMap['data_ultima_entrada'] = key;
     }
-    // Match Qtde Última Entrada
+    // 11. Match Qtde Última Entrada
     else if (
       /^(QUANTIDADEULTIMAENTRADA|QTDEULTIMAENTRADA|QTDEENTRADA|ULTIMACOMPRAQTDE|QTDULTIMAENTRADA)$/.test(norm) ||
       (norm.includes('QTDE') && norm.includes('ENTRADA')) ||
@@ -334,37 +368,58 @@ export async function processarSMGOI013(
     ) {
       if (!headerMap['qtde_ultima_entrada']) headerMap['qtde_ultima_entrada'] = key;
     }
-    // Match Dias sem Venda
-    else if (/^(DIASSEMVENDA|DIASSVENDA|DIASSEMGIRO|DIASPARADO|DIASSGIRO)$/.test(norm) || norm.includes('DIASSEMVENDA') || norm.includes('SEMVENDA')) {
-      if (!headerMap['dias_sem_venda']) headerMap['dias_sem_venda'] = key;
-    }
-    // Match Idade
-    else if (/^(IDADE|IDADEMERCADORIA|IDADEESTOQUE|DIASESTOQUE)$/.test(norm) || norm.includes('IDADE')) {
+    // 12. Match Idade (Must NOT be Rentabilidade, Rotatividade, Lucratividade)
+    else if (
+      !norm.includes('RENTABILIDADE') &&
+      !norm.includes('ROTATIVIDADE') &&
+      !norm.includes('LUCRATIVIDADE') &&
+      (
+        /^(IDADE|IDADEMERCADORIA|IDADEESTOQUE|DIASESTOQUE)$/.test(norm) ||
+        norm.startsWith('IDADE') ||
+        norm.includes('IDADEMERC')
+      )
+    ) {
       if (!headerMap['idade']) headerMap['idade'] = key;
     }
-    // Match Qtde Ideal
+    // 13. Match Qtde Ideal
     else if (/^(QUANTIDADEIDEAL|QTDEIDEAL|ESTOQUEIDEAL|QTDIDEAL|ESTOQUEMINIMO)$/.test(norm) || norm.includes('IDEAL')) {
       if (!headerMap['qtde_ideal']) headerMap['qtde_ideal'] = key;
     }
-    // Match Comprador Filial
+    // 14. Match Comprador Filial
     else if (/^(COMPRADORFILIAL|COMPRADOR|COMPRFILIAL)$/.test(norm) || (norm.includes('COMPRADOR') && norm.includes('FILIAL'))) {
       if (!headerMap['comprador_filial']) headerMap['comprador_filial'] = key;
     }
-    // Match Comprador Matriz
+    // 15. Match Comprador Matriz
     else if (/^(COMPRADORMATRIZ|COMPRMATRIZ)$/.test(norm) || (norm.includes('COMPRADOR') && norm.includes('MATRIZ'))) {
       if (!headerMap['comprador_matriz']) headerMap['comprador_matriz'] = key;
     }
-    // Match Setor Físico
+    // 16. Match Setor Físico
     else if (/^(SETORFISICO|SETOR|SECAO|DEPARTAMENTO|CATEGORIA)$/.test(norm) || norm.includes('SETORFISICO')) {
       if (!headerMap['setor_fisico']) headerMap['setor_fisico'] = key;
     }
-    // Match Setor Balanço
+    // 17. Match Setor Balanço
     else if (/^(SETORBALANCO|BALANCO|GRUPO)$/.test(norm) || norm.includes('SETORBALANCO')) {
       if (!headerMap['setor_balanco']) headerMap['setor_balanco'] = key;
     }
-    // Match Pedidos Pendentes
+    // 18. Match Pedidos Pendentes
     else if (/^(PEDIDOSPENDENTES|PEDIDOS|PEDIDOPENDENTE|EMPEDIDO|QTDEPEDIDA)$/.test(norm) || norm.includes('PEDIDO')) {
       if (!headerMap['pedidos_pendentes']) headerMap['pedidos_pendentes'] = key;
+    }
+  }
+
+  // Extra fallback safeguards
+  if (!headerMap['dias_sem_venda']) {
+    const semVendaKey = Object.keys(sample).find((k) => {
+      const n = normalizeHeader(k);
+      return (
+        n.includes('SEMVENDA') ||
+        (n.includes('SEM') && n.includes('VENDA')) ||
+        n.includes('SEMGIRO') ||
+        n.includes('DIASPARADO')
+      );
+    });
+    if (semVendaKey) {
+      headerMap['dias_sem_venda'] = semVendaKey;
     }
   }
 
