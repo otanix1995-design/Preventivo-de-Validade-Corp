@@ -1428,8 +1428,14 @@ class ProductRepository {
 
   // --- METADADOS ---
 
-  public async syncWithCloud(): Promise<boolean> {
-    return cloudSyncService.pullCatalogoFromCloud();
+  public async syncWithCloud(): Promise<{ success: boolean; message: string }> {
+    return await cloudSyncService.syncFull(
+      this._produtos,
+      this._metadados,
+      this._vinculos,
+      this._saeou060,
+      this._vencimentos
+    );
   }
 
   public getMetadados(): MetadadosBase {

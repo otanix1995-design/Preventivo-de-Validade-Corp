@@ -61,16 +61,16 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
   const handleSyncWithCloud = async () => {
     setIsSyncingCloud(true);
-    setSyncFeedbackMsg('Verificando e baixando atualizações da nuvem...');
+    setSyncFeedbackMsg('Verificando e sincronizando com a nuvem...');
     try {
-      const pulled = await productRepository.syncWithCloud();
+      const res = await productRepository.syncWithCloud();
       if (onImportComplete) onImportComplete();
-      setSyncFeedbackMsg(pulled ? 'Catálogo sincronizado com sucesso!' : 'A base de dados já está atualizada com a nuvem.');
-    } catch (e) {
+      setSyncFeedbackMsg(res.message);
+    } catch (e: any) {
       setSyncFeedbackMsg('Erro ao sincronizar com a nuvem.');
     } finally {
       setIsSyncingCloud(false);
-      setTimeout(() => setSyncFeedbackMsg(null), 4000);
+      setTimeout(() => setSyncFeedbackMsg(null), 5000);
     }
   };
 

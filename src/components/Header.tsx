@@ -32,6 +32,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
   const [isManualSyncing, setIsManualSyncing] = useState(false);
+  const [syncToast, setSyncToast] = useState<string | null>(null);
 
   useEffect(() => {
     const unsub = cloudSyncService.subscribeStatus(setSyncStatus);
@@ -42,9 +43,13 @@ export const Header: React.FC<HeaderProps> = ({
     if (isManualSyncing || syncStatus.state === 'syncing') return;
     setIsManualSyncing(true);
     try {
-      await productRepository.syncWithCloud();
-    } catch (e) {
+      const res = await productRepository.syncWithCloud();
+      setSyncToast(res.message);
+      setTimeout(() => setSyncToast(null), 4500);
+    } catch (e: any) {
       console.warn('Sync failed:', e);
+      setSyncToast('Erro ao sincronizar com a nuvem.');
+      setTimeout(() => setSyncToast(null), 4500);
     } finally {
       setIsManualSyncing(false);
     }
@@ -117,34 +122,40 @@ export const Header: React.FC<HeaderProps> = ({
             disabled={isSyncing}
             title={
               syncStatus.state === 'connected'
-                ? `Nuvem Conectada. Última sincronização: ${syncStatus.lastSyncTime || 'agora'}. Clique para atualizar dados da nuvem.`
+                ? `Nuvem Conectada. Última sincronização: ${syncStatus.lastSyncTime || 'agora'}. Clique para sincronizar.`
                 : syncStatus.state === 'syncing'
                 ? 'Sincronizando com a nuvem...'
-                : syncStatus.message || 'Clique para sincronizar com a nuvem'
+                : syncStatus.state === 'connecting'
+                ? 'Conectando com a nuvem...'
+                : syncStatus.message || 'Clique para conectar e sincronizar com a nuvem'
             }
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-xs uppercase tracking-wide transition-all border shrink-0 ${
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-xs uppercase tracking-wide transition-all border shrink-0 cursor-pointer ${
               syncStatus.state === 'connected'
-                ? 'bg-blue-800/80 hover:bg-blue-800 text-blue-100 border-blue-400/40 hover:border-blue-300'
+                ? 'bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-100 border-emerald-400/50 hover:border-emerald-300 shadow-xs'
                 : syncStatus.state === 'syncing'
-                ? 'bg-amber-500/20 text-amber-200 border-amber-400/40 animate-pulse'
-                : syncStatus.state === 'offline'
-                ? 'bg-rose-500/20 text-rose-200 border-rose-400/40'
-                : 'bg-blue-800/40 text-blue-200 border-blue-500/30'
+                ? 'bg-amber-500/25 text-amber-200 border-amber-400/50 animate-pulse'
+                : syncStatus.state === 'connecting'
+                ? 'bg-blue-500/25 text-blue-200 border-blue-400/50'
+                : 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-200 border-rose-400/50'
             }`}
           >
             {isSyncing ? (
               <RefreshCw className="w-4 h-4 animate-spin text-amber-300" />
-            ) : syncStatus.state === 'offline' ? (
-              <CloudOff className="w-4 h-4 text-rose-300" />
-            ) : (
+            ) : syncStatus.state === 'connected' ? (
               <Cloud className="w-4 h-4 text-emerald-300" />
+            ) : syncStatus.state === 'connecting' ? (
+              <RefreshCw className="w-4 h-4 animate-spin text-blue-300" />
+            ) : (
+              <CloudOff className="w-4 h-4 text-rose-300" />
             )}
-            <span className="hidden sm:inline">
+            <span className="inline">
               {isSyncing
                 ? 'Sincronizando...'
                 : syncStatus.state === 'connected'
                 ? 'Nuvem'
-                : 'Offline'}
+                : syncStatus.state === 'connecting'
+                ? 'Conectando...'
+                : 'Conectar'}
             </span>
           </button>
 
@@ -187,6 +198,16 @@ export const Header: React.FC<HeaderProps> = ({
           </span>
         </div>
       </div>
+
+      {/* Sync Toast Feedback */}
+      {syncToast && (
+        <div className="bg-blue-950 text-white border-t border-b border-blue-500/30 px-4 py-2 text-xs flex items-center justify-between gap-3 shadow-md animate-in fade-in slide-in-from-top-1">
+          <div className="flex items-center gap-2 max-w-7xl mx-auto w-full">
+            <Cloud className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span className="font-semibold text-blue-100">{syncToast}</span>
+          </div>
+        </div>
+      )}
     </header>
   );
 };

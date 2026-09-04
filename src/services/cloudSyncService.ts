@@ -128,12 +128,16 @@ class CloudSyncService {
    */
   public async init(): Promise<void> {
     if (this._isInitialized) return;
-    this._isInitialized = true;
 
     try {
-      this.updateStatus({ state: 'connecting' });
-      await ensureAuth();
-      this.updateStatus({ state: 'connected', message: 'Conectado à Nuvem' });
+      this.updateStatus({ state: 'connecting', message: 'Conectando à Nuvem...' });
+      await ensureAuth().catch(() => null);
+
+      // Clean existing listeners if any
+      this._unsubscribers.forEach((u) => {
+        try { u(); } catch {}
+      });
+      this._unsubscribers = [];
 
       // 1. Listen to Metadata for Catalog/Vinculos/Saeou060 updates across devices
       const metaDocRef = doc(db, 'metadados', 'geral');
@@ -180,7 +184,9 @@ class CloudSyncService {
           this._onRemoteVencimentosReceived(lotes);
         }
         this.updateStatus({
+          state: 'connected',
           lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          message: 'Nuvem Conectada',
         });
       }, (err) => {
         console.warn('[CloudSync] Vencimentos listener error:', err);
@@ -202,11 +208,19 @@ class CloudSyncService {
       });
       this._unsubscribers.push(unsubHist);
 
+      this._isInitialized = true;
+      this.updateStatus({
+        state: 'connected',
+        message: 'Conectado à Nuvem',
+        lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      });
+
       // Initial check to see if remote has data that local device is missing
-      await this.pullLatestIfOutdated();
+      this.pullLatestIfOutdated().catch(() => {});
     } catch (err: any) {
-      console.error('[CloudSync] Initialization failed:', err);
-      this.updateStatus({ state: 'offline', message: 'Erro ao conectar com Firebase' });
+      console.warn('[CloudSync] Initialization warning:', err);
+      this._isInitialized = false;
+      this.updateStatus({ state: 'error', message: 'Erro ao conectar com a Nuvem' });
     }
   }
 
@@ -215,7 +229,7 @@ class CloudSyncService {
    */
   public async pullLatestIfOutdated(): Promise<void> {
     try {
-      await ensureAuth();
+      await ensureAuth().catch(() => null);
       const metaDocRef = doc(db, 'metadados', 'geral');
       const metaSnap = await getDoc(metaDocRef);
       if (!metaSnap.exists()) return;
@@ -232,6 +246,130 @@ class CloudSyncService {
       }
     } catch (err) {
       console.warn('[CloudSync] Pull check failed:', err);
+    }
+  }
+
+  /**
+   * Comprehensive two-way sync for manual button press:
+   * - Connects to cloud
+   * - Pulls if cloud is newer or local is empty
+   * - Pushes local if cloud is empty or local has newer data
+   * - Syncs expiration lots
+   */
+  public async syncFull(
+    localProdutos: ProdutoSMG[],
+    localMeta: MetadadosBase,
+    localVinculos: VinculoEan[],
+    localSaeou: RegistroSaeou060[],
+    localVencimentos: LoteVencimento[]
+  ): Promise<{ success: boolean; message: string }> {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      this.updateStatus({ state: 'offline', message: 'Dispositivo sem internet' });
+      return { success: false, message: 'Dispositivo sem conexão à internet.' };
+    }
+
+    this.updateStatus({ state: 'syncing', message: 'Sincronizando com a Nuvem...' });
+
+    try {
+      await ensureAuth().catch(() => null);
+
+      if (!this._isInitialized) {
+        await this.init();
+      }
+
+      const metaDocRef = doc(db, 'metadados', 'geral');
+      const metaSnap = await getDoc(metaDocRef);
+      const nowStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+
+      if (!metaSnap.exists()) {
+        // Cloud has no documents yet
+        if (localProdutos.length > 0) {
+          await this.pushCatalogoToCloud(localProdutos, localMeta);
+          if (localVinculos.length > 0) await this.pushVinculosToCloud(localVinculos);
+          if (localSaeou.length > 0) await this.pushSaeou060ToCloud(localSaeou);
+          if (localVencimentos.length > 0) await this.pushAllLotesToCloud(localVencimentos);
+
+          this.updateStatus({
+            state: 'connected',
+            lastSyncTime: nowStr,
+            message: `Base local enviada para a nuvem (${localProdutos.length} produtos)`,
+          });
+          return {
+            success: true,
+            message: `Nuvem conectada! ${localProdutos.length} produtos enviados para compartilhamento.`,
+          };
+        } else {
+          // Initialize empty metadata document in cloud
+          await setDoc(metaDocRef, {
+            filial_numero: localMeta.filial_numero || '172',
+            filial_nome: localMeta.filial_nome || 'CASCAVEL',
+            status_base: 'VAZIA',
+            total_produtos: 0,
+            catalogo_version: 0,
+            updatedAt: new Date().toISOString(),
+          }, { merge: true });
+
+          this.updateStatus({
+            state: 'connected',
+            lastSyncTime: nowStr,
+            message: 'Conectado à Nuvem (pronto para importação)',
+          });
+          return { success: true, message: 'Conectado à nuvem com sucesso! Pronto para sincronizar.' };
+        }
+      }
+
+      // Cloud metadata exists
+      const data = metaSnap.data();
+      const remoteCatVersion = data.catalogo_version || 0;
+      const remoteTotal = data.total_produtos || 0;
+
+      let msg = 'Conectado à nuvem. Dados já estão em dia.';
+
+      // If remote has products and is newer or local is empty
+      if (remoteTotal > 0 && (remoteCatVersion > this._localCatalogoVersion || localProdutos.length === 0)) {
+        await this.pullCatalogoFromCloud(remoteCatVersion);
+        msg = `Catálogo atualizado da nuvem (${remoteTotal} produtos).`;
+      } else if (localProdutos.length > 0 && remoteTotal === 0) {
+        // Local has products but cloud is empty: push local
+        await this.pushCatalogoToCloud(localProdutos, localMeta);
+        msg = `Catálogo local enviado para a nuvem (${localProdutos.length} produtos).`;
+      }
+
+      // Sync vínculos
+      const remoteVincVersion = data.vinculos_version || 0;
+      if (remoteVincVersion > this._localVinculosVersion || (localVinculos.length === 0 && (data.total_eans || 0) > 0)) {
+        await this.pullVinculosFromCloud(remoteVincVersion);
+      } else if (localVinculos.length > 0 && (data.total_eans || 0) === 0) {
+        await this.pushVinculosToCloud(localVinculos);
+      }
+
+      // Sync SAEOU060
+      const remoteSaeouVersion = data.saeou060_version || 0;
+      if (remoteSaeouVersion > this._localSaeou060Version || (localSaeou.length === 0 && (data.total_saeou060 || 0) > 0)) {
+        await this.pullSaeou060FromCloud(remoteSaeouVersion);
+      } else if (localSaeou.length > 0 && (data.total_saeou060 || 0) === 0) {
+        await this.pushSaeou060ToCloud(localSaeou);
+      }
+
+      // Sync vencimentos: push local lots
+      if (localVencimentos.length > 0) {
+        await this.pushAllLotesToCloud(localVencimentos);
+      }
+
+      this.updateStatus({
+        state: 'connected',
+        lastSyncTime: nowStr,
+        message: 'Nuvem Conectada e Sincronizada',
+      });
+
+      return { success: true, message: msg };
+    } catch (err: any) {
+      console.error('[CloudSync] Error in syncFull:', err);
+      this.updateStatus({
+        state: 'error',
+        message: err?.message || 'Erro ao sincronizar',
+      });
+      return { success: false, message: `Erro ao conectar com a nuvem: ${err?.message || 'Falha de comunicação'}` };
     }
   }
 
