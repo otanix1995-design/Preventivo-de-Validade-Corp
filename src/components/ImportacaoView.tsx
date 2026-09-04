@@ -2,6 +2,8 @@ import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
+  Cloud,
+  CloudOff,
   Database,
   Download,
   FileSpreadsheet,
@@ -15,10 +17,11 @@ import {
   UploadCloud,
   X
 } from 'lucide-react';
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { processarSMGOI013, processarVinculosEAN } from '../services/excelParser';
 import { gerarExemploPlanilhaSAEOU060, processarSAEOU060 } from '../services/saeou060Parser';
+import { cloudSyncService, SyncStatusInfo } from '../services/cloudSyncService';
 import { productRepository } from '../services/productRepository';
 import { clearAllData, getHistoricoImportacoes, loadDemoData, reprocessarBases } from '../services/storage';
 import { MetadadosBase, ResumoImportacao } from '../types';
@@ -47,6 +50,29 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
   const [isDraggingSaeou, setIsDraggingSaeou] = useState(false);
   const [isLimparModalOpen, setIsLimparModalOpen] = useState(false);
   const [isReprocessing, setIsReprocessing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
+  const [isSyncingCloud, setIsSyncingCloud] = useState(false);
+  const [syncFeedbackMsg, setSyncFeedbackMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const unsub = cloudSyncService.subscribeStatus(setSyncStatus);
+    return unsub;
+  }, []);
+
+  const handleSyncWithCloud = async () => {
+    setIsSyncingCloud(true);
+    setSyncFeedbackMsg('Verificando e baixando atualizações da nuvem...');
+    try {
+      const pulled = await productRepository.syncWithCloud();
+      if (onImportComplete) onImportComplete();
+      setSyncFeedbackMsg(pulled ? 'Catálogo sincronizado com sucesso!' : 'A base de dados já está atualizada com a nuvem.');
+    } catch (e) {
+      setSyncFeedbackMsg('Erro ao sincronizar com a nuvem.');
+    } finally {
+      setIsSyncingCloud(false);
+      setTimeout(() => setSyncFeedbackMsg(null), 4000);
+    }
+  };
 
   const fileInputSmgRef = useRef<HTMLInputElement>(null);
   const fileInputEanRef = useRef<HTMLInputElement>(null);
@@ -446,6 +472,54 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
             Histórico ({historico.length})
           </button>
         </div>
+      </div>
+
+      {/* Cloud Sync Status Banner (Multi-Dispositivos) */}
+      <div className="bg-linear-to-r from-blue-900 to-indigo-900 text-white rounded-xl p-4 shadow-sm border border-blue-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="w-9 h-9 rounded-xl bg-white/10 flex items-center justify-center border border-white/20 shrink-0 mt-0.5">
+            {syncStatus.state === 'syncing' || isSyncingCloud ? (
+              <RefreshCw className="w-5 h-5 text-amber-300 animate-spin" />
+            ) : syncStatus.state === 'offline' ? (
+              <CloudOff className="w-5 h-5 text-rose-300" />
+            ) : (
+              <Cloud className="w-5 h-5 text-emerald-300" />
+            )}
+          </div>
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-black uppercase tracking-wider text-white">
+                Sincronização em Nuvem (Multi-Dispositivos)
+              </span>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                syncStatus.state === 'connected'
+                  ? 'bg-emerald-500/30 text-emerald-200 border border-emerald-400/40'
+                  : syncStatus.state === 'syncing' || isSyncingCloud
+                  ? 'bg-amber-500/30 text-amber-200 border border-amber-400/40'
+                  : 'bg-rose-500/30 text-rose-200 border border-rose-400/40'
+              }`}>
+                {syncStatus.state === 'connected' ? 'Conectado à Nuvem' : syncStatus.state === 'syncing' || isSyncingCloud ? 'Sincronizando...' : 'Offline'}
+              </span>
+            </div>
+            <p className="text-[11px] text-blue-200">
+              {syncFeedbackMsg || (
+                syncStatus.lastSyncTime
+                  ? `Última sincronização às ${syncStatus.lastSyncTime}. Atualizações importadas em outros aparelhos são sincronizadas automaticamente.`
+                  : 'Qualquer planilha importada é sincronizada em tempo real com todos os computadores e celulares conectados à filial.'
+              )}
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleSyncWithCloud}
+          disabled={isSyncingCloud || syncStatus.state === 'syncing'}
+          className="px-3.5 py-2 rounded-xl bg-white text-blue-900 hover:bg-blue-50 active:bg-blue-100 font-black text-xs uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all shadow-sm active:scale-95 disabled:opacity-60 cursor-pointer shrink-0"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCloud || syncStatus.state === 'syncing' ? 'animate-spin text-blue-600' : 'text-blue-700'}`} />
+          <span>{isSyncingCloud || syncStatus.state === 'syncing' ? 'Sincronizando...' : 'Sincronizar Agora'}</span>
+        </button>
       </div>
 
       {/* Diagnóstico da Base de Dados */}

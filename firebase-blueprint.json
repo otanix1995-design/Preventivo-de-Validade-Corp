@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "entities": {
+    "Metadados": {
+      "collection": "metadados",
+      "fields": {
+        "filial_numero": { "type": "string" },
+        "filial_nome": { "type": "string" },
+        "status_base": { "type": "string" },
+        "total_produtos": { "type": "number" },
+        "total_vencimentos": { "type": "number" },
+        "total_eans": { "type": "number" },
+        "total_saeou060": { "type": "number" },
+        "catalogo_version": { "type": "number" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "CatalogoChunk": {
+      "collection": "catalogo_chunks",
+      "fields": {
+        "chunk_index": { "type": "number" },
+        "total_chunks": { "type": "number" },
+        "count": { "type": "number" },
+        "data": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "VinculosChunk": {
+      "collection": "vinculos_chunks",
+      "fields": {
+        "chunk_index": { "type": "number" },
+        "total_chunks": { "type": "number" },
+        "count": { "type": "number" },
+        "data": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "Saeou060Chunk": {
+      "collection": "saeou060_chunks",
+      "fields": {
+        "chunk_index": { "type": "number" },
+        "total_chunks": { "type": "number" },
+        "count": { "type": "number" },
+        "data": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "LoteVencimento": {
+      "collection": "vencimentos",
+      "fields": {
+        "id": { "type": "string" },
+        "codigo_interno": { "type": "string" },
+        "digito": { "type": "string" },
+        "descricao": { "type": "string" },
+        "data_vencimento": { "type": "string" },
+        "quantidade": { "type": "number" },
+        "status": { "type": "string" },
+        "setor": { "type": "string" },
+        "responsavel": { "type": "string" },
+        "criado_em": { "type": "string" },
+        "atualizado_em": { "type": "string" }
+      }
+    },
+    "HistoricoImportacao": {
+      "collection": "historico_importacoes",
+      "fields": {
+        "id": { "type": "string" },
+        "tipo": { "type": "string" },
+        "data_importacao": { "type": "string" },
+        "total_lidos": { "type": "number" }
+      }
+    },
+    "DivergenciaRegistro": {
+      "collection": "divergencias",
+      "fields": {
+        "id": { "type": "string" },
+        "codigo_interno": { "type": "string" },
+        "tipo": { "type": "string" }
+      }
+    }
+  }
+}

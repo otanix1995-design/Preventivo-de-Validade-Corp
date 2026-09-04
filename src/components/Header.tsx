@@ -1,11 +1,16 @@
 import {
   Calendar,
   Camera,
+  Cloud,
+  CloudOff,
   Database,
+  RefreshCw,
   Search,
   Sparkles
 } from 'lucide-react';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import { cloudSyncService, SyncStatusInfo } from '../services/cloudSyncService';
+import { productRepository } from '../services/productRepository';
 import { MetadadosBase } from '../types';
 
 interface HeaderProps {
@@ -25,10 +30,32 @@ export const Header: React.FC<HeaderProps> = ({
   onQuickSearchClick,
   currentTabName,
 }) => {
+  const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
+  const [isManualSyncing, setIsManualSyncing] = useState(false);
+
+  useEffect(() => {
+    const unsub = cloudSyncService.subscribeStatus(setSyncStatus);
+    return unsub;
+  }, []);
+
+  const handleManualSync = async () => {
+    if (isManualSyncing || syncStatus.state === 'syncing') return;
+    setIsManualSyncing(true);
+    try {
+      await productRepository.syncWithCloud();
+    } catch (e) {
+      console.warn('Sync failed:', e);
+    } finally {
+      setIsManualSyncing(false);
+    }
+  };
+
   const totalProdutos = metadados?.total_produtos ?? 0;
   const currentStatus = totalProdutos === 0 ? 'VAZIA' : (statusBase || metadados?.status_base || 'DEMO');
   const isDemo = currentStatus === 'DEMO' && totalProdutos > 0;
   const ultimaAtualizacao = metadados?.ultima_atualizacao_smgoi013;
+
+  const isSyncing = syncStatus.state === 'syncing' || isManualSyncing;
 
   return (
     <header
@@ -82,6 +109,44 @@ export const Header: React.FC<HeaderProps> = ({
               <Search className="w-4 h-4 stroke-[2.5]" />
             </button>
           )}
+
+          {/* Cloud Sync Button & Status */}
+          <button
+            id="header-btn-cloud-sync"
+            onClick={handleManualSync}
+            disabled={isSyncing}
+            title={
+              syncStatus.state === 'connected'
+                ? `Nuvem Conectada. Última sincronização: ${syncStatus.lastSyncTime || 'agora'}. Clique para atualizar dados da nuvem.`
+                : syncStatus.state === 'syncing'
+                ? 'Sincronizando com a nuvem...'
+                : syncStatus.message || 'Clique para sincronizar com a nuvem'
+            }
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-xs uppercase tracking-wide transition-all border shrink-0 ${
+              syncStatus.state === 'connected'
+                ? 'bg-blue-800/80 hover:bg-blue-800 text-blue-100 border-blue-400/40 hover:border-blue-300'
+                : syncStatus.state === 'syncing'
+                ? 'bg-amber-500/20 text-amber-200 border-amber-400/40 animate-pulse'
+                : syncStatus.state === 'offline'
+                ? 'bg-rose-500/20 text-rose-200 border-rose-400/40'
+                : 'bg-blue-800/40 text-blue-200 border-blue-500/30'
+            }`}
+          >
+            {isSyncing ? (
+              <RefreshCw className="w-4 h-4 animate-spin text-amber-300" />
+            ) : syncStatus.state === 'offline' ? (
+              <CloudOff className="w-4 h-4 text-rose-300" />
+            ) : (
+              <Cloud className="w-4 h-4 text-emerald-300" />
+            )}
+            <span className="hidden sm:inline">
+              {isSyncing
+                ? 'Sincronizando...'
+                : syncStatus.state === 'connected'
+                ? 'Nuvem'
+                : 'Offline'}
+            </span>
+          </button>
 
           <button
             id="header-btn-scanner"

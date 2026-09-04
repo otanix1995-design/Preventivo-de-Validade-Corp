@@ -1,0 +1,37 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allows operational read and write for store staff / anonymous or authenticated users
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    match /metadados/{docId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /catalogo_chunks/{chunkId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /vinculos_chunks/{chunkId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /saeou060_chunks/{chunkId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /vencimentos/{vencimentoId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /historico_importacoes/{histId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /divergencias/{divId} {
+      allow read, write: if isAuthenticated();
+    }
+  }
+}

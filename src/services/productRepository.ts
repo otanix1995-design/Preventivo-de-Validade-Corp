@@ -17,6 +17,7 @@ import {
   VinculoEan
 } from '../types';
 import { cleanEanCode, extractGramagem, isProdutoPesavel, normalizeCodigoSMGO } from './codeParser';
+import { cloudSyncService } from './cloudSyncService';
 import {
   dbClear,
   dbGetAll,
@@ -179,6 +180,58 @@ class ProductRepository {
 
         this._isLoaded = true;
         this.notify();
+
+        // Configure real-time Cloud Synchronization (Firebase Firestore)
+        cloudSyncService.registerCallbacks({
+          onRemoteCatalogoReceived: async (remoteProdutos, meta) => {
+            this._produtos = remoteProdutos;
+            this._metadados = {
+              ...this._metadados,
+              ...meta,
+              status_base: 'SMGOI013',
+              total_produtos: remoteProdutos.length,
+            };
+            this.rebuildIndices();
+            await dbPutAll(STORES.PRODUTOS, remoteProdutos, true);
+            await dbSetMeta('metadados_gerais', this._metadados);
+            this.notify();
+          },
+          onRemoteVinculosReceived: async (remoteVinculos) => {
+            this._vinculos = remoteVinculos;
+            this.rebuildIndices();
+            await dbPutAll(STORES.VINCULOS_EAN, remoteVinculos, true);
+            this.notify();
+          },
+          onRemoteSaeou060Received: async (remoteSaeou) => {
+            this._saeou060 = remoteSaeou;
+            await dbPutAll(STORES.SAEOU060, remoteSaeou, true);
+            this.notify();
+          },
+          onRemoteVencimentosReceived: (remoteVencimentos) => {
+            if (remoteVencimentos.length > 0 || this._vencimentos.length > 0) {
+              this._vencimentos = remoteVencimentos;
+              this._metadados.total_vencimentos = remoteVencimentos.length;
+              dbPutAll(STORES.VENCIMENTOS, remoteVencimentos, true).catch(() => {});
+              this.notify();
+            }
+          },
+          onRemoteHistoricoReceived: (remoteHist) => {
+            this._historico = remoteHist;
+            dbPutAll(STORES.HISTORICO_IMPORTACOES, remoteHist, true).catch(() => {});
+            this.notify();
+          },
+        });
+
+        // Seed cloud sync service with local catalog version timestamp
+        const localVersion = this._produtos.length > 0 ? (this._metadados.catalogo_version || 1) : 0;
+        cloudSyncService.setLocalVersions({
+          catalogoVersion: localVersion,
+          vinculosVersion: this._vinculos.length > 0 ? 1 : 0,
+          saeou060Version: this._saeou060.length > 0 ? 1 : 0,
+        });
+
+        // Initialize background cloud sync (subscribes to onSnapshot real-time events)
+        cloudSyncService.init().catch((e) => console.warn('Cloud sync init error:', e));
       } catch (err) {
         console.error('Erro na inicialização do productRepository:', err);
         this._isLoaded = true;
@@ -694,9 +747,15 @@ class ProductRepository {
       total_produtos: novosProdutos.length,
       total_eans: this._vinculos.length,
       ultima_atualizacao_smgoi013: new Date().toLocaleString('pt-BR'),
+      catalogo_version: Date.now(),
     };
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
+
+    // Push catalog to Cloud (Firestore) in background
+    cloudSyncService.pushCatalogoToCloud(novosProdutos, meta).catch((e) => {
+      console.warn('Erro ao sincronizar catálogo na nuvem:', e);
+    });
 
     this.notify();
   }
@@ -718,9 +777,15 @@ class ProductRepository {
       ...this._metadados,
       total_eans: this._vinculos.length,
       ultima_atualizacao_eans: new Date().toLocaleString('pt-BR'),
+      vinculos_version: Date.now(),
     };
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
+
+    // Push vínculos to Cloud
+    cloudSyncService.pushVinculosToCloud(this._vinculos).catch((e) => {
+      console.warn('Erro ao sincronizar vínculos na nuvem:', e);
+    });
 
     this.notify();
   }
@@ -862,6 +927,11 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
+    // Sync all lots to Cloud
+    cloudSyncService.pushAllLotesToCloud(lotes).catch((e) => {
+      console.warn('Erro ao salvar lotes na nuvem:', e);
+    });
+
     this.notify();
   }
 
@@ -888,6 +958,11 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
+    // Real-time push to Cloud
+    cloudSyncService.pushLoteToCloud(loteCriado).catch((e) => {
+      console.warn('Erro ao sincronizar lote na nuvem:', e);
+    });
+
     this.notify();
     return loteCriado;
   }
@@ -906,6 +981,12 @@ class ProductRepository {
     };
 
     await dbPut(STORES.VENCIMENTOS, this._vencimentos[index]);
+
+    // Real-time update in Cloud
+    cloudSyncService.pushLoteToCloud(this._vencimentos[index]).catch((e) => {
+      console.warn('Erro ao atualizar lote na nuvem:', e);
+    });
+
     this.notify();
     return this._vencimentos[index];
   }
@@ -923,6 +1004,11 @@ class ProductRepository {
     };
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
+
+    // Real-time delete from Cloud
+    cloudSyncService.deleteLoteFromCloud(id).catch((e) => {
+      console.warn('Erro ao deletar lote da nuvem:', e);
+    });
 
     this.notify();
     return true;
@@ -948,9 +1034,14 @@ class ProductRepository {
       ...this._metadados,
       total_saeou060: this._saeou060.length,
       ultima_atualizacao_saeou060: new Date().toLocaleDateString('pt-BR') + ' ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      saeou060_version: Date.now(),
     };
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
+
+    cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
+      console.warn('Erro ao sincronizar SAEOU060 na nuvem:', e);
+    });
 
     this.notify();
   }
@@ -970,9 +1061,14 @@ class ProductRepository {
       ...this._metadados,
       total_saeou060: this._saeou060.length,
       ultima_atualizacao_saeou060: new Date().toLocaleDateString('pt-BR') + ' ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      saeou060_version: Date.now(),
     };
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
+
+    cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
+      console.warn('Erro ao sincronizar SAEOU060 na nuvem:', e);
+    });
 
     this.notify();
   }
@@ -1318,6 +1414,9 @@ class ProductRepository {
       this._historico = this._historico.slice(0, 30);
     }
     await dbPutAll(STORES.HISTORICO_IMPORTACOES, this._historico, true);
+    cloudSyncService.pushHistoricoToCloud(resumo).catch((e) => {
+      console.warn('Erro ao salvar histórico na nuvem:', e);
+    });
     this.notify();
   }
 
@@ -1328,6 +1427,10 @@ class ProductRepository {
   }
 
   // --- METADADOS ---
+
+  public async syncWithCloud(): Promise<boolean> {
+    return cloudSyncService.pullCatalogoFromCloud();
+  }
 
   public getMetadados(): MetadadosBase {
     return this._metadados;

@@ -199,6 +199,9 @@ export interface MetadadosBase {
   total_vencimentos: number;
   total_eans: number;
   total_saeou060?: number;
+  catalogo_version?: number;
+  vinculos_version?: number;
+  saeou060_version?: number;
 }
 
 export interface ProjecaoVencimento {
