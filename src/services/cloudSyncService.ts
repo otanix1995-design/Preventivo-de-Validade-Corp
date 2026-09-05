@@ -38,7 +38,32 @@ export interface SyncStatusInfo {
   isOnline: boolean;
 }
 
-type SyncListener = (info: SyncStatusInfo) => void;
+export type SyncListener = (info: SyncStatusInfo) => void;
+
+/**
+ * Strips or converts undefined values to null or valid JSON types
+ * to ensure Firestore setDoc/updateDoc never fails on optional fields.
+ */
+export function cleanForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) {
+    return null as unknown as T;
+  }
+  if (Array.isArray(data)) {
+    return data.map((item) => cleanForFirestore(item)) as unknown as T;
+  }
+  if (typeof data === 'object') {
+    const res: Record<string, any> = {};
+    for (const [key, value] of Object.entries(data as Record<string, any>)) {
+      if (value !== undefined) {
+        res[key] = cleanForFirestore(value);
+      } else {
+        res[key] = null;
+      }
+    }
+    return res as T;
+  }
+  return data;
+}
 
 class CloudSyncService {
   private _status: SyncStatusInfo = {
@@ -73,6 +98,13 @@ class CloudSyncService {
       window.addEventListener('offline', () => {
         this.updateStatus({ isOnline: false, state: 'offline', message: 'Sem conexão com a internet' });
       });
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            this.pullLatestIfOutdated();
+          }
+        });
+      }
     }
   }
 
@@ -325,33 +357,62 @@ class CloudSyncService {
 
       let msg = 'Conectado à nuvem. Dados já estão em dia.';
 
-      // If remote has products and is newer or local is empty
-      if (remoteTotal > 0 && (remoteCatVersion > this._localCatalogoVersion || localProdutos.length === 0)) {
+      // Determine catalog sync direction:
+      const localCatVersion = localMeta.catalogo_version || this._localCatalogoVersion || 0;
+
+      if (remoteTotal > 0 && (remoteCatVersion > localCatVersion || localProdutos.length === 0)) {
+        // Cloud has a newer catalog or local is empty: PULL from cloud
         await this.pullCatalogoFromCloud(remoteCatVersion);
         msg = `Catálogo atualizado da nuvem (${remoteTotal} produtos).`;
-      } else if (localProdutos.length > 0 && remoteTotal === 0) {
-        // Local has products but cloud is empty: push local
+      } else if (localProdutos.length > 0 && (remoteTotal === 0 || localCatVersion > remoteCatVersion)) {
+        // Local has products and is newer than cloud (or cloud is empty): PUSH to cloud
         await this.pushCatalogoToCloud(localProdutos, localMeta);
-        msg = `Catálogo local enviado para a nuvem (${localProdutos.length} produtos).`;
+        msg = `Catálogo local (${localProdutos.length} produtos) enviado para a nuvem.`;
+      } else if (localProdutos.length > 0 && remoteTotal > 0) {
+        // Versions match or both present: ensure catalog in cloud is synchronized
+        if (remoteCatVersion >= localCatVersion) {
+          await this.pullCatalogoFromCloud(remoteCatVersion);
+          msg = `Catálogo atualizado da nuvem (${remoteTotal} produtos).`;
+        } else {
+          await this.pushCatalogoToCloud(localProdutos, localMeta);
+          msg = `Catálogo local (${localProdutos.length} produtos) sincronizado com a nuvem.`;
+        }
       }
 
       // Sync vínculos
       const remoteVincVersion = data.vinculos_version || 0;
-      if (remoteVincVersion > this._localVinculosVersion || (localVinculos.length === 0 && (data.total_eans || 0) > 0)) {
+      const localVincVersion = localMeta.vinculos_version || this._localVinculosVersion || 0;
+      if (remoteVincVersion > localVincVersion || (localVinculos.length === 0 && (data.total_eans || 0) > 0)) {
         await this.pullVinculosFromCloud(remoteVincVersion);
-      } else if (localVinculos.length > 0 && (data.total_eans || 0) === 0) {
+      } else if (localVinculos.length > 0 && ((data.total_eans || 0) === 0 || localVincVersion > remoteVincVersion)) {
         await this.pushVinculosToCloud(localVinculos);
       }
 
       // Sync SAEOU060
       const remoteSaeouVersion = data.saeou060_version || 0;
-      if (remoteSaeouVersion > this._localSaeou060Version || (localSaeou.length === 0 && (data.total_saeou060 || 0) > 0)) {
+      const localSaeouVersion = localMeta.saeou060_version || this._localSaeou060Version || 0;
+      if (remoteSaeouVersion > localSaeouVersion || (localSaeou.length === 0 && (data.total_saeou060 || 0) > 0)) {
         await this.pullSaeou060FromCloud(remoteSaeouVersion);
-      } else if (localSaeou.length > 0 && (data.total_saeou060 || 0) === 0) {
+      } else if (localSaeou.length > 0 && ((data.total_saeou060 || 0) === 0 || localSaeouVersion > remoteSaeouVersion)) {
         await this.pushSaeou060ToCloud(localSaeou);
       }
 
-      // Sync vencimentos: push local lots
+      // Sync vencimentos: bidirectional merge
+      try {
+        const remoteLotesSnap = await getDocs(collection(db, 'vencimentos'));
+        const remoteLotes: LoteVencimento[] = [];
+        remoteLotesSnap.forEach((d) => {
+          const l = d.data() as LoteVencimento;
+          if (l && l.id) remoteLotes.push(l);
+        });
+
+        if (remoteLotes.length > 0 && this._onRemoteVencimentosReceived) {
+          this._onRemoteVencimentosReceived(remoteLotes);
+        }
+      } catch (e) {
+        console.warn('Could not read remote lotes:', e);
+      }
+
       if (localVencimentos.length > 0) {
         await this.pushAllLotesToCloud(localVencimentos);
       }
@@ -500,8 +561,8 @@ class CloudSyncService {
   // ==========================================
 
   /**
-   * Pushes the entire SMGOI013 catalog to Firestore in clean chunks of 600 items.
-   * Total write operations for 11,600 products: ~20 writes (well within quotas).
+   * Pushes the entire SMGOI013 catalog to Firestore in clean chunks of 300 items.
+   * Chunks are sanitized and null-safe to guarantee Firestore compatibility.
    */
   public async pushCatalogoToCloud(
     produtos: ProdutoSMG[],
@@ -512,8 +573,8 @@ class CloudSyncService {
 
     try {
       await ensureAuth();
-      const CHUNK_SIZE = 600;
-      const totalChunks = Math.ceil(produtos.length / CHUNK_SIZE);
+      const CHUNK_SIZE = 300;
+      const totalChunks = Math.max(1, Math.ceil(produtos.length / CHUNK_SIZE));
       const newVersion = Date.now();
 
       onProgress?.(10, `Preparando envio em ${totalChunks} lotes para a nuvem...`);
@@ -523,47 +584,49 @@ class CloudSyncService {
         const chunkItems = produtos.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         const chunkDocRef = doc(db, 'catalogo_chunks', `chunk_${String(i).padStart(3, '0')}`);
 
-        // Strip heavy run-time precomputed strings to save bandwidth
-        const cleanItems = chunkItems.map((p) => ({
-          codigo_interno: p.codigo_interno,
-          digito: p.digito,
-          descricao: p.descricao,
-          embalagem: p.embalagem,
-          estoque_emb1: p.estoque_emb1,
-          estoque_emb9: p.estoque_emb9,
-          estoque_total: p.estoque_total,
-          vendas_qtde_30d: p.vendas_qtde_30d,
-          vendas_preco: p.vendas_preco,
-          data_ultima_entrada: p.data_ultima_entrada,
-          qtde_ultima_entrada: p.qtde_ultima_entrada,
-          dias_sem_venda: p.dias_sem_venda,
-          idade: p.idade,
-          qtde_ideal: p.qtde_ideal,
-          comprador_filial: p.comprador_filial,
-          comprador_matriz: p.comprador_matriz,
-          setor_fisico: p.setor_fisico,
-          setor_balanco: p.setor_balanco,
-          pedidos_pendentes: p.pedidos_pendentes,
-          codigo_exibicao: p.codigo_exibicao,
-          eans: p.eans || [],
-          is_demo: false,
-        }));
+        // Strip heavy run-time precomputed strings to save bandwidth and sanitize
+        const cleanItems = chunkItems.map((p) =>
+          cleanForFirestore({
+            codigo_interno: p.codigo_interno || '',
+            digito: p.digito || '',
+            descricao: p.descricao || '',
+            embalagem: p.embalagem || '',
+            estoque_emb1: p.estoque_emb1 ?? 0,
+            estoque_emb9: p.estoque_emb9 ?? 0,
+            estoque_total: p.estoque_total ?? 0,
+            vendas_qtde_30d: p.vendas_qtde_30d ?? 0,
+            vendas_preco: p.vendas_preco ?? null,
+            data_ultima_entrada: p.data_ultima_entrada ?? null,
+            qtde_ultima_entrada: p.qtde_ultima_entrada ?? null,
+            dias_sem_venda: p.dias_sem_venda ?? null,
+            idade: p.idade ?? null,
+            qtde_ideal: p.qtde_ideal ?? null,
+            comprador_filial: p.comprador_filial ?? null,
+            comprador_matriz: p.comprador_matriz ?? null,
+            setor_fisico: p.setor_fisico ?? null,
+            setor_balanco: p.setor_balanco ?? null,
+            pedidos_pendentes: p.pedidos_pendentes ?? null,
+            codigo_exibicao: p.codigo_exibicao || `${p.codigo_interno}${p.digito ? '-' + p.digito : ''}`,
+            eans: p.eans || [],
+            is_demo: false,
+          })
+        );
 
-        await setDoc(chunkDocRef, {
+        await setDoc(chunkDocRef, cleanForFirestore({
           index: i,
           total: totalChunks,
           count: cleanItems.length,
           items: cleanItems,
           updatedAt: new Date().toISOString(),
-        });
+        }));
 
         const pct = Math.round(10 + ((i + 1) / totalChunks) * 80);
         onProgress?.(pct, `Sincronizando lote ${i + 1} de ${totalChunks} na nuvem...`);
       }
 
-      // Update metadata version document to signal other connected devices
+      // Update metadata version document to signal all other connected devices
       const metaDocRef = doc(db, 'metadados', 'geral');
-      await setDoc(metaDocRef, {
+      await setDoc(metaDocRef, cleanForFirestore({
         filial_numero: meta.filial_numero || '172',
         filial_nome: meta.filial_nome || 'CASCAVEL',
         status_base: 'SMGOI013',
@@ -572,14 +635,14 @@ class CloudSyncService {
         catalogo_version: newVersion,
         ultima_atualizacao_smgoi013: meta.ultima_atualizacao_smgoi013 || new Date().toLocaleString('pt-BR'),
         updatedAt: new Date().toISOString(),
-      }, { merge: true });
+      }), { merge: true });
 
       this._localCatalogoVersion = newVersion;
 
       this.updateStatus({
         state: 'connected',
         lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-        message: 'Catálogo sincronizado com a nuvem',
+        message: `Catálogo sincronizado na nuvem (${produtos.length} produtos)`,
       });
       onProgress?.(100, 'Catálogo 100% sincronizado com a nuvem!');
       return true;
@@ -593,25 +656,26 @@ class CloudSyncService {
   public async pushVinculosToCloud(vinculos: VinculoEan[]): Promise<boolean> {
     try {
       await ensureAuth();
-      const CHUNK_SIZE = 1000;
+      const CHUNK_SIZE = 500;
       const totalChunks = Math.max(1, Math.ceil(vinculos.length / CHUNK_SIZE));
       const newVersion = Date.now();
 
       for (let i = 0; i < totalChunks; i++) {
         const chunkItems = vinculos.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         const chunkDocRef = doc(db, 'vinculos_chunks', `chunk_${String(i).padStart(3, '0')}`);
-        await setDoc(chunkDocRef, {
+        await setDoc(chunkDocRef, cleanForFirestore({
           index: i,
           total: totalChunks,
           items: chunkItems,
           updatedAt: new Date().toISOString(),
-        });
+        }));
       }
 
-      await setDoc(doc(db, 'metadados', 'geral'), {
+      await setDoc(doc(db, 'metadados', 'geral'), cleanForFirestore({
         total_eans: vinculos.length,
         vinculos_version: newVersion,
-      }, { merge: true });
+        updatedAt: new Date().toISOString(),
+      }), { merge: true });
 
       this._localVinculosVersion = newVersion;
       return true;
@@ -624,25 +688,26 @@ class CloudSyncService {
   public async pushSaeou060ToCloud(registros: RegistroSaeou060[]): Promise<boolean> {
     try {
       await ensureAuth();
-      const CHUNK_SIZE = 500;
+      const CHUNK_SIZE = 400;
       const totalChunks = Math.max(1, Math.ceil(registros.length / CHUNK_SIZE));
       const newVersion = Date.now();
 
       for (let i = 0; i < totalChunks; i++) {
         const chunkItems = registros.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         const chunkDocRef = doc(db, 'saeou060_chunks', `chunk_${String(i).padStart(3, '0')}`);
-        await setDoc(chunkDocRef, {
+        await setDoc(chunkDocRef, cleanForFirestore({
           index: i,
           total: totalChunks,
           items: chunkItems,
           updatedAt: new Date().toISOString(),
-        });
+        }));
       }
 
-      await setDoc(doc(db, 'metadados', 'geral'), {
+      await setDoc(doc(db, 'metadados', 'geral'), cleanForFirestore({
         total_saeou060: registros.length,
         saeou060_version: newVersion,
-      }, { merge: true });
+        updatedAt: new Date().toISOString(),
+      }), { merge: true });
 
       this._localSaeou060Version = newVersion;
       return true;
@@ -660,7 +725,7 @@ class CloudSyncService {
     try {
       await ensureAuth();
       const loteDocRef = doc(db, 'vencimentos', lote.id);
-      await setDoc(loteDocRef, lote);
+      await setDoc(loteDocRef, cleanForFirestore(lote));
     } catch (err) {
       console.warn('[CloudSync] Error saving lote to cloud:', err);
     }
@@ -676,7 +741,7 @@ class CloudSyncService {
         const slice = lotes.slice(i, i + batchSize);
         slice.forEach((lote) => {
           const docRef = doc(db, 'vencimentos', lote.id);
-          batch.set(docRef, lote);
+          batch.set(docRef, cleanForFirestore(lote));
         });
         await batch.commit();
       }
@@ -699,7 +764,7 @@ class CloudSyncService {
     try {
       await ensureAuth();
       const histDocRef = doc(db, 'historico_importacoes', hist.id || `hist-${Date.now()}`);
-      await setDoc(histDocRef, hist);
+      await setDoc(histDocRef, cleanForFirestore(hist));
     } catch (err) {
       console.warn('[CloudSync] Error saving historico to cloud:', err);
     }

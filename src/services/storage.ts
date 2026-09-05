@@ -33,8 +33,11 @@ export function getProdutos(): ProdutoSMG[] {
   return productRepository.getAllProducts();
 }
 
-export function saveProdutos(novosProdutos: ProdutoSMG[]): Promise<void> {
-  return productRepository.saveProducts(novosProdutos);
+export function saveProdutos(
+  novosProdutos: ProdutoSMG[],
+  onProgress?: (pct: number, msg: string) => void
+): Promise<boolean> {
+  return productRepository.saveProducts(novosProdutos, onProgress);
 }
 
 export function getProdutoByCodigoInterno(codigo: string): ProdutoSMG | undefined {

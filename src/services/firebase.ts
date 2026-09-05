@@ -1,6 +1,6 @@
 import { FirebaseApp, getApps, initializeApp } from 'firebase/app';
 import { Auth, getAuth, onAuthStateChanged, signInAnonymously, User } from 'firebase/auth';
-import { Firestore, getFirestore } from 'firebase/firestore';
+import { Firestore, getFirestore, initializeFirestore } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 let app: FirebaseApp;
@@ -15,11 +15,21 @@ if (!getApps().length) {
 
 auth = getAuth(app);
 
-// Use custom firestoreDatabaseId if configured in project
-if (firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== '(default)') {
-  db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-} else {
-  db = getFirestore(app);
+// Initialize Firestore with ignoreUndefinedProperties: true to prevent errors with optional fields
+try {
+  const dbSettings = { ignoreUndefinedProperties: true };
+  if (firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== '(default)') {
+    db = initializeFirestore(app, dbSettings, firebaseConfig.firestoreDatabaseId);
+  } else {
+    db = initializeFirestore(app, dbSettings);
+  }
+} catch {
+  // If already initialized in hot-reload, fallback to getFirestore
+  if (firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== '(default)') {
+    db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  } else {
+    db = getFirestore(app);
+  }
 }
 
 let authPromise: Promise<User | null> | null = null;

@@ -223,11 +223,13 @@ class ProductRepository {
         });
 
         // Seed cloud sync service with local catalog version timestamp
-        const localVersion = this._produtos.length > 0 ? (this._metadados.catalogo_version || 1) : 0;
+        const localCatVersion = this._produtos.length > 0 ? (this._metadados.catalogo_version || 1) : 0;
+        const localVincVersion = this._vinculos.length > 0 ? (this._metadados.vinculos_version || 1) : 0;
+        const localSaeouVersion = this._saeou060.length > 0 ? (this._metadados.saeou060_version || 1) : 0;
         cloudSyncService.setLocalVersions({
-          catalogoVersion: localVersion,
-          vinculosVersion: this._vinculos.length > 0 ? 1 : 0,
-          saeou060Version: this._saeou060.length > 0 ? 1 : 0,
+          catalogoVersion: localCatVersion,
+          vinculosVersion: localVincVersion,
+          saeou060Version: localSaeouVersion,
         });
 
         // Initialize background cloud sync (subscribes to onSnapshot real-time events)
@@ -733,7 +735,10 @@ class ProductRepository {
   /**
    * Persists products to IndexedDB and rebuilds indices.
    */
-  public async saveProducts(novosProdutos: ProdutoSMG[]): Promise<void> {
+  public async saveProducts(
+    novosProdutos: ProdutoSMG[],
+    onProgress?: (pct: number, msg: string) => void
+  ): Promise<boolean> {
     this._produtos = novosProdutos;
     this.rebuildIndices();
 
@@ -741,23 +746,31 @@ class ProductRepository {
     await dbPutAll(STORES.PRODUTOS, novosProdutos, true);
     await dbPutAll(STORES.VINCULOS_EAN, this._vinculos, true);
 
+    const newVersion = Date.now();
     const meta = {
       ...this._metadados,
       status_base: novosProdutos.length > 0 ? ('SMGOI013' as const) : ('VAZIA' as const),
       total_produtos: novosProdutos.length,
       total_eans: this._vinculos.length,
       ultima_atualizacao_smgoi013: new Date().toLocaleString('pt-BR'),
-      catalogo_version: Date.now(),
+      catalogo_version: newVersion,
     };
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    // Push catalog to Cloud (Firestore) in background
-    cloudSyncService.pushCatalogoToCloud(novosProdutos, meta).catch((e) => {
+    // Track locally
+    cloudSyncService.setLocalVersions({ catalogoVersion: newVersion });
+
+    // Push catalog to Cloud (Firestore)
+    let pushed = false;
+    try {
+      pushed = await cloudSyncService.pushCatalogoToCloud(novosProdutos, meta, onProgress);
+    } catch (e) {
       console.warn('Erro ao sincronizar catálogo na nuvem:', e);
-    });
+    }
 
     this.notify();
+    return pushed;
   }
 
   // --- VINCULOS EAN ---

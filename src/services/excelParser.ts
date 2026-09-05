@@ -597,10 +597,13 @@ export async function processarSMGOI013(
     throw new Error('Falha na importação: Nenhum produto válido foi identificado na planilha SMGOI013.');
   }
 
-  onProgress?.(93, 'Gravando banco de dados local com segurança...');
-  await new Promise((r) => setTimeout(r, 100));
+  onProgress?.(92, 'Gravando base local e sincronizando com a Nuvem...');
+  await new Promise((r) => setTimeout(r, 80));
 
-  await saveProdutos(updatedProdutos);
+  await saveProdutos(updatedProdutos, (cloudPct, cloudMsg) => {
+    const combinedPct = Math.min(98, Math.round(92 + (cloudPct * 0.06)));
+    onProgress?.(combinedPct, cloudMsg || 'Enviando para a Nuvem...');
+  });
 
   const resumo: ResumoImportacao = {
     id: `imp-smg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
