@@ -764,7 +764,7 @@ export const Saeou060View: React.FC<Saeou060ViewProps> = ({
             <input
               id={fileInputId}
               type="file"
-              accept=".xlsx,.xls,.csv"
+              accept=".xlsx,.xls,.csv,.pdf"
               onChange={handleFileUpload}
               className="hidden"
               disabled={isImporting}

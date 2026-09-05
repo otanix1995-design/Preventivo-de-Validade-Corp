@@ -12,6 +12,7 @@
 import * as XLSX from 'xlsx';
 import { RegistroSaeou060, ResumoImportacao, StatusSaeou060 } from '../types';
 import { normalizeCodigoSMGO } from './codeParser';
+import { pdfToTableRows } from './pdfParser';
 import { productRepository } from './productRepository';
 import { addDivergencia } from './storage';
 
@@ -182,6 +183,7 @@ interface SAEOU060Columns {
   embalagemKey?: string;
   dataVencimentoKey?: string;
   quantidadeKey?: string;
+  estoqueLojaKey?: string;
   lojaKey?: string;
   dataMovimentoKey?: string;
   dataCadastroKey?: string;
@@ -200,6 +202,7 @@ function identifySAEOU060Headers(sampleRow: Record<string, any>, allRows?: Recor
   let embalagemKey: string | undefined;
   let dataVencimentoKey: string | undefined;
   let quantidadeKey: string | undefined;
+  let estoqueLojaKey: string | undefined;
   let lojaKey: string | undefined;
   let dataMovimentoKey: string | undefined;
   let dataCadastroKey: string | undefined;
@@ -260,19 +263,114 @@ function identifySAEOU060Headers(sampleRow: Record<string, any>, allRows?: Recor
     }
   }
 
-  // 4. Identify Quantidade
+  // 4a. Identify Estoque Loja / Total Column (if present)
   for (const key of keys) {
+    if (key === codigoKey || key === digitoKey || key === dataVencimentoKey) continue;
     const norm = normalizeHeader(key);
     if (
-      norm.includes('QUANT') ||
-      norm.includes('QTDE') ||
-      norm.includes('QTD') ||
-      norm.includes('UNIDADES') ||
-      norm === 'SALDO' ||
-      norm === 'ESTOQUE'
+      norm.includes('ESTOQUEDISPONIVEL') ||
+      norm.includes('ESTOQUETOTAL') ||
+      norm.includes('ESTOQUEATUAL') ||
+      norm.includes('ESTOQUELOJA') ||
+      norm.includes('SALDODISPONIVEL') ||
+      norm.includes('SALDOATUAL') ||
+      norm.includes('SALDOESTOQUE') ||
+      norm === 'ESTOQUEDISP'
+    ) {
+      estoqueLojaKey = key;
+      break;
+    }
+  }
+
+  // 4b. Identify Quantidade Cadastrada / Vencendo (Priority 1: Expiry specific)
+  for (const key of keys) {
+    if (key === codigoKey || key === digitoKey || key === dataVencimentoKey || key === estoqueLojaKey) continue;
+    const norm = normalizeHeader(key);
+    if (
+      norm.includes('QTDECADASTRADA') ||
+      norm.includes('QUANTIDADECADASTRADA') ||
+      norm.includes('QTDEVENCIMENTO') ||
+      norm.includes('QUANTIDADEVENCIMENTO') ||
+      norm.includes('QTDEVENC') ||
+      norm.includes('QTDVENC') ||
+      norm.includes('QTDVCTO') ||
+      norm.includes('QTDEVCTO') ||
+      norm.includes('QTDEAPONTADA') ||
+      norm.includes('QUANTIDADEAPONTADA') ||
+      norm.includes('QTDAPONTADA') ||
+      norm.includes('QTDELOTE') ||
+      norm.includes('QUANTIDADELOTE') ||
+      norm.includes('QTDLOTE') ||
+      norm.includes('QTDEINFORMADA') ||
+      norm.includes('QUANTIDADEINFORMADA') ||
+      norm.includes('QTDEVAL') ||
+      norm.includes('QTDEVALIDADE') ||
+      norm.includes('QUANTIDADEVALIDADE') ||
+      norm.includes('QTDEPREVENTIVO') ||
+      norm.includes('QUANTIDADEPREVENTIVO') ||
+      norm.includes('ESTOQUECADASTRADO') ||
+      norm.includes('ESTOQUEVENCENDO') ||
+      norm.includes('ESTOQUEVENCIMENTO')
     ) {
       quantidadeKey = key;
       break;
+    }
+  }
+
+  // 4c. Identify Quantidade (Priority 2: Generic Quantity, excluding store stock terms)
+  if (!quantidadeKey) {
+    for (const key of keys) {
+      if (key === codigoKey || key === digitoKey || key === dataVencimentoKey || key === estoqueLojaKey) continue;
+      const norm = normalizeHeader(key);
+      const isTotalStock =
+        norm.includes('DISPONIVEL') ||
+        norm.includes('TOTAL') ||
+        norm.includes('ATUAL') ||
+        norm.includes('LOJA') ||
+        norm.includes('FILIAL') ||
+        norm.includes('SISTEMA') ||
+        norm.includes('FISICO') ||
+        norm.includes('GERAL') ||
+        norm.includes('MINIMO') ||
+        norm.includes('MAXIMO');
+
+      if (!isTotalStock) {
+        if (
+          norm.includes('QUANT') ||
+          norm.includes('QTDE') ||
+          norm.includes('QTD') ||
+          norm.includes('UNIDADES') ||
+          norm === 'VOLUMES' ||
+          norm === 'ITENS'
+        ) {
+          quantidadeKey = key;
+          break;
+        }
+      }
+    }
+  }
+
+  // 4d. Identify Quantidade (Priority 3: Fallback only if no quantity column was identified)
+  if (!quantidadeKey) {
+    for (const key of keys) {
+      if (key === codigoKey || key === digitoKey || key === dataVencimentoKey || key === estoqueLojaKey) continue;
+      const norm = normalizeHeader(key);
+      if (norm === 'SALDO' || norm === 'ESTOQUE') {
+        quantidadeKey = key;
+        break;
+      }
+    }
+  }
+
+  // If estoqueLojaKey was not set yet, check if there's an unused ESTOQUE or SALDO column
+  if (!estoqueLojaKey) {
+    for (const key of keys) {
+      if (key === codigoKey || key === digitoKey || key === dataVencimentoKey || key === quantidadeKey) continue;
+      const norm = normalizeHeader(key);
+      if (norm.includes('ESTOQUE') || norm.includes('SALDO')) {
+        estoqueLojaKey = key;
+        break;
+      }
     }
   }
 
@@ -391,6 +489,7 @@ function identifySAEOU060Headers(sampleRow: Record<string, any>, allRows?: Recor
     embalagemKey,
     dataVencimentoKey,
     quantidadeKey,
+    estoqueLojaKey,
     lojaKey,
     dataMovimentoKey,
     dataCadastroKey,
@@ -415,32 +514,43 @@ export async function processarSAEOU060(
   await new Promise((r) => setTimeout(r, 80));
 
   const arrayBuffer = await file.arrayBuffer();
-  const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
-
-  onProgress?.(20, 'Localizando planilha de dados...');
-  await new Promise((r) => setTimeout(r, 60));
-
-  if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-    throw new Error('Nenhuma planilha encontrada no arquivo.');
-  }
-
-  let bestSheetName = workbook.SheetNames[0];
-  let maxRows = 0;
+  const isPdf = file.name.toLowerCase().endsWith('.pdf');
   let best2DRows: any[][] = [];
 
-  for (const sheetName of workbook.SheetNames) {
-    const ws = workbook.Sheets[sheetName];
-    if (!ws) continue;
-    const raw2D: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-    if (raw2D.length > maxRows) {
-      maxRows = raw2D.length;
-      bestSheetName = sheetName;
-      best2DRows = raw2D;
+  if (isPdf) {
+    onProgress?.(15, 'Lendo relatório PDF de vencimentos...');
+    await new Promise((r) => setTimeout(r, 60));
+    best2DRows = await pdfToTableRows(arrayBuffer);
+    if (best2DRows.length === 0) {
+      throw new Error('Nenhum dado tabular de vencimentos foi identificado dentro do arquivo PDF.');
     }
-  }
+  } else {
+    onProgress?.(20, 'Localizando planilha de dados...');
+    await new Promise((r) => setTimeout(r, 60));
 
-  if (best2DRows.length === 0) {
-    throw new Error('A planilha selecionada está vazia.');
+    const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+
+    if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
+      throw new Error('Nenhuma planilha encontrada no arquivo.');
+    }
+
+    let bestSheetName = workbook.SheetNames[0];
+    let maxRows = 0;
+
+    for (const sheetName of workbook.SheetNames) {
+      const ws = workbook.Sheets[sheetName];
+      if (!ws) continue;
+      const raw2D: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+      if (raw2D.length > maxRows) {
+        maxRows = raw2D.length;
+        bestSheetName = sheetName;
+        best2DRows = raw2D;
+      }
+    }
+
+    if (best2DRows.length === 0) {
+      throw new Error('A planilha selecionada está vazia.');
+    }
   }
 
   onProgress?.(35, 'Identificando cabeçalhos do SAEOU060...');
@@ -640,6 +750,7 @@ export async function processarSAEOU060(
       data_vencimento: parsedVcto?.iso,
       data_vencimento_exibicao: parsedVcto?.display || (rawDataVcto ? String(rawDataVcto).trim() : ''),
       quantidade,
+      estoque_loja: cols.estoqueLojaKey && row[cols.estoqueLojaKey] !== undefined ? parseNumberSafe(row[cols.estoqueLojaKey]) : undefined,
       loja: rawLoja ? String(rawLoja).trim() : undefined,
       data_movimento: parsedDataMov?.display || (rawDataMov ? String(rawDataMov).trim() : (parsedDataCad?.display || dataImportacaoStr)),
       data_cadastro: parsedDataCad?.display || (rawDataCad ? String(rawDataCad).trim() : undefined),

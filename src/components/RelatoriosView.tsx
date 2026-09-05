@@ -153,7 +153,7 @@ export const RelatoriosView: React.FC<RelatoriosViewProps> = ({
 
           <div className="pt-2 flex items-center justify-between flex-wrap gap-2 border-t border-orange-200/80">
             <span className="text-[11px] text-orange-900 font-bold">
-              Estrutura: CÓDIGO | DIG | DESCRIÇÃO | EMBALAGEM | COMPRADOR | EMB1 | EMB9 | VENCIMENTO | PRECO
+              Estrutura: CÓDIGO | DIG | DESCRIÇÃO | EMBALAGEM | COMPRADOR | QTD. VENC. | ESTOQUE LOJA | VENCIMENTO | PREÇO
             </span>
 
             <button

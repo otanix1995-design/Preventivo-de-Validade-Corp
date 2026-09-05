@@ -1,7 +1,7 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { LoteVencimento, ProdutoSMG, RegistroSaeou060 } from '../types';
-import { isProdutoPesavel } from './codeParser';
+import { isProdutoPesavel, parseEmbalagem } from './codeParser';
 import { productRepository } from './productRepository';
 import { calcularProjecaoVencimento, formatarDataBR } from './projection';
 import { getProdutos, getVencimentos } from './storage';
@@ -12,6 +12,7 @@ export interface PreventivoItem {
   descricao: string;
   embalagem: string;
   comprador: string;
+  quantidadeCadastrada?: number; // Qtd do lote que está vencendo (apontada/cadastrada)
   emb1: number | string;
   emb9: number | string;
   vencimento: string; // DD/MM/YYYY or YYYY-MM-DD
@@ -30,6 +31,41 @@ export interface PreventivoPdfOptions {
   filtroPromotor?: string;
   sourceType?: 'TODOS' | 'VENCIMENTOS' | 'SAEOU060';
   customItems?: PreventivoItem[];
+}
+
+/**
+ * Formata a quantidade cadastrada/apontada do lote que está vencendo.
+ * Mostra as unidades exatas e a equivalência em caixas quando aplicável.
+ */
+export function formatarQtdCadastradaPdf(
+  qtd?: number | null,
+  embalagem?: string | null,
+  unidadeMedida?: string | null
+): string {
+  if (qtd === undefined || qtd === null || isNaN(qtd)) return '-';
+  const num = Math.round(qtd);
+  if (num <= 0) return '0 UN';
+
+  const isPeso =
+    (unidadeMedida && unidadeMedida.trim().toUpperCase() === 'KG') ||
+    isProdutoPesavel(embalagem) ||
+    /^(KG|QUILO|KILO|PESAVEL|PESO)\b/i.test((embalagem || '').trim());
+
+  if (isPeso) {
+    return `${num} KG`;
+  }
+
+  const embData = parseEmbalagem(embalagem || '');
+  if (embData.fator && embData.fator > 1) {
+    const cx = Math.floor(num / embData.fator);
+    const un = num % embData.fator;
+    if (cx > 0 && un > 0) {
+      return `${num} UN (${cx}cx+${un})`;
+    } else if (cx > 0) {
+      return `${num} UN (${cx}cx)`;
+    }
+  }
+  return `${num} UN`;
 }
 
 /**
@@ -160,6 +196,7 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
             descricao: (prod?.descricao || reg.descricao || '').toUpperCase(),
             embalagem: reg.embalagem || prod?.embalagem || 'UN',
             comprador: compradorStr,
+            quantidadeCadastrada: reg.quantidade,
             emb1: prod?.estoque_emb1 ?? 0,
             emb9: prod?.estoque_emb9 ?? 0,
             vencimento: formatarDataBR(reg.data_vencimento),
@@ -187,6 +224,7 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
           descricao: (lote.descricao_produto || prod?.descricao || '').toUpperCase(),
           embalagem: lote.embalagem || prod?.embalagem || 'UN',
           comprador: compradorStr,
+          quantidadeCadastrada: lote.quantidade_total_unidades,
           emb1: prod?.estoque_emb1 ?? 0,
           emb9: prod?.estoque_emb9 ?? 0,
           vencimento: formatarDataBR(lote.data_validade),
@@ -227,7 +265,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       }
     }
 
-    const estoqueFormatado = formatarEstoquePdf(it.emb1, it.emb9, it.embalagem, it.unidade_medida);
+    const qtdVencFormatada = formatarQtdCadastradaPdf(it.quantidadeCadastrada, it.embalagem, it.unidade_medida);
+    const estoqueLojaFormatado = formatarEstoquePdf(it.emb1, it.emb9, it.embalagem, it.unidade_medida);
 
     return [
       it.codigo,
@@ -235,7 +274,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       it.descricao,
       it.embalagem,
       it.comprador,
-      estoqueFormatado,
+      qtdVencFormatada,
+      estoqueLojaFormatado,
       it.vencimento,
       precoFormatado,
     ];
@@ -276,7 +316,7 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
   doc.text(liderHeader, 289 - 28, bannerY + 4.8, { align: 'center' });
 
   // 2. Cabeçalho das Colunas da Planilha (Amarelo vibrante)
-  // Unifica EMB1 e EMB9 na coluna única ESTOQUE
+  // Separa com máxima clareza: QTD. VENC. (cadastrada no lote) e ESTOQUE LOJA (total disponível)
   const head: any[] = [
     [
       { content: 'CÓDIGO', styles: { halign: 'center', valign: 'middle' } },
@@ -284,7 +324,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       { content: 'DESCRIÇÃO MERCADORIA', styles: { halign: 'left', valign: 'middle' } },
       { content: 'EMBALAGEM', styles: { halign: 'left', valign: 'middle' } },
       { content: 'COMPRADOR', styles: { halign: 'left', valign: 'middle' } },
-      { content: 'ESTOQUE', styles: { halign: 'center', valign: 'middle' } },
+      { content: 'QTD. VENC.', styles: { halign: 'center', valign: 'middle' } },
+      { content: 'ESTOQUE LOJA', styles: { halign: 'center', valign: 'middle' } },
       { content: 'VENCIMENTO', styles: { halign: 'center', valign: 'middle' } },
       { content: 'PRECO', styles: { halign: 'center', valign: 'middle' } },
     ],
@@ -321,12 +362,13 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
     columnStyles: {
       0: { cellWidth: 15, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
       1: { cellWidth: 9, halign: 'center', fontStyle: 'bold' },  // DIG
-      2: { cellWidth: 78, halign: 'left' },                      // DESCRIÇÃO MERCADORIA
-      3: { cellWidth: 36, halign: 'left' },                      // EMBALAGEM
-      4: { cellWidth: 50, halign: 'left' },                      // COMPRADOR
-      5: { cellWidth: 36, halign: 'center' },                    // ESTOQUE (unificado)
-      6: { cellWidth: 31, halign: 'center', fontStyle: 'bold' }, // VENCIMENTO
-      7: { cellWidth: 26, halign: 'center', fontStyle: 'bold' }, // PRECO
+      2: { cellWidth: 68, halign: 'left' },                      // DESCRIÇÃO MERCADORIA
+      3: { cellWidth: 32, halign: 'left' },                      // EMBALAGEM
+      4: { cellWidth: 42, halign: 'left' },                      // COMPRADOR
+      5: { cellWidth: 26, halign: 'center', fontStyle: 'bold' }, // QTD. VENC. (cadastrada)
+      6: { cellWidth: 34, halign: 'center' },                    // ESTOQUE LOJA (total disponível)
+      7: { cellWidth: 29, halign: 'center', fontStyle: 'bold' }, // VENCIMENTO
+      8: { cellWidth: 26, halign: 'center', fontStyle: 'bold' }, // PRECO
     },
     didParseCell: (data) => {
       // Garante borda preta sólida 0.2mm em todas as seções
@@ -340,8 +382,13 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       } else if (data.section === 'body') {
         data.cell.styles.textColor = [0, 0, 0];
 
-        // Destaque de cor na coluna VENCIMENTO (agora índice 6 após a unificação do ESTOQUE)
-        if (data.column.index === 6) {
+        // Coluna 5: QTD. VENC. sempre em negrito
+        if (data.column.index === 5) {
+          data.cell.styles.fontStyle = 'bold';
+        }
+
+        // Destaque de cor na coluna VENCIMENTO (índice 7)
+        if (data.column.index === 7) {
           data.cell.styles.fontStyle = 'bold';
           const dias = rowDiasRestantesMap.get(data.row.index);
 

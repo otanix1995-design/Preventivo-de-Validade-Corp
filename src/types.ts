@@ -111,6 +111,7 @@ export interface RegistroSaeou060 {
   data_vencimento?: string; // YYYY-MM-DD
   data_vencimento_exibicao?: string; // DD/MM/YYYY
   quantidade: number;
+  estoque_loja?: number;
   loja?: string;
   data_movimento?: string; // e.g. "03/09/2026" or "2026-09-03"
   data_cadastro?: string;
