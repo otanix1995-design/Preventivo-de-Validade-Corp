@@ -100,6 +100,19 @@ export function getVencimentosByCodigoInterno(codigo_interno: string): LoteVenci
   return productRepository.getVencimentosByCodigoInterno(codigo_interno);
 }
 
+export function checkDuplicateVencimento(
+  candidate: {
+    codigo_interno?: string | null;
+    digito?: string | null;
+    codigo_exibicao?: string | null;
+    descricao_produto?: string | null;
+    data_validade?: string | Date | null;
+  },
+  ignoreLoteId?: string | null
+) {
+  return productRepository.checkDuplicateVencimento(candidate, ignoreLoteId);
+}
+
 // VINCULOS EAN
 export function getVinculosEan(): VinculoEan[] {
   return productRepository.getVinculos();

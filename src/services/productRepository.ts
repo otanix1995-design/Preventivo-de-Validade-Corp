@@ -17,6 +17,12 @@ import {
   VinculoEan
 } from '../types';
 import { cleanEanCode, extractGramagem, isProdutoPesavel, normalizeCodigoSMGO } from './codeParser';
+import {
+  findDuplicateVencimento,
+  formatDateBr,
+  normalizeDateToIso,
+  normalizeInternalCode
+} from './duplicateValidator';
 import { cloudSyncService } from './cloudSyncService';
 import {
   dbClear,
@@ -53,6 +59,7 @@ class ProductRepository {
   private _saeou060: RegistroSaeou060[] = [];
   private _divergencias: DivergenciaRegistro[] = [];
   private _historico: ResumoImportacao[] = [];
+  private _savingLoteKeys = new Set<string>();
   private _metadados: MetadadosBase = {
     filial_numero: '172',
     filial_nome: 'CASCAVEL',
@@ -948,36 +955,97 @@ class ProductRepository {
     this.notify();
   }
 
+  public checkDuplicateVencimento(
+    candidate: {
+      codigo_interno?: string | null;
+      digito?: string | null;
+      codigo_exibicao?: string | null;
+      descricao_produto?: string | null;
+      data_validade?: string | Date | null;
+    },
+    ignoreLoteId?: string | null
+  ) {
+    return findDuplicateVencimento(candidate, this._vencimentos, ignoreLoteId);
+  }
+
   public async addVencimento(
     novoLote: Omit<LoteVencimento, 'id' | 'criado_em' | 'atualizado_em'>
   ): Promise<LoteVencimento> {
-    const id = `venc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-    const agora = new Date().toISOString();
+    // 1. Obter Código Interno e Dígito
+    const codNorm = normalizeInternalCode(novoLote.codigo_interno);
+    const digNorm = (novoLote.digito || '').trim();
 
-    const loteCriado: LoteVencimento = {
-      ...novoLote,
-      id,
-      criado_em: agora,
-      atualizado_em: agora,
-    };
+    // 2. Normalizar a data
+    const dateIso = normalizeDateToIso(novoLote.data_validade);
+    if (!codNorm || !dateIso) {
+      throw new Error('Código interno e data de validade são obrigatórios.');
+    }
 
-    this._vencimentos.push(loteCriado);
-    await dbPut(STORES.VENCIMENTOS, loteCriado);
+    // 3. Proteger contra duplo clique simultâneo
+    const lockKey = `${codNorm}_${digNorm}_${dateIso}`;
+    if (this._savingLoteKeys.has(lockKey)) {
+      throw new Error(`Gravação em andamento para este produto e data (${dateIso}).`);
+    }
+    this._savingLoteKeys.add(lockKey);
 
-    const meta = {
-      ...this._metadados,
-      total_vencimentos: this._vencimentos.length,
-    };
-    this._metadados = meta;
-    await dbSetMeta('metadados_gerais', meta);
+    try {
+      // 4. Consultar os vencimentos existentes e verificar duplicidade (MESMO PRODUTO + MESMA DATA)
+      const duplicateCheck = findDuplicateVencimento(
+        {
+          codigo_interno: novoLote.codigo_interno,
+          digito: novoLote.digito,
+          codigo_exibicao: novoLote.codigo_exibicao,
+          descricao_produto: novoLote.descricao_produto,
+          data_validade: dateIso,
+        },
+        this._vencimentos
+      );
 
-    // Real-time push to Cloud
-    cloudSyncService.pushLoteToCloud(loteCriado).catch((e) => {
-      console.warn('Erro ao sincronizar lote na nuvem:', e);
-    });
+      // 5. Se já existir -> BLOQUEAR o salvamento (NÃO criar novo registro, não gravar no banco)
+      if (duplicateCheck.isDuplicate && duplicateCheck.existingLote) {
+        const err = new Error(
+          duplicateCheck.message ||
+            `Este produto já possui um vencimento cadastrado para ${formatDateBr(dateIso)}.`
+        );
+        (err as any).isDuplicate = true;
+        (err as any).existingLote = duplicateCheck.existingLote;
+        throw err;
+      }
 
-    this.notify();
-    return loteCriado;
+      // 6. Se não existir -> SALVAR normalmente
+      const id = `venc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      const agora = new Date().toISOString();
+
+      const loteCriado: LoteVencimento = {
+        ...novoLote,
+        codigo_interno: codNorm,
+        digito: digNorm,
+        data_validade: dateIso,
+        id,
+        criado_em: agora,
+        atualizado_em: agora,
+      };
+
+      this._vencimentos.push(loteCriado);
+      await dbPut(STORES.VENCIMENTOS, loteCriado);
+
+      const meta = {
+        ...this._metadados,
+        total_vencimentos: this._vencimentos.length,
+      };
+      this._metadados = meta;
+      await dbSetMeta('metadados_gerais', meta);
+
+      // Real-time push to Cloud
+      cloudSyncService.pushLoteToCloud(loteCriado).catch((e) => {
+        console.warn('Erro ao sincronizar lote na nuvem:', e);
+      });
+
+      this.notify();
+      return loteCriado;
+    } finally {
+      this._savingLoteKeys.delete(lockKey);
+    }
   }
 
   public async updateVencimento(
@@ -987,9 +1055,41 @@ class ProductRepository {
     const index = this._vencimentos.findIndex((l) => l.id === id);
     if (index === -1) return undefined;
 
+    const current = this._vencimentos[index];
+    const newDateIso = updates.data_validade
+      ? normalizeDateToIso(updates.data_validade)
+      : normalizeDateToIso(current.data_validade);
+    const currentDateIso = normalizeDateToIso(current.data_validade);
+
+    // Se estiver alterando a data de validade, verificar duplicidade com outro lote existente
+    if (newDateIso && newDateIso !== currentDateIso) {
+      const duplicateCheck = findDuplicateVencimento(
+        {
+          codigo_interno: updates.codigo_interno || current.codigo_interno,
+          digito: updates.digito || current.digito,
+          codigo_exibicao: updates.codigo_exibicao || current.codigo_exibicao,
+          descricao_produto: updates.descricao_produto || current.descricao_produto,
+          data_validade: newDateIso,
+        },
+        this._vencimentos,
+        id
+      );
+
+      if (duplicateCheck.isDuplicate && duplicateCheck.existingLote) {
+        const err = new Error(
+          duplicateCheck.message ||
+            `Este produto já possui um vencimento cadastrado para ${formatDateBr(newDateIso)}.`
+        );
+        (err as any).isDuplicate = true;
+        (err as any).existingLote = duplicateCheck.existingLote;
+        throw err;
+      }
+    }
+
     this._vencimentos[index] = {
       ...this._vencimentos[index],
       ...updates,
+      data_validade: newDateIso || this._vencimentos[index].data_validade,
       atualizado_em: new Date().toISOString(),
     };
 
@@ -1153,15 +1253,24 @@ class ProductRepository {
 
     // Get product from repository
     const prod = this.getProductByCode(reg.codigo_interno);
-    const dataValidade = customData?.data_validade || reg.data_vencimento || new Date().toISOString().split('T')[0];
+    const rawValidade = customData?.data_validade || reg.data_vencimento;
+    const dataValidade = normalizeDateToIso(rawValidade) || new Date().toISOString().split('T')[0];
     const quantidade = customData?.quantidade_total_unidades ?? reg.quantidade ?? 1;
 
-    // Check for existing duplicate in vencimentos
-    const existingLote = this._vencimentos.find(
-      (v) => v.codigo_interno === reg.codigo_interno && v.data_validade === dataValidade
+    // Check for existing duplicate in vencimentos using unified validator
+    const duplicateCheck = findDuplicateVencimento(
+      {
+        codigo_interno: reg.codigo_interno,
+        digito: reg.digito || prod?.digito,
+        codigo_exibicao: reg.codigo_exibicao,
+        descricao_produto: prod?.descricao || reg.descricao,
+        data_validade: dataValidade,
+      },
+      this._vencimentos
     );
 
-    if (existingLote) {
+    if (duplicateCheck.isDuplicate && duplicateCheck.existingLote) {
+      const existingLote = duplicateCheck.existingLote;
       // Link to existing lote
       reg.status_saeou = 'JA_NO_CONTROLE';
       reg.vencimento_id_vinculado = existingLote.id;
@@ -1242,6 +1351,27 @@ class ProductRepository {
     for (const reg of pendentes) {
       const prod = this.getProductByCode(reg.codigo_interno);
       const dataValidade = reg.data_vencimento || new Date().toISOString().split('T')[0];
+
+      // Check for duplicate in existing and freshly added vencimentos
+      const duplicateCheck = findDuplicateVencimento(
+        {
+          codigo_interno: reg.codigo_interno,
+          digito: reg.digito || prod?.digito,
+          codigo_exibicao: reg.codigo_exibicao,
+          descricao_produto: prod?.descricao || reg.descricao,
+          data_validade: dataValidade,
+        },
+        this._vencimentos
+      );
+
+      if (duplicateCheck.isDuplicate && duplicateCheck.existingLote) {
+        // Link to existing lote without creating duplicate
+        const existingLote = duplicateCheck.existingLote;
+        reg.status_saeou = 'JA_NO_CONTROLE';
+        reg.vencimento_id_vinculado = existingLote.id;
+        reg.adicionado_ao_controle_em = nowStr;
+        continue;
+      }
 
       const novoLote: LoteVencimento = {
         id: `venc-saeou-${Date.now()}-${Math.random().toString(36).substring(2, 6)}-${addedCount}`,

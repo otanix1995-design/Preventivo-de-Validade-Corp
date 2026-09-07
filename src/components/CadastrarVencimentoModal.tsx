@@ -1,12 +1,15 @@
 import {
   AlertCircle,
+  AlertTriangle,
   Boxes,
   Calendar,
   Check,
   DollarSign,
+  Eye,
   Package,
   Pencil,
   Plus,
+  RotateCcw,
   Search,
   Send,
   Sparkles,
@@ -16,8 +19,14 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { parseEmbalagem } from '../services/codeParser';
+import { DuplicateValidationResult } from '../services/duplicateValidator';
 import { calcularProjecaoVencimento, formatarDataBR } from '../services/projection';
-import { addVencimento, getVencimentosByCodigoInterno, updateVencimento } from '../services/storage';
+import {
+  addVencimento,
+  checkDuplicateVencimento,
+  getVencimentosByCodigoInterno,
+  updateVencimento
+} from '../services/storage';
 import { LoteVencimento, ProdutoSMG } from '../types';
 import { StatusBadge } from './StatusBadge';
 
@@ -40,7 +49,13 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
   onChangeProduto,
   onSuccess,
 }) => {
-  const isEditing = Boolean(loteParaEditar);
+  const [activeLoteParaEditar, setActiveLoteParaEditar] = useState<LoteVencimento | null>(
+    loteParaEditar || null
+  );
+  const [isViewingExistingLote, setIsViewingExistingLote] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const isEditing = Boolean(activeLoteParaEditar);
 
   const [dataValidade, setDataValidade] = useState<string>(() => {
     if (loteParaEditar?.data_validade) return loteParaEditar.data_validade;
@@ -77,6 +92,10 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
 
   // Sync state when loteParaEditar or open changes
   useEffect(() => {
+    setActiveLoteParaEditar(loteParaEditar || null);
+    setIsViewingExistingLote(false);
+    setIsSubmitting(false);
+
     if (loteParaEditar) {
       setDataValidade(loteParaEditar.data_validade || '');
       setQuantidadeStr(String(loteParaEditar.quantidade_total_unidades || '12'));
@@ -99,13 +118,59 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
     setErrorMsg(null);
   }, [loteParaEditar, isOpen]);
 
+  // Handler for user switching to view/edit the existing registered lot
+  const handleVerCadastroExistente = (existingLote: LoteVencimento) => {
+    setActiveLoteParaEditar(existingLote);
+    setIsViewingExistingLote(true);
+    setDataValidade(existingLote.data_validade || '');
+    setQuantidadeStr(String(existingLote.quantidade_total_unidades || '12'));
+    setPrecoTrabalhado(existingLote.preco_trabalhado !== undefined ? String(existingLote.preco_trabalhado) : '');
+    setDataPreco(existingLote.data_preco || '');
+    setObservacao(existingLote.observacao || '');
+    setLoteIdentificador(existingLote.lote_identificador || '');
+    setEnviarComprador(Boolean(existingLote.enviar_ao_comprador));
+    setErrorMsg(null);
+  };
+
+  // Handler for user returning to a new lot registration
+  const handleVoltarNovoCadastro = () => {
+    setActiveLoteParaEditar(null);
+    setIsViewingExistingLote(false);
+    const d = new Date();
+    d.setDate(d.getDate() + 7);
+    setDataValidade(d.toISOString().slice(0, 10));
+    setQuantidadeStr('12');
+    setPrecoTrabalhado('');
+    setDataPreco('');
+    setObservacao('');
+    setLoteIdentificador('');
+    setEnviarComprador(false);
+    setErrorMsg(null);
+  };
+
+  // Real-time check for duplicate lot (Same Product + Same Expiration Date)
+  const duplicateInfo = useMemo(() => {
+    if (!produto || !dataValidade) return null;
+    const res = checkDuplicateVencimento(
+      {
+        codigo_interno: produto.codigo_interno,
+        digito: produto.digito,
+        codigo_exibicao: produto.codigo_exibicao,
+        descricao_produto: produto.descricao,
+        data_validade: dataValidade,
+      },
+      activeLoteParaEditar?.id
+    );
+    return res.isDuplicate ? res : null;
+  }, [produto, dataValidade, activeLoteParaEditar]);
+
   // Existing lots for this product (excluding current if editing)
   const lotesExistentes = useMemo(() => {
     if (!produto) return [];
     return getVencimentosByCodigoInterno(produto.codigo_interno).filter(
-      (l) => !isEditing || l.id !== loteParaEditar?.id
+      (l) => !isEditing || l.id !== activeLoteParaEditar?.id
     );
-  }, [produto, isEditing, loteParaEditar]);
+  }, [produto, isEditing, activeLoteParaEditar]);
 
   // Packaging calculation
   const embData = parseEmbalagem(produto?.embalagem || '');
@@ -138,7 +203,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
 
   // Temporary mock lot for live projection preview
   const previewLote: LoteVencimento | null = produto ? {
-    id: loteParaEditar?.id || 'preview',
+    id: activeLoteParaEditar?.id || 'preview',
     codigo_interno: produto.codigo_interno,
     digito: produto.digito,
     codigo_exibicao: produto.codigo_exibicao,
@@ -150,7 +215,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
     preco_trabalhado: precoTrabalhadoNum,
     data_preco: dataPreco || undefined,
     enviar_ao_comprador: enviarComprador,
-    criado_em: loteParaEditar?.criado_em || new Date().toISOString(),
+    criado_em: activeLoteParaEditar?.criado_em || new Date().toISOString(),
     atualizado_em: new Date().toISOString(),
   } : null;
 
@@ -167,6 +232,10 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // 8. PROTEGER CONTRA CLIQUE DUPLO
+    if (isSubmitting) return;
+
     setErrorMsg(null);
 
     if (!produto) return;
@@ -194,47 +263,83 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
       ? (dataPreco || new Date().toISOString().slice(0, 10))
       : undefined;
 
-    let loteResultado: LoteVencimento;
-
-    if (isEditing && loteParaEditar) {
-      const updated = await updateVencimento(loteParaEditar.id, {
-        data_validade: dataValidade,
-        quantidade_total_unidades: quantidadeNum,
-        preco_trabalhado: precoFinal,
-        data_preco: dataPrecoFinal,
-        observacao: observacao.trim() || undefined,
-        lote_identificador: loteIdentificador.trim() || undefined,
-        enviar_ao_comprador: enviarComprador,
-        status_customizado: enviarComprador ? 'ENVIAR_AO_COMPRADOR' : undefined,
-      });
-      if (!updated) {
-        setErrorMsg('Erro ao atualizar o lote.');
-        return;
-      }
-      loteResultado = updated;
-    } else {
-      loteResultado = await addVencimento({
+    // 7. VALIDAÇÃO NO MOMENTO DO SALVAMENTO (Não confiar somente em validação visual)
+    // 1. Obter Código Interno
+    // 2. Obter Dígito
+    // 3. Normalizar a data
+    // 4. Consultar os vencimentos existentes
+    // 5. Procurar registro com o mesmo produto e mesma data
+    // 6. Se existir -> BLOQUEAR
+    const duplicateCheck = checkDuplicateVencimento(
+      {
         codigo_interno: produto.codigo_interno,
         digito: produto.digito,
         codigo_exibicao: produto.codigo_exibicao,
         descricao_produto: produto.descricao,
-        embalagem: produto.embalagem,
-        fator_embalagem: produto.fator_embalagem || embData.fator,
         data_validade: dataValidade,
-        quantidade_total_unidades: quantidadeNum,
-        preco_trabalhado: precoFinal,
-        data_preco: dataPrecoFinal,
-        observacao: observacao.trim() || undefined,
-        lote_identificador: loteIdentificador.trim() || undefined,
-        enviar_ao_comprador: enviarComprador,
-        status_customizado: enviarComprador ? 'ENVIAR_AO_COMPRADOR' : undefined,
-      });
+      },
+      activeLoteParaEditar?.id
+    );
+
+    if (duplicateCheck.isDuplicate && duplicateCheck.existingLote) {
+      setErrorMsg(
+        duplicateCheck.message ||
+          `Este produto já possui um vencimento cadastrado para ${duplicateCheck.dataValidadeFormatada || dataValidade}.`
+      );
+      return; // INTERROMPER GRAVAÇÃO! NÃO SALVAR!
     }
 
-    if (onSuccess) {
-      onSuccess(loteResultado);
+    // Trava de submissão (desabilita botão e previne cliques repetidos)
+    setIsSubmitting(true);
+
+    try {
+      let loteResultado: LoteVencimento;
+
+      if (isEditing && activeLoteParaEditar) {
+        const updated = await updateVencimento(activeLoteParaEditar.id, {
+          data_validade: dataValidade,
+          quantidade_total_unidades: quantidadeNum,
+          preco_trabalhado: precoFinal,
+          data_preco: dataPrecoFinal,
+          observacao: observacao.trim() || undefined,
+          lote_identificador: loteIdentificador.trim() || undefined,
+          enviar_ao_comprador: enviarComprador,
+          status_customizado: enviarComprador ? 'ENVIAR_AO_COMPRADOR' : undefined,
+        });
+        if (!updated) {
+          setErrorMsg('Erro ao atualizar o lote.');
+          return;
+        }
+        loteResultado = updated;
+      } else {
+        loteResultado = await addVencimento({
+          codigo_interno: produto.codigo_interno,
+          digito: produto.digito,
+          codigo_exibicao: produto.codigo_exibicao,
+          descricao_produto: produto.descricao,
+          embalagem: produto.embalagem,
+          fator_embalagem: produto.fator_embalagem || embData.fator,
+          data_validade: dataValidade,
+          quantidade_total_unidades: quantidadeNum,
+          preco_trabalhado: precoFinal,
+          data_preco: dataPrecoFinal,
+          observacao: observacao.trim() || undefined,
+          lote_identificador: loteIdentificador.trim() || undefined,
+          enviar_ao_comprador: enviarComprador,
+          status_customizado: enviarComprador ? 'ENVIAR_AO_COMPRADOR' : undefined,
+        });
+      }
+
+      if (onSuccess) {
+        onSuccess(loteResultado);
+      }
+      onClose();
+    } catch (err: any) {
+      console.error('Erro ao salvar vencimento:', err);
+      setErrorMsg(err?.message || 'Erro inesperado ao salvar o lote.');
+    } finally {
+      setIsSubmitting(false);
     }
-    onClose();
   };
 
   if (!isOpen || !produto) return null;
@@ -247,6 +352,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
       <div className="bg-white w-full max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden border border-gray-200">
         {/* Modal Header with Bold Typography */}
         <div className="bg-blue-700 text-white px-5 py-4 flex items-center justify-between shrink-0 border-b border-blue-800">
+          {/* Header title */}
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-lg bg-white/10 flex items-center justify-center border border-white/20">
               {isEditing ? (
@@ -257,7 +363,11 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
             </div>
             <div>
               <h2 className="text-sm font-black uppercase tracking-tight">
-                {isEditing ? 'EDITAR VENCIMENTO' : 'CADASTRAR VENCIMENTO'}
+                {isViewingExistingLote
+                  ? 'EDITAR VENCIMENTO EXISTENTE'
+                  : isEditing
+                  ? 'EDITAR VENCIMENTO'
+                  : 'CADASTRAR VENCIMENTO'}
               </h2>
               <p className="text-xs text-blue-200 font-mono font-bold">
                 CÓD: <strong>{produto.codigo_exibicao}</strong>
@@ -267,7 +377,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
           <button
             id="btn-close-cadastrar-modal"
             onClick={onClose}
-            className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors"
+            className="p-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition-colors cursor-pointer"
           >
             <X className="w-5 h-5 stroke-[2.5]" />
           </button>
@@ -275,6 +385,36 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
 
         {/* Scrollable Form Body */}
         <form onSubmit={handleSave} className="p-5 overflow-y-auto space-y-4 flex-1">
+          {/* Active view mode indicator if viewing existing lote */}
+          {isViewingExistingLote && (
+            <div
+              id="banner-modo-edicao-existente"
+              className="p-3.5 rounded-xl bg-blue-50 border border-blue-200 text-blue-950 flex items-center justify-between gap-3 shadow-xs"
+            >
+              <div className="min-w-0">
+                <span className="text-[10px] font-black uppercase tracking-wider text-blue-700 block">
+                  MODO DE EDIÇÃO
+                </span>
+                <p className="text-xs font-black uppercase text-blue-950">
+                  Visualizando cadastro existente deste vencimento
+                </p>
+                <p className="text-[11px] text-blue-800 mt-0.5">
+                  Você pode atualizar quantidade, preço ou observação deste lote.
+                </p>
+              </div>
+              <button
+                type="button"
+                id="btn-voltar-novo-cadastro"
+                onClick={handleVoltarNovoCadastro}
+                className="shrink-0 text-xs font-black uppercase text-blue-800 hover:text-blue-950 bg-white hover:bg-blue-100 border border-blue-300 px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs"
+                title="Voltar ao modo de cadastrar novo lote"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Novo</span>
+              </button>
+            </div>
+          )}
+
           {/* Product Summary Card */}
           <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-2">
             <div className="flex items-start justify-between gap-2">
@@ -343,7 +483,11 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                 required
                 value={dataValidade}
                 onChange={(e) => setDataValidade(e.target.value)}
-                className="w-full bg-white border-2 border-gray-300 focus:border-blue-700 rounded-xl px-3.5 py-3 text-base font-black font-mono text-gray-900 focus:outline-hidden transition-all shadow-2xs"
+                className={`w-full bg-white border-2 rounded-xl px-3.5 py-3 text-base font-black font-mono text-gray-900 focus:outline-hidden transition-all shadow-2xs ${
+                  duplicateInfo
+                    ? 'border-amber-500 bg-amber-50/40 text-amber-950'
+                    : 'border-gray-300 focus:border-blue-700'
+                }`}
               />
             </div>
 
@@ -361,12 +505,63 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                   key={preset.days}
                   type="button"
                   onClick={() => handleSetPresetDays(preset.days)}
-                  className="px-2.5 py-1 rounded-md bg-gray-100 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-300 border border-gray-200 text-gray-700 text-xs font-black uppercase transition-colors"
+                  className="px-2.5 py-1 rounded-md bg-gray-100 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-300 border border-gray-200 text-gray-700 text-xs font-black uppercase transition-colors cursor-pointer"
                 >
                   {preset.label}
                 </button>
               ))}
             </div>
+
+            {/* Alerta de Produto Já Cadastrado com a Mesma Data */}
+            {duplicateInfo && (
+              <div
+                id="alerta-produto-duplicado"
+                className="p-4 rounded-xl bg-amber-50 border-2 border-amber-500 text-amber-950 space-y-3 shadow-xs mt-2"
+              >
+                <div className="flex items-start gap-2.5">
+                  <div className="w-8 h-8 rounded-lg bg-amber-200 text-amber-900 flex items-center justify-center shrink-0 mt-0.5">
+                    <AlertTriangle className="w-5 h-5 stroke-[2.5]" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-[11px] font-black uppercase tracking-wider text-amber-800 block">
+                      PRODUTO JÁ CADASTRADO
+                    </span>
+                    <h4 className="text-sm font-black uppercase text-gray-950 leading-tight">
+                      {duplicateInfo.descricao || produto.descricao}
+                    </h4>
+                    <div className="text-xs text-amber-900 font-mono font-bold mt-1 space-y-0.5">
+                      <p>
+                        Código: <strong>{duplicateInfo.codigoExibicao || produto.codigo_exibicao}</strong>
+                      </p>
+                      <p>
+                        Vencimento: <strong>{duplicateInfo.dataValidadeFormatada}</strong>
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-amber-200 text-xs font-bold text-amber-950">
+                  <p>
+                    &ldquo;{duplicateInfo.message ||
+                      `Este produto já possui um vencimento cadastrado para ${duplicateInfo.dataValidadeFormatada}.`}&rdquo;
+                  </p>
+                </div>
+
+                {duplicateInfo.existingLote && (
+                  <div className="pt-1">
+                    <button
+                      id="btn-ver-cadastro-existente"
+                      type="button"
+                      onClick={() => handleVerCadastroExistente(duplicateInfo.existingLote!)}
+                      className="w-full py-2.5 px-3 rounded-lg bg-amber-700 hover:bg-amber-800 active:bg-amber-900 text-white text-xs font-black uppercase tracking-wider flex items-center justify-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                    >
+                      <Eye className="w-4 h-4 stroke-[2.5]" />
+                      <span>[ VER CADASTRO EXISTENTE ]</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Section 2: Quantidade Total em Unidades & Packaging Conversion */}
@@ -650,17 +845,43 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
               id="btn-cancelar-lote"
               type="button"
               onClick={onClose}
-              className="w-1/3 py-3 px-4 rounded-xl border border-gray-300 text-gray-700 font-black uppercase text-xs hover:bg-gray-100 active:bg-gray-200 transition-colors"
+              disabled={isSubmitting}
+              className="w-1/3 py-3 px-4 rounded-xl border border-gray-300 text-gray-700 font-black uppercase text-xs hover:bg-gray-100 active:bg-gray-200 transition-colors disabled:opacity-50 cursor-pointer"
             >
               Cancelar
             </button>
             <button
               id="btn-salvar-vencimento"
               type="submit"
-              className="flex-1 py-3 px-4 rounded-xl bg-blue-700 hover:bg-blue-800 active:bg-blue-950 text-white font-black uppercase text-xs tracking-wider shadow-md flex items-center justify-center gap-2 transition-all active:scale-[0.98]"
+              disabled={isSubmitting || Boolean(duplicateInfo)}
+              className={`flex-1 py-3 px-4 rounded-xl text-white font-black uppercase text-xs tracking-wider shadow-md flex items-center justify-center gap-2 transition-all ${
+                isSubmitting || Boolean(duplicateInfo)
+                  ? 'bg-gray-400 cursor-not-allowed opacity-75'
+                  : 'bg-blue-700 hover:bg-blue-800 active:bg-blue-950 active:scale-[0.98] cursor-pointer'
+              }`}
             >
-              <Check className="w-4 h-4 stroke-[3]" />
-              <span>{isEditing ? 'Atualizar Vencimento' : 'Salvar Vencimento'}</span>
+              {isSubmitting ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  <span>Gravando...</span>
+                </>
+              ) : duplicateInfo ? (
+                <>
+                  <AlertTriangle className="w-4 h-4 stroke-[3]" />
+                  <span>Vencimento Já Cadastrado</span>
+                </>
+              ) : (
+                <>
+                  <Check className="w-4 h-4 stroke-[3]" />
+                  <span>
+                    {isViewingExistingLote
+                      ? 'Salvar Alterações do Lote'
+                      : isEditing
+                      ? 'Atualizar Vencimento'
+                      : 'Salvar Vencimento'}
+                  </span>
+                </>
+              )}
             </button>
           </div>
         </form>
