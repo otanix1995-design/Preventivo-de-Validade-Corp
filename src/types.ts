@@ -87,6 +87,12 @@ export interface LoteVencimento {
   data_preco?: string;
   saeou060_id?: string;
   arquivo_origem?: string;
+
+  // Rastreabilidade de Operação / Promotores
+  criadoPorTipo?: 'PRINCIPAL' | 'PROMOTOR' | 'SISTEMA';
+  criadoPorId?: string;
+  atualizadoPorTipo?: 'PRINCIPAL' | 'PROMOTOR' | 'SISTEMA';
+  atualizadoPorId?: string;
 }
 
 export type StatusSaeou060 =
@@ -215,3 +221,145 @@ export interface ProjecaoVencimento {
   alerta_dias_sem_venda: boolean;
   grau_risco: 'BAIXO' | 'MEDIO' | 'ALTO' | 'CRITICO';
 }
+
+// ==========================================
+// MÓDULO DE PROMOTORES - FASE 1
+// ==========================================
+
+export type StatusPromotor = 'ATIVO' | 'BLOQUEADO' | 'DESVINCULADO' | 'PENDENTE_VINCULO';
+
+export interface PermissoesPromotor {
+  consultarProduto: boolean;
+  escanearEAN: boolean;
+  cadastrarVencimento: boolean;
+  atualizarQuantidade: boolean;
+  visualizarPendencias: boolean;
+  enviarAoComprador: boolean;
+  visualizarHistorico: boolean;
+}
+
+export const PERMISSOES_PADRAO_PROMOTOR: PermissoesPromotor = {
+  consultarProduto: true,
+  escanearEAN: true,
+  cadastrarVencimento: true,
+  atualizarQuantidade: true,
+  visualizarPendencias: true,
+  enviarAoComprador: true,
+  visualizarHistorico: true,
+};
+
+export interface DispositivoVinculado {
+  dispositivoId: string;
+  dispositivoNome: string;
+  dataPrimeiroVinculo: string;
+  ultimoAcesso: string;
+}
+
+export interface Promotor {
+  promotorId: string;
+  nome: string;
+  matricula?: string;
+  filialId: string;
+  filialNome: string;
+  setorId: string;
+  setorNome: string;
+  status: StatusPromotor;
+  permissoes: PermissoesPromotor;
+  dispositivoVinculado?: DispositivoVinculado | null;
+  dataCadastro: string; // ISO
+  dataVinculo?: string | null; // ISO
+  ultimoAcesso?: string | null; // ISO
+  ultimaSincronizacao?: string | null; // ISO
+  criadoPor: string;
+  atualizadoPor: string;
+}
+
+export type StatusVinculo = 'AGUARDANDO' | 'UTILIZADO' | 'EXPIRADO' | 'CANCELADO';
+
+export interface VinculoPromotor {
+  vinculoId: string;
+  promotorId: string;
+  promotorNome: string;
+  filialId: string;
+  filialNome: string;
+  setorId: string;
+  setorNome: string;
+  codigoVinculo: string; // 6 dígitos numéricos
+  tokenVinculo: string; // Token único / linkTokenId
+  dataCriacao: string; // ISO
+  dataExpiracao: string; // ISO (+30 minutos)
+  status: StatusVinculo;
+  dispositivoId?: string | null;
+  dispositivoNome?: string | null;
+  dataUtilizacao?: string | null;
+}
+
+export type TipoAcaoAuditoria =
+  | 'CONSULTOU_PRODUTO'
+  | 'CADASTROU_VENCIMENTO'
+  | 'ATUALIZOU_QUANTIDADE'
+  | 'ENVIOU_COMPRADOR'
+  | 'REMOVEU_ENVIO_COMPRADOR'
+  | 'SINCRONIZOU_ALTERACAO';
+
+export type StatusSincronizacaoAuditoria = 'SINCRONIZADO' | 'PENDENTE' | 'ERRO';
+
+export interface RegistroAuditoriaPromotor {
+  auditoriaId: string;
+  promotorId: string;
+  promotorNome: string;
+  filialId: string;
+  setorId: string;
+  tipoAcao: TipoAcaoAuditoria;
+  produtoId?: string;
+  codigoInterno?: string;
+  digito?: string;
+  descricao?: string;
+  valorAnterior?: string;
+  valorNovo?: string;
+  dataHora: string; // ISO
+  dispositivoId?: string;
+  statusSincronizacao: StatusSincronizacaoAuditoria;
+  operationId?: string;
+}
+
+export type StatusOperacaoSync = 'PROCESSADO' | 'IGNORADO_DUPLICADO' | 'ERRO' | 'PENDENTE';
+
+export interface OperacaoPromotorSync {
+  operationId: string;
+  promotorId: string;
+  tipoAcao: TipoAcaoAuditoria;
+  payload: any;
+  dataHora: string;
+  processado: boolean;
+  processadoEm?: string;
+  status: StatusOperacaoSync;
+  mensagemErro?: string;
+}
+
+export interface SetorItem {
+  id: string;
+  nome: string;
+}
+
+export const SETORES_DISPONIVEIS: SetorItem[] = [
+  { id: 'FRIOS', nome: 'Frios' },
+  { id: 'CONGELADOS', nome: 'Congelados' },
+  { id: 'MERCEARIA', nome: 'Mercearia' },
+  { id: 'HORTIFRUTI', nome: 'Hortifrúti' },
+  { id: 'BAZAR', nome: 'Bazar' },
+  { id: 'BEBIDAS', nome: 'Bebidas' },
+  { id: 'ACOUGUE', nome: 'Açougue' },
+  { id: 'PADARIA', nome: 'Padaria' },
+  { id: 'OUTROS', nome: 'Outros' },
+];
+
+export interface FilialItem {
+  filialId: string;
+  filialNome: string;
+}
+
+export const FILIAIS_DISPONIVEIS: FilialItem[] = [
+  { filialId: '172', filialNome: 'Cascavel' },
+];
+

@@ -4,7 +4,7 @@
  */
 
 const DB_NAME = 'ControleVencimentosDB_v2';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export const STORES = {
   PRODUTOS: 'produtos',
@@ -14,6 +14,10 @@ export const STORES = {
   HISTORICO_IMPORTACOES: 'historico_importacoes',
   METADADOS: 'metadados',
   SAEOU060: 'saeou060',
+  PROMOTORES: 'promotores',
+  VINCULOS_PROMOTORES: 'vinculos_promotores',
+  AUDITORIA_PROMOTORES: 'auditoria_promotores',
+  OPERACOES_PROMOTORES: 'operacoes_promotores',
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -52,6 +56,18 @@ export function getDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORES.SAEOU060)) {
         db.createObjectStore(STORES.SAEOU060, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORES.PROMOTORES)) {
+        db.createObjectStore(STORES.PROMOTORES, { keyPath: 'promotorId' });
+      }
+      if (!db.objectStoreNames.contains(STORES.VINCULOS_PROMOTORES)) {
+        db.createObjectStore(STORES.VINCULOS_PROMOTORES, { keyPath: 'vinculoId' });
+      }
+      if (!db.objectStoreNames.contains(STORES.AUDITORIA_PROMOTORES)) {
+        db.createObjectStore(STORES.AUDITORIA_PROMOTORES, { keyPath: 'auditoriaId' });
+      }
+      if (!db.objectStoreNames.contains(STORES.OPERACOES_PROMOTORES)) {
+        db.createObjectStore(STORES.OPERACOES_PROMOTORES, { keyPath: 'operationId' });
       }
     };
 
@@ -115,6 +131,14 @@ export async function dbPutAll<T>(storeName: string, items: T[], clearFirst = tr
             (item as any).codigo_interno = (item as any).id || (item as any).codigo_original || `prod-${Date.now()}-${i}`;
           } else if (keyPath === 'key') {
             (item as any).key = `meta-${Date.now()}-${i}`;
+          } else if (keyPath === 'promotorId') {
+            (item as any).promotorId = `promotor_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+          } else if (keyPath === 'vinculoId') {
+            (item as any).vinculoId = `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+          } else if (keyPath === 'auditoriaId') {
+            (item as any).auditoriaId = `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+          } else if (keyPath === 'operationId') {
+            (item as any).operationId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
           }
         }
       }
@@ -148,6 +172,14 @@ export async function dbPut<T>(storeName: string, item: T): Promise<void> {
           (item as any).codigo_interno = (item as any).id || (item as any).codigo_original || `prod-${Date.now()}`;
         } else if (keyPath === 'key') {
           (item as any).key = `meta-${Date.now()}`;
+        } else if (keyPath === 'promotorId') {
+          (item as any).promotorId = `promotor_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        } else if (keyPath === 'vinculoId') {
+          (item as any).vinculoId = `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        } else if (keyPath === 'auditoriaId') {
+          (item as any).auditoriaId = `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        } else if (keyPath === 'operationId') {
+          (item as any).operationId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         }
       }
     }

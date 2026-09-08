@@ -9,6 +9,7 @@ import { EansVinculadosView } from './components/EansVinculadosView';
 import { Header } from './components/Header';
 import { ImportacaoView } from './components/ImportacaoView';
 import { MaisMenuView } from './components/MaisMenuView';
+import { PromotoresView } from './components/PromotoresView';
 import { RelatoriosView } from './components/RelatoriosView';
 import { Saeou060View } from './components/Saeou060View';
 import { SelecionarProdutoCadastroModal } from './components/SelecionarProdutoCadastroModal';
@@ -243,6 +244,10 @@ export default function App() {
         {/* TAB: MAIS (Menu & Sub-Views) */}
         {activeTab === 'mais' && (
           <>
+            {subView === 'promotores' && (
+              <PromotoresView onBack={() => setSubView(null)} />
+            )}
+
             {subView === 'saeou060' && (
               <div className="space-y-3">
                 <button

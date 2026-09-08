@@ -7,6 +7,7 @@ import {
   Sparkles,
   Trash2,
   TrendingDown,
+  UserCheck,
   Users,
   X
 } from 'lucide-react';
@@ -28,6 +29,15 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
 }) => {
   const [isLimparModalOpen, setIsLimparModalOpen] = useState(false);
   const menuItems = [
+    {
+      id: 'promotores',
+      icon: UserCheck,
+      iconColor: 'text-blue-700',
+      iconBg: 'bg-blue-100',
+      title: 'Promotores',
+      desc: 'Gerencie acessos, vínculos e atividades dos promotores.',
+      badge: 'Novo',
+    },
     {
       id: 'saeou060',
       icon: FileSpreadsheet,

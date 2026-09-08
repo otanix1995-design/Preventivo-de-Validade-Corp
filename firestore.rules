@@ -29,5 +29,21 @@ service cloud.firestore {
     match /divergencias/{divId} {
       allow read, write: if true;
     }
+
+    match /promotores/{promotorId} {
+      allow read, write: if true;
+    }
+
+    match /vinculos_promotores/{vinculoId} {
+      allow read, write: if true;
+    }
+
+    match /auditoria_promotores/{auditoriaId} {
+      allow read, write: if true;
+    }
+
+    match /operacoes_promotores/{operationId} {
+      allow read, write: if true;
+    }
   }
 }

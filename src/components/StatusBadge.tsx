@@ -48,9 +48,9 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({
       label = 'SAÍDA INSUFICIENTE';
       break;
     case 'ENVIAR_AO_COMPRADOR':
-      bg = 'bg-purple-100 text-purple-800 border-purple-300 font-black';
-      icon = <Send className="w-3.5 h-3.5 text-purple-700 stroke-[2.5]" />;
-      label = 'ENVIAR AO COMPRADOR';
+      bg = 'bg-orange-100 text-orange-950 border-orange-300 font-black';
+      icon = <AlertTriangle className="w-3.5 h-3.5 text-orange-700 stroke-[2.5]" />;
+      label = 'CRÍTICO (COMPRADOR)';
       break;
     case 'NORMAL':
     default:

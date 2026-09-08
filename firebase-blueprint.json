@@ -77,6 +77,55 @@
         "codigo_interno": { "type": "string" },
         "tipo": { "type": "string" }
       }
+    },
+    "Promotor": {
+      "collection": "promotores",
+      "fields": {
+        "promotorId": { "type": "string" },
+        "nome": { "type": "string" },
+        "matricula": { "type": "string" },
+        "filialId": { "type": "string" },
+        "filialNome": { "type": "string" },
+        "setorId": { "type": "string" },
+        "setorNome": { "type": "string" },
+        "status": { "type": "string" },
+        "dataCadastro": { "type": "string" },
+        "ultimoAcesso": { "type": "string" }
+      }
+    },
+    "VinculoPromotor": {
+      "collection": "vinculos_promotores",
+      "fields": {
+        "vinculoId": { "type": "string" },
+        "promotorId": { "type": "string" },
+        "codigoVinculo": { "type": "string" },
+        "tokenVinculo": { "type": "string" },
+        "status": { "type": "string" },
+        "dataCriacao": { "type": "string" },
+        "dataExpiracao": { "type": "string" }
+      }
+    },
+    "RegistroAuditoriaPromotor": {
+      "collection": "auditoria_promotores",
+      "fields": {
+        "auditoriaId": { "type": "string" },
+        "promotorId": { "type": "string" },
+        "promotorNome": { "type": "string" },
+        "tipoAcao": { "type": "string" },
+        "dataHora": { "type": "string" },
+        "statusSincronizacao": { "type": "string" }
+      }
+    },
+    "OperacaoPromotorSync": {
+      "collection": "operacoes_promotores",
+      "fields": {
+        "operationId": { "type": "string" },
+        "promotorId": { "type": "string" },
+        "tipoAcao": { "type": "string" },
+        "status": { "type": "string" },
+        "processado": { "type": "boolean" },
+        "dataHora": { "type": "string" }
+      }
     }
   }
 }

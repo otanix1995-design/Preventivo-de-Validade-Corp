@@ -1,5 +1,6 @@
 import {
   AlertCircle,
+  AlertTriangle,
   Calendar,
   Clock,
   DollarSign,
@@ -9,6 +10,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Send,
   Tag,
   Trash2,
   TrendingDown
@@ -135,6 +137,15 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
     if (confirm('Deseja realmente remover este lote de vencimento?')) {
       deleteVencimento(id);
     }
+  };
+
+  const handleToggleEnviarComprador = async (lote: LoteVencimento, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const novoStatus = !lote.enviar_ao_comprador;
+    await productRepository.updateVencimento(lote.id, {
+      enviar_ao_comprador: novoStatus,
+      status_customizado: novoStatus ? 'ENVIAR_AO_COMPRADOR' : undefined,
+    });
   };
 
   return (
@@ -352,7 +363,11 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                     onClick={() => {
                       if (produto) onSelectProduto(produto);
                     }}
-                    className="bg-white rounded-2xl p-4 sm:p-5 border border-gray-200 hover:border-blue-500 hover:shadow-xs transition-all cursor-pointer space-y-3 active:scale-[0.99]"
+                    className={`rounded-2xl p-4 sm:p-5 border transition-all cursor-pointer space-y-3 active:scale-[0.99] ${
+                      lote.enviar_ao_comprador
+                        ? 'bg-orange-50/50 border-orange-300 hover:border-orange-400 shadow-xs'
+                        : 'bg-white border-gray-200 hover:border-blue-500 hover:shadow-xs'
+                    }`}
                   >
                     {/* Header Row */}
                     <div className="flex items-start justify-between gap-2">
@@ -374,6 +389,32 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                               LOTE: {lote.lote_identificador}
                             </span>
                           )}
+                          {/* Botão de Atalho Rápido: Enviar ao Comprador / Status Crítico */}
+                          <button
+                            onClick={(e) => handleToggleEnviarComprador(lote, e)}
+                            className={`inline-flex items-center gap-1 text-[10px] font-black uppercase px-2 py-0.5 rounded-md border transition-all ${
+                              lote.enviar_ao_comprador
+                                ? 'bg-orange-200 text-orange-950 border-orange-400 hover:bg-orange-300'
+                                : 'bg-gray-100 text-gray-600 border-gray-200 hover:bg-orange-50 hover:text-orange-800 hover:border-orange-300'
+                            }`}
+                            title={
+                              lote.enviar_ao_comprador
+                                ? 'Mercadoria sinalizada ao comprador (CRÍTICO no PDF). Clique para desmarcar.'
+                                : 'Clique para sinalizar ao comprador (receberá STATUS ⚠ CRÍTICO no PDF).'
+                            }
+                          >
+                            {lote.enviar_ao_comprador ? (
+                              <>
+                                <AlertTriangle className="w-3 h-3 text-orange-700 stroke-[2.5]" />
+                                <span>⚠ CRÍTICO (COMPRADOR)</span>
+                              </>
+                            ) : (
+                              <>
+                                <Send className="w-2.5 h-2.5 text-gray-500" />
+                                <span>Enviar Comprador</span>
+                              </>
+                            )}
+                          </button>
                         </div>
                         <h3 className="text-sm font-black text-gray-900 uppercase leading-snug mt-1.5">
                           {lote.descricao_produto || produto?.descricao}

@@ -62,10 +62,10 @@ export const RelatoriosView: React.FC<RelatoriosViewProps> = ({
     },
     {
       id: 'ENVIAR_AO_COMPRADOR',
-      title: 'Preventivo de Trocas e Compradores',
-      desc: 'Lista consolidada para negociação de trocas e devoluções junto aos fornecedores.',
-      badge: 'NEGOCIAÇÃO',
-      color: 'indigo',
+      title: 'Produtos Enviados ao Comprador (Status Crítico)',
+      desc: 'Lista com destaque de fundo laranja na linha inteira e coluna STATUS com ⚠ CRÍTICO.',
+      badge: '⚠ CRÍTICO / COMPRADOR',
+      color: 'orange',
     },
   ];
 
@@ -153,7 +153,7 @@ export const RelatoriosView: React.FC<RelatoriosViewProps> = ({
 
           <div className="pt-2 flex items-center justify-between flex-wrap gap-2 border-t border-orange-200/80">
             <span className="text-[11px] text-orange-900 font-bold">
-              Estrutura: CÓDIGO | DIG | DESCRIÇÃO | EMBALAGEM | COMPRADOR | QTD. VENC. | ESTOQUE LOJA | VENCIMENTO | PREÇO
+              Estrutura: CÓDIGO | DIG | DESCRIÇÃO | EMBALAGEM | COMPRADOR | ESTOQUE | VENCIMENTO | PREÇO | STATUS
             </span>
 
             <button
