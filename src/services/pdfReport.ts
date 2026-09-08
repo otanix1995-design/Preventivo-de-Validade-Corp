@@ -65,7 +65,9 @@ export function desenharIconeAlerta(
 
 /**
  * Formata a quantidade cadastrada/apontada do lote que está vencendo.
- * Mostra as unidades exatas e a equivalência em caixas quando aplicável.
+ * Mostra no formato comercial padrão do supermercado:
+ * - Produtos com caixas/unidades: caixas e unidades (ex: "2 CX", "1 CX + 11 UN", "12 UN")
+ * - Produtos pesáveis: quilos e gramas (ex: "10 KG", "10 KG + 658 G", "500 G")
  */
 export function formatarQtdCadastradaPdf(
   qtd?: number | null,
@@ -73,7 +75,7 @@ export function formatarQtdCadastradaPdf(
   unidadeMedida?: string | null
 ): string {
   if (qtd === undefined || qtd === null || isNaN(qtd)) return '-';
-  const num = Math.round(qtd);
+  const num = Number(qtd);
   if (num <= 0) return '0 UN';
 
   const isPeso =
@@ -82,20 +84,28 @@ export function formatarQtdCadastradaPdf(
     /^(KG|QUILO|KILO|PESAVEL|PESO)\b/i.test((embalagem || '').trim());
 
   if (isPeso) {
-    return `${num} KG`;
+    const kg = Math.floor(num);
+    const gramas = Math.round((num - kg) * 1000);
+    const parts: string[] = [];
+    if (kg > 0) parts.push(`${kg} KG`);
+    if (gramas > 0) parts.push(`${gramas} G`);
+    if (parts.length === 0) return '0 KG';
+    return parts.join(' + ');
   }
 
   const embData = parseEmbalagem(embalagem || '');
   if (embData.fator && embData.fator > 1) {
-    const cx = Math.floor(num / embData.fator);
-    const un = num % embData.fator;
-    if (cx > 0 && un > 0) {
-      return `${num} UN (${cx}cx+${un})`;
-    } else if (cx > 0) {
-      return `${num} UN (${cx}cx)`;
-    }
+    const rounded = Math.round(num);
+    const cx = Math.floor(rounded / embData.fator);
+    const un = rounded % embData.fator;
+    const parts: string[] = [];
+    if (cx > 0) parts.push(`${cx} CX`);
+    if (un > 0) parts.push(`${un} UN`);
+    if (parts.length === 0) return '0 UN';
+    return parts.join(' + ');
   }
-  return `${num} UN`;
+
+  return `${Math.round(num)} UN`;
 }
 
 /**
@@ -160,7 +170,7 @@ export function formatarEstoquePdf(
  * Gera o PDF do Preventivo com o layout oficial e destaque para produtos enviados ao comprador:
  * - Cabeçalho Topo: Barra Laranja com Data | PREVENTIVO SETOR [SETOR] | LIDER [LIDER]
  * - Legenda discreta: [⚠] CRÍTICO = PRODUTO ENVIADO AO COMPRADOR
- * - Cabeçalho Colunas: Amarelo com CÓDIGO | DIG | DESCRIÇÃO MERCADORIA | EMBALAGEM | COMPRADOR | ESTOQUE | VENCIMENTO | PREÇO | STATUS
+ * - Cabeçalho Colunas: Amarelo com CÓDIGO | DIG | DESCRIÇÃO MERCADORIA | EMBALAGEM | COMPRADOR | QTD VENC | ESTOQUE | VENCIMENTO | PREÇO | STATUS
  * - Linha Crítica (enviar_ao_comprador): Fundo LARANJA CLARO ocupando 100% da linha de CÓDIGO até STATUS
  * - Coluna STATUS: "CRÍTICO" com ícone de alerta vetorizado para itens críticos, vazio para itens normais
  * - Grade 1px preta em todas as células sem espaços brancos
@@ -332,7 +342,7 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
   });
 
   // Construção das linhas da tabela conforme estrutura exata:
-  // CÓDIGO | DIG | DESCRIÇÃO MERCADORIA | EMBALAGEM | COMPRADOR | ESTOQUE | VENCIMENTO | PREÇO | STATUS
+  // CÓDIGO | DIG | DESCRIÇÃO MERCADORIA | EMBALAGEM | COMPRADOR | QTD VENC | ESTOQUE | VENCIMENTO | PREÇO | STATUS
   const tableRows = itens.map((it) => {
     let precoFormatado = '-';
     if (it.preco !== null && it.preco !== undefined && it.preco !== '' && it.preco !== 0) {
@@ -342,7 +352,15 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       }
     }
 
-    const estoqueLojaFormatado = formatarEstoquePdf(it.emb1, it.emb9, it.embalagem, it.unidade_medida);
+    // 1. Quantidade que foi cadastrada para vencimento (lote apontado)
+    const qtdVencFormatada =
+      it.quantidadeCadastrada !== undefined && it.quantidadeCadastrada !== null
+        ? formatarQtdCadastradaPdf(it.quantidadeCadastrada, it.embalagem, it.unidade_medida)
+        : '-';
+
+    // 2. Estoque completo da loja (base SMGOI013 / EMB1 + EMB9)
+    const estoqueCompletoFormatado = formatarEstoquePdf(it.emb1, it.emb9, it.embalagem, it.unidade_medida);
+
     // Produto crítico: "CRÍTICO" (com ícone triangular vetorizado desenhado via didDrawCell)
     // Produto normal: vazio para manter o relatório limpo
     const statusText = it.enviarParaComprador ? 'CRÍTICO' : '';
@@ -353,7 +371,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       it.descricao,
       it.embalagem,
       it.comprador,
-      estoqueLojaFormatado,
+      qtdVencFormatada,
+      estoqueCompletoFormatado,
       it.vencimento,
       precoFormatado,
       statusText,
@@ -425,7 +444,7 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
   }
 
   // 2. Cabeçalho das Colunas da Planilha (Amarelo vibrante)
-  // Estrutura unificada: CÓDIGO | DIG | DESCRIÇÃO MERCADORIA | EMBALAGEM | COMPRADOR | ESTOQUE | VENCIMENTO | PREÇO | STATUS
+  // Estrutura: CÓDIGO | DIG | DESCRIÇÃO MERCADORIA | EMBALAGEM | COMPRADOR | QTD VENC | ESTOQUE | VENCIMENTO | PREÇO | STATUS
   const head: any[] = [
     [
       { content: 'CÓDIGO', styles: { halign: 'center', valign: 'middle' } },
@@ -433,6 +452,7 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       { content: 'DESCRIÇÃO MERCADORIA', styles: { halign: 'left', valign: 'middle' } },
       { content: 'EMBALAGEM', styles: { halign: 'left', valign: 'middle' } },
       { content: 'COMPRADOR', styles: { halign: 'left', valign: 'middle' } },
+      { content: 'QTD VENC', styles: { halign: 'center', valign: 'middle' } },
       { content: 'ESTOQUE', styles: { halign: 'center', valign: 'middle' } },
       { content: 'VENCIMENTO', styles: { halign: 'center', valign: 'middle' } },
       { content: 'PREÇO', styles: { halign: 'center', valign: 'middle' } },
@@ -469,15 +489,16 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       cellPadding: { top: 2, bottom: 2, left: 1.5, right: 1.5 },
     },
     columnStyles: {
-      0: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-      1: { cellWidth: 11, halign: 'center', fontStyle: 'bold' }, // DIG
-      2: { cellWidth: 68, halign: 'left' },                      // DESCRIÇÃO MERCADORIA
-      3: { cellWidth: 33, halign: 'left' },                      // EMBALAGEM
-      4: { cellWidth: 43, halign: 'left' },                      // COMPRADOR
-      5: { cellWidth: 33, halign: 'center', fontStyle: 'bold' }, // ESTOQUE
-      6: { cellWidth: 28, halign: 'center', fontStyle: 'bold' }, // VENCIMENTO
-      7: { cellWidth: 24, halign: 'center', fontStyle: 'bold' }, // PREÇO
-      8: { cellWidth: 23, halign: 'center', fontStyle: 'bold' }, // STATUS
+      0: { cellWidth: 17, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
+      1: { cellWidth: 10, halign: 'center', fontStyle: 'bold' }, // DIG
+      2: { cellWidth: 61, halign: 'left' },                      // DESCRIÇÃO MERCADORIA
+      3: { cellWidth: 28, halign: 'left' },                      // EMBALAGEM
+      4: { cellWidth: 38, halign: 'left' },                      // COMPRADOR
+      5: { cellWidth: 28, halign: 'center', fontStyle: 'bold' }, // QTD VENC (cadastrado vencimento)
+      6: { cellWidth: 31, halign: 'center', fontStyle: 'bold' }, // ESTOQUE (completo da loja)
+      7: { cellWidth: 26, halign: 'center', fontStyle: 'bold' }, // VENCIMENTO
+      8: { cellWidth: 22, halign: 'center', fontStyle: 'bold' }, // PREÇO
+      9: { cellWidth: 20, halign: 'center', fontStyle: 'bold' }, // STATUS
     },
     didParseCell: (data) => {
       // Garante borda preta sólida 0.2mm em todas as seções sem espaços brancos
@@ -500,8 +521,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
           data.cell.styles.fillColor = [254, 215, 170]; // Laranja Claro equilibrado (#FED7AA)
           data.cell.styles.textColor = [0, 0, 0];
 
-          // Coluna STATUS (índice 8) com texto em destaque de alta legibilidade
-          if (data.column.index === 8) {
+          // Coluna STATUS (índice 9) com texto em destaque de alta legibilidade
+          if (data.column.index === 9) {
             data.cell.styles.fontStyle = 'bold';
             data.cell.styles.textColor = [150, 20, 0]; // Vermelho/âmbar escuro para ênfase
           }
@@ -509,8 +530,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
           // PRODUTO NORMAL: Fundo padrão da tabela (branco)
           data.cell.styles.textColor = [0, 0, 0];
 
-          // Destaque de cor de validade na coluna VENCIMENTO (índice 6) para produtos normais
-          if (data.column.index === 6) {
+          // Destaque de cor de validade na coluna VENCIMENTO (índice 7) para produtos normais
+          if (data.column.index === 7) {
             data.cell.styles.fontStyle = 'bold';
             const dias = rowDiasRestantesMap.get(data.row.index);
 
@@ -534,8 +555,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
       }
     },
     didDrawCell: (data) => {
-      // Desenha o ícone de alerta vetorizado (⚠) na coluna STATUS (índice 8) para produtos críticos
-      if (data.section === 'body' && data.column.index === 8) {
+      // Desenha o ícone de alerta vetorizado (⚠) na coluna STATUS (índice 9) para produtos críticos
+      if (data.section === 'body' && data.column.index === 9) {
         const item = itens[data.row.index];
         const isCritico = Boolean(item?.enviarParaComprador);
 
