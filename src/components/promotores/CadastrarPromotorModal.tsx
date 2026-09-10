@@ -13,7 +13,8 @@ import {
   PERMISSOES_PADRAO_PROMOTOR,
   PermissoesPromotor,
   Promotor,
-  SETORES_DISPONIVEIS
+  SETORES_DISPONIVEIS,
+  SetorPromotor
 } from '../../types';
 
 interface CadastrarPromotorModalProps {
@@ -28,9 +29,10 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
   onPromotorCadastrado,
 }) => {
   const [nome, setNome] = useState('');
+  const [agenciaNome, setAgenciaNome] = useState('');
   const [matricula, setMatricula] = useState('');
   const [filialId, setFilialId] = useState('172');
-  const [setorId, setSetorId] = useState('FRIOS');
+  const [setores, setSetores] = useState<SetorPromotor[]>(['FRIOS']);
   const [permissoes, setPermissoes] = useState<PermissoesPromotor>({
     ...PERMISSOES_PADRAO_PROMOTOR,
   });
@@ -38,6 +40,16 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
   const [erro, setErro] = useState<string | null>(null);
 
   if (!isOpen) return null;
+
+  const toggleSetor = (setor: SetorPromotor) => {
+    setSetores((prev) => {
+      if (prev.includes(setor)) {
+        return prev.filter((s) => s !== setor);
+      } else {
+        return [...prev, setor];
+      }
+    });
+  };
 
   const togglePermissao = (key: keyof PermissoesPromotor) => {
     setPermissoes((prev) => ({
@@ -64,7 +76,18 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
 
     const nomeFormatado = nome.trim();
     if (!nomeFormatado) {
-      setErro('Por favor, informe o Nome Completo do Promotor.');
+      setErro('O Nome do Promotor é obrigatório.');
+      return;
+    }
+
+    const agenciaFormatada = agenciaNome.trim();
+    if (!agenciaFormatada) {
+      setErro('A Agência / Empresa responsável pelo promotor é obrigatória.');
+      return;
+    }
+
+    if (!setores || setores.length === 0) {
+      setErro('Selecione pelo menos um setor de atuação.');
       return;
     }
 
@@ -73,26 +96,23 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
       filialNome: 'Cascavel',
     };
 
-    const setorSelecionado = SETORES_DISPONIVEIS.find((s) => s.id === setorId) || {
-      id: 'FRIOS',
-      nome: 'Frios',
-    };
-
     setIsSubmitting(true);
     try {
       const novo = await promotorService.cadastrarPromotor({
         nome: nomeFormatado,
+        agenciaNome: agenciaFormatada,
         matricula: matricula.trim() || undefined,
         filialId: filialSelecionada.filialId,
         filialNome: filialSelecionada.filialNome,
-        setorId: setorSelecionado.id,
-        setorNome: setorSelecionado.nome,
+        setores,
         permissoes,
       });
 
       // Reset form
       setNome('');
+      setAgenciaNome('');
       setMatricula('');
+      setSetores(['FRIOS']);
       setPermissoes({ ...PERMISSOES_PADRAO_PROMOTOR });
       onPromotorCadastrado(novo);
     } catch (err: any) {
@@ -173,25 +193,41 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Dados Pessoais e de Identificação */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-            <div className="sm:col-span-2">
-              <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-                Nome do Promotor <span className="text-rose-600">*</span>
-              </label>
-              <input
-                type="text"
-                value={nome}
-                onChange={(e) => setNome(e.target.value)}
-                placeholder="Ex: Carlos Mendes"
-                required
-                className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 placeholder:text-gray-400 transition-all outline-hidden"
-              />
-            </div>
+          {/* 1. NOME DO PROMOTOR */}
+          <div>
+            <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
+              NOME DO PROMOTOR <span className="text-rose-600">*</span>
+            </label>
+            <input
+              type="text"
+              value={nome}
+              onChange={(e) => setNome(e.target.value)}
+              placeholder="Ex: Maria Silva"
+              required
+              className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 placeholder:text-gray-400 transition-all outline-hidden"
+            />
+          </div>
 
+          {/* 2. AGÊNCIA / EMPRESA */}
+          <div>
+            <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
+              AGÊNCIA / EMPRESA <span className="text-rose-600">*</span>
+            </label>
+            <input
+              type="text"
+              value={agenciaNome}
+              onChange={(e) => setAgenciaNome(e.target.value)}
+              placeholder="Ex: Agência responsável pelo promotor"
+              required
+              className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 placeholder:text-gray-400 transition-all outline-hidden"
+            />
+          </div>
+
+          {/* 3. IDENTIFICAÇÃO / MATRÍCULA & STATUS INICIAL */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
             <div>
               <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-                Identificação / Matrícula
+                IDENTIFICAÇÃO / MATRÍCULA
               </label>
               <input
                 type="text"
@@ -204,46 +240,70 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
 
             <div>
               <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-                Status Inicial
+                STATUS INICIAL
               </label>
               <div className="px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs font-black text-amber-900 uppercase flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-amber-500" />
+                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
                 <span>PENDENTE DE VÍNCULO</span>
               </div>
             </div>
+          </div>
 
-            <div>
-              <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-                Filial Operacional
+          {/* 4. FILIAL OPERACIONAL */}
+          <div>
+            <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
+              FILIAL OPERACIONAL
+            </label>
+            <select
+              value={filialId}
+              onChange={(e) => setFilialId(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 transition-all outline-hidden bg-white"
+            >
+              {FILIAIS_DISPONIVEIS.map((f) => (
+                <option key={f.filialId} value={f.filialId}>
+                  Filial {f.filialId} — {f.filialNome}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 5. SETOR DE ATUAÇÃO * (MÚLTIPLA SELEÇÃO: FRIOS / LOJA) */}
+          <div className="bg-blue-50/40 rounded-xl p-3.5 border border-blue-100 space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-black text-gray-800 uppercase tracking-wider">
+                SETOR DE ATUAÇÃO <span className="text-rose-600">*</span>
               </label>
-              <select
-                value={filialId}
-                onChange={(e) => setFilialId(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 transition-all outline-hidden bg-white"
-              >
-                {FILIAIS_DISPONIVEIS.map((f) => (
-                  <option key={f.filialId} value={f.filialId}>
-                    Filial {f.filialId} — {f.filialNome}
-                  </option>
-                ))}
-              </select>
+              <span className="text-[11px] font-bold text-blue-700 uppercase">
+                {setores.length === 2 ? 'Atende ambos' : setores.length === 1 ? `${setores[0]} selecionado` : 'Nenhum selecionado'}
+              </span>
             </div>
+            <p className="text-[11px] text-gray-500 font-medium">
+              Marque os setores que o promotor pode atender (FRIOS, LOJA ou ambos).
+            </p>
 
-            <div>
-              <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-                Setor de Atuação
-              </label>
-              <select
-                value={setorId}
-                onChange={(e) => setSetorId(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 transition-all outline-hidden bg-white"
-              >
-                {SETORES_DISPONIVEIS.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.nome}
-                  </option>
-                ))}
-              </select>
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
+              {SETORES_DISPONIVEIS.map((s) => {
+                const checked = setores.includes(s.id as SetorPromotor);
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => toggleSetor(s.id as SetorPromotor)}
+                    className={`flex items-center gap-2.5 px-3.5 py-3 rounded-xl border text-xs font-black uppercase tracking-wider transition-all cursor-pointer select-none text-left ${
+                      checked
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                        : 'bg-white text-gray-700 border-gray-200 hover:border-gray-300 hover:bg-gray-50'
+                    }`}
+                  >
+                    {checked ? (
+                      <CheckSquare className="w-4 h-4 text-white stroke-[2.5] shrink-0" />
+                    ) : (
+                      <Square className="w-4 h-4 text-gray-400 stroke-[2] shrink-0" />
+                    )}
+                    <span>{s.nome}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>
 

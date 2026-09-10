@@ -54,10 +54,11 @@ export const AuditoriaPromotoresView: React.FC<AuditoriaPromotoresViewProps> = (
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const matchNome = reg.promotorNome?.toLowerCase().includes(q);
+        const matchAgencia = reg.agenciaNome?.toLowerCase().includes(q);
         const matchDesc = reg.descricao?.toLowerCase().includes(q);
         const matchCod = reg.codigoInterno?.includes(q);
         const matchVal = reg.valorNovo?.toLowerCase().includes(q);
-        if (!matchNome && !matchDesc && !matchCod && !matchVal) {
+        if (!matchNome && !matchAgencia && !matchDesc && !matchCod && !matchVal) {
           return false;
         }
       }
@@ -260,11 +261,18 @@ export const AuditoriaPromotoresView: React.FC<AuditoriaPromotoresViewProps> = (
                     <User className="w-4 h-4 stroke-[2.5]" />
                   </div>
                   <div>
-                    <h4 className="text-xs font-black text-gray-900 uppercase">
-                      {item.promotorNome}
-                    </h4>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <h4 className="text-xs font-black text-gray-900 uppercase">
+                        {item.promotorNome}
+                      </h4>
+                      {item.agenciaNome && (
+                        <span className="text-[10px] font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">
+                          {item.agenciaNome}
+                        </span>
+                      )}
+                    </div>
                     <span className="text-[11px] font-mono text-gray-500">
-                      Filial {item.filialId} • Setor {item.setorId}
+                      Filial {item.filialId} • Setor {item.setores ? item.setores.join(' • ') : item.setorId}
                     </span>
                   </div>
                 </div>

@@ -258,11 +258,13 @@ export interface DispositivoVinculado {
 export interface Promotor {
   promotorId: string;
   nome: string;
+  agenciaNome: string;
   matricula?: string;
   filialId: string;
   filialNome: string;
-  setorId: string;
-  setorNome: string;
+  setores: string[]; // ["FRIOS"], ["LOJA"], ou ["FRIOS", "LOJA"]
+  setorId?: string; // Mantido para compatibilidade retroativa
+  setorNome?: string; // Mantido para compatibilidade retroativa
   status: StatusPromotor;
   permissoes: PermissoesPromotor;
   dispositivoVinculado?: DispositivoVinculado | null;
@@ -280,10 +282,13 @@ export interface VinculoPromotor {
   vinculoId: string;
   promotorId: string;
   promotorNome: string;
+  agenciaNome: string;
   filialId: string;
   filialNome: string;
-  setorId: string;
-  setorNome: string;
+  setores: string[]; // ["FRIOS"], ["LOJA"], ou ["FRIOS", "LOJA"]
+  setorId?: string;
+  setorNome?: string;
+  permissoes?: PermissoesPromotor;
   codigoVinculo: string; // 6 dígitos numéricos
   tokenVinculo: string; // Token único / linkTokenId
   dataCriacao: string; // ISO
@@ -308,8 +313,10 @@ export interface RegistroAuditoriaPromotor {
   auditoriaId: string;
   promotorId: string;
   promotorNome: string;
+  agenciaNome?: string;
   filialId: string;
-  setorId: string;
+  setores?: string[];
+  setorId?: string;
   tipoAcao: TipoAcaoAuditoria;
   produtoId?: string;
   codigoInterno?: string;
@@ -337,22 +344,39 @@ export interface OperacaoPromotorSync {
   mensagemErro?: string;
 }
 
+export type SetorPromotor = 'FRIOS' | 'LOJA';
+
 export interface SetorItem {
-  id: string;
+  id: SetorPromotor;
   nome: string;
 }
 
 export const SETORES_DISPONIVEIS: SetorItem[] = [
   { id: 'FRIOS', nome: 'Frios' },
-  { id: 'CONGELADOS', nome: 'Congelados' },
-  { id: 'MERCEARIA', nome: 'Mercearia' },
-  { id: 'HORTIFRUTI', nome: 'Hortifrúti' },
-  { id: 'BAZAR', nome: 'Bazar' },
-  { id: 'BEBIDAS', nome: 'Bebidas' },
-  { id: 'ACOUGUE', nome: 'Açougue' },
-  { id: 'PADARIA', nome: 'Padaria' },
-  { id: 'OUTROS', nome: 'Outros' },
+  { id: 'LOJA', nome: 'Loja' },
 ];
+
+export function getPromotorSetores(p?: Partial<Promotor> | null): SetorPromotor[] {
+  if (!p) return ['FRIOS'];
+  if (Array.isArray(p.setores) && p.setores.length > 0) {
+    const list = p.setores
+      .map((s) => s.toUpperCase() as SetorPromotor)
+      .filter((s) => s === 'FRIOS' || s === 'LOJA');
+    return list.length > 0 ? list : ['FRIOS'];
+  }
+  if (p.setorId) {
+    const sId = p.setorId.toUpperCase();
+    if (sId === 'AMBOS') return ['FRIOS', 'LOJA'];
+    if (sId === 'LOJA') return ['LOJA'];
+    return ['FRIOS'];
+  }
+  return ['FRIOS'];
+}
+
+export function formatarSetoresExibicao(setores?: string[] | null): string {
+  if (!setores || setores.length === 0) return 'FRIOS';
+  return setores.join(' • ');
+}
 
 export interface FilialItem {
   filialId: string;

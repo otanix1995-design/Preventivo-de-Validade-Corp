@@ -42,6 +42,62 @@ export interface PromotoresIndicators {
 
 type PromotoresListener = () => void;
 
+function normalizePromotor(raw: any): Promotor {
+  let setores: string[] = [];
+  if (Array.isArray(raw.setores) && raw.setores.length > 0) {
+    setores = raw.setores.filter((s: any) => s === 'FRIOS' || s === 'LOJA');
+    if (setores.length === 0) setores = ['FRIOS'];
+  } else if (raw.setorId) {
+    const s = String(raw.setorId).toUpperCase();
+    setores = (s === 'LOJA' || s === 'FRIOS') ? [s] : ['FRIOS'];
+  } else if (raw.setor) {
+    const s = String(raw.setor).toUpperCase();
+    setores = (s === 'LOJA' || s === 'FRIOS') ? [s] : ['FRIOS'];
+  } else {
+    setores = ['FRIOS'];
+  }
+
+  const setorNome = setores.join(' • ');
+
+  return {
+    ...raw,
+    nome: raw.nome || '',
+    agenciaNome: (raw.agenciaNome || 'Agência não informada').trim(),
+    setores,
+    setorId: setores[0],
+    setorNome,
+    filialId: raw.filialId || '172',
+    filialNome: raw.filialNome || 'Cascavel',
+    status: raw.status || 'PENDENTE_VINCULO',
+    permissoes: raw.permissoes || { ...PERMISSOES_PADRAO_PROMOTOR },
+    dispositivoVinculado: raw.dispositivoVinculado || null,
+    dataCadastro: raw.dataCadastro || new Date().toISOString(),
+    criadoPor: raw.criadoPor || 'SISTEMA_PRINCIPAL',
+    atualizadoPor: raw.atualizadoPor || 'SISTEMA_PRINCIPAL',
+  };
+}
+
+function normalizeVinculo(raw: any): VinculoPromotor {
+  let setores: string[] = [];
+  if (Array.isArray(raw.setores) && raw.setores.length > 0) {
+    setores = raw.setores.filter((s: any) => s === 'FRIOS' || s === 'LOJA');
+    if (setores.length === 0) setores = ['FRIOS'];
+  } else if (raw.setorId) {
+    const s = String(raw.setorId).toUpperCase();
+    setores = (s === 'LOJA' || s === 'FRIOS') ? [s] : ['FRIOS'];
+  } else {
+    setores = ['FRIOS'];
+  }
+
+  return {
+    ...raw,
+    agenciaNome: (raw.agenciaNome || 'Agência não informada').trim(),
+    setores,
+    setorId: setores[0],
+    setorNome: setores.join(' • '),
+  };
+}
+
 class PromotorService {
   private _promotores: Promotor[] = [];
   private _vinculos: VinculoPromotor[] = [];
@@ -92,8 +148,8 @@ class PromotorService {
         dbGetAll<OperacaoPromotorSync>(STORES.OPERACOES_PROMOTORES),
       ]);
 
-      if (localPromotores.length > 0) this._promotores = localPromotores;
-      if (localVinculos.length > 0) this._vinculos = localVinculos;
+      if (localPromotores.length > 0) this._promotores = localPromotores.map(normalizePromotor);
+      if (localVinculos.length > 0) this._vinculos = localVinculos.map(normalizeVinculo);
       if (localAuditorias.length > 0) this._auditorias = localAuditorias;
       if (localOperacoes.length > 0) this._operacoes = localOperacoes;
 
@@ -122,7 +178,7 @@ class PromotorService {
             snapshot.forEach((docSnap) => {
               const data = docSnap.data() as Promotor;
               if (data && data.promotorId) {
-                remote.push(data);
+                remote.push(normalizePromotor(data));
               }
             });
             if (remote.length > 0) {
@@ -145,7 +201,7 @@ class PromotorService {
             snapshot.forEach((docSnap) => {
               const data = docSnap.data() as VinculoPromotor;
               if (data && data.vinculoId) {
-                remote.push(data);
+                remote.push(normalizeVinculo(data));
               }
             });
             if (remote.length > 0) {
@@ -303,11 +359,11 @@ class PromotorService {
 
   public async cadastrarPromotor(dados: {
     nome: string;
+    agenciaNome: string;
     matricula?: string;
-    filialId: string;
-    filialNome: string;
-    setorId: string;
-    setorNome: string;
+    filialId?: string;
+    filialNome?: string;
+    setores: string[];
     permissoes?: PermissoesPromotor;
   }): Promise<Promotor> {
     const nomeLimpo = dados.nome.trim();
@@ -315,17 +371,30 @@ class PromotorService {
       throw new Error('O nome do promotor é obrigatório.');
     }
 
+    const agenciaLimpa = (dados.agenciaNome || '').trim();
+    if (!agenciaLimpa) {
+      throw new Error('A Agência / Empresa responsável pelo promotor é obrigatória.');
+    }
+
+    const setoresValidos = (dados.setores || []).filter((s) => s === 'FRIOS' || s === 'LOJA');
+    if (setoresValidos.length === 0) {
+      throw new Error('Selecione pelo menos um setor de atuação.');
+    }
+
     const agora = new Date().toISOString();
     const promotorId = `promotor_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const setorNomeExibicao = setoresValidos.join(' • ');
 
     const novoPromotor: Promotor = {
       promotorId,
       nome: nomeLimpo,
+      agenciaNome: agenciaLimpa,
       matricula: dados.matricula ? dados.matricula.trim() : undefined,
       filialId: dados.filialId || '172',
       filialNome: dados.filialNome || 'Cascavel',
-      setorId: dados.setorId || 'FRIOS',
-      setorNome: dados.setorNome || 'Frios',
+      setores: setoresValidos,
+      setorId: setoresValidos[0],
+      setorNome: setorNomeExibicao,
       status: 'PENDENTE_VINCULO',
       permissoes: dados.permissoes || { ...PERMISSOES_PADRAO_PROMOTOR },
       dispositivoVinculado: null,
@@ -348,17 +417,77 @@ class PromotorService {
     await this.registrarAuditoria({
       promotorId,
       promotorNome: novoPromotor.nome,
+      agenciaNome: novoPromotor.agenciaNome,
       filialId: novoPromotor.filialId,
+      setores: novoPromotor.setores,
       setorId: novoPromotor.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: 'NENHUM',
-      valorNovo: `Promotor cadastrado status: PENDENTE_VINCULO`,
+      valorNovo: `Promotor cadastrado (${agenciaLimpa} - Setores: ${setorNomeExibicao}) status: PENDENTE_VINCULO`,
       dataHora: agora,
       statusSincronizacao: 'SINCRONIZADO',
     });
 
     this.notify();
     return novoPromotor;
+  }
+
+  public async atualizarPromotor(
+    promotorId: string,
+    dados: Partial<{
+      nome: string;
+      agenciaNome: string;
+      matricula: string;
+      setores: string[];
+    }>
+  ): Promise<Promotor> {
+    const promotor = this.getPromotorById(promotorId);
+    if (!promotor) throw new Error('Promotor não encontrado.');
+
+    const novoNome = dados.nome !== undefined ? dados.nome.trim() : promotor.nome;
+    if (!novoNome) throw new Error('O nome do promotor é obrigatório.');
+
+    const novaAgencia = dados.agenciaNome !== undefined ? dados.agenciaNome.trim() : promotor.agenciaNome;
+    if (!novaAgencia) throw new Error('A Agência / Empresa é obrigatória.');
+
+    let novosSetores = promotor.setores;
+    if (dados.setores !== undefined) {
+      novosSetores = dados.setores.filter((s) => s === 'FRIOS' || s === 'LOJA');
+      if (novosSetores.length === 0) {
+        throw new Error('Selecione pelo menos um setor de atuação.');
+      }
+    }
+
+    const atualizado: Promotor = {
+      ...promotor,
+      nome: novoNome,
+      agenciaNome: novaAgencia,
+      matricula: dados.matricula !== undefined ? (dados.matricula.trim() || undefined) : promotor.matricula,
+      setores: novosSetores,
+      setorId: novosSetores[0],
+      setorNome: novosSetores.join(' • '),
+      atualizadoPor: 'SISTEMA_PRINCIPAL',
+    };
+
+    this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
+    await dbPut(STORES.PROMOTORES, atualizado);
+    this.syncDocToFirestore('promotores', promotorId, atualizado);
+
+    await this.registrarAuditoria({
+      promotorId,
+      promotorNome: atualizado.nome,
+      agenciaNome: atualizado.agenciaNome,
+      filialId: atualizado.filialId,
+      setores: atualizado.setores,
+      setorId: atualizado.setorId,
+      tipoAcao: 'SINCRONIZOU_ALTERACAO',
+      valorNovo: `Dados atualizados (${novaAgencia} - Setores: ${atualizado.setorNome})`,
+      dataHora: new Date().toISOString(),
+      statusSincronizacao: 'SINCRONIZADO',
+    });
+
+    this.notify();
+    return atualizado;
   }
 
   public async atualizarPermissoes(
@@ -383,7 +512,9 @@ class PromotorService {
     await this.registrarAuditoria({
       promotorId,
       promotorNome: atualizado.nome,
+      agenciaNome: atualizado.agenciaNome,
       filialId: atualizado.filialId,
+      setores: atualizado.setores,
       setorId: atualizado.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorNovo: 'Permissões atualizadas pelo Administrador',
@@ -415,7 +546,9 @@ class PromotorService {
     await this.registrarAuditoria({
       promotorId,
       promotorNome: atualizado.nome,
+      agenciaNome: atualizado.agenciaNome,
       filialId: atualizado.filialId,
+      setores: atualizado.setores,
       setorId: atualizado.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: promotor.status,
@@ -447,7 +580,9 @@ class PromotorService {
     await this.registrarAuditoria({
       promotorId,
       promotorNome: atualizado.nome,
+      agenciaNome: atualizado.agenciaNome,
       filialId: atualizado.filialId,
+      setores: atualizado.setores,
       setorId: atualizado.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: 'BLOQUEADO',
@@ -484,7 +619,9 @@ class PromotorService {
     await this.registrarAuditoria({
       promotorId,
       promotorNome: atualizado.nome,
+      agenciaNome: atualizado.agenciaNome,
       filialId: atualizado.filialId,
+      setores: atualizado.setores,
       setorId: atualizado.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: dispositivoNome,
@@ -528,10 +665,13 @@ class PromotorService {
       vinculoId,
       promotorId: promotor.promotorId,
       promotorNome: promotor.nome,
+      agenciaNome: promotor.agenciaNome,
       filialId: promotor.filialId,
       filialNome: promotor.filialNome,
+      setores: promotor.setores,
       setorId: promotor.setorId,
       setorNome: promotor.setorNome,
+      permissoes: promotor.permissoes,
       codigoVinculo: codigo6,
       tokenVinculo,
       dataCriacao: agora.toISOString(),
@@ -549,7 +689,9 @@ class PromotorService {
     await this.registrarAuditoria({
       promotorId: promotor.promotorId,
       promotorNome: promotor.nome,
+      agenciaNome: promotor.agenciaNome,
       filialId: promotor.filialId,
+      setores: promotor.setores,
       setorId: promotor.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorNovo: `Novo vínculo gerado (Código: ${codigo6}, validade 30 min)`,
@@ -672,7 +814,9 @@ class PromotorService {
     await this.registrarAuditoria({
       promotorId: atualizado.promotorId,
       promotorNome: atualizado.nome,
+      agenciaNome: atualizado.agenciaNome,
       filialId: atualizado.filialId,
+      setores: atualizado.setores,
       setorId: atualizado.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: 'PENDENTE_VINCULO',

@@ -20,7 +20,13 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { promotorService } from '../services/promotorService';
-import { Promotor, SETORES_DISPONIVEIS, StatusPromotor } from '../types';
+import {
+  formatarSetoresExibicao,
+  getPromotorSetores,
+  Promotor,
+  SETORES_DISPONIVEIS,
+  StatusPromotor
+} from '../types';
 import { AuditoriaPromotoresView } from './promotores/AuditoriaPromotoresView';
 import { CadastrarPromotorModal } from './promotores/CadastrarPromotorModal';
 import { DetalhePromotorModal } from './promotores/DetalhePromotorModal';
@@ -82,17 +88,21 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
         if (online) return false;
       }
 
-      // Setor filter
-      if (filtroSetor !== 'TODOS' && p.setorId !== filtroSetor) return false;
+      // Setor filter: Se filtrar por FRIOS, traz quem atende FRIOS (inclusive FRIOS + LOJA)
+      if (filtroSetor !== 'TODOS') {
+        const setoresP = getPromotorSetores(p);
+        if (!setoresP.includes(filtroSetor as any)) return false;
+      }
 
       // Text Search
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const matchNome = p.nome.toLowerCase().includes(q);
+        const matchAgencia = (p.agenciaNome || '').toLowerCase().includes(q);
         const matchMat = p.matricula?.toLowerCase().includes(q);
-        const matchSetor = p.setorNome.toLowerCase().includes(q);
+        const matchSetor = (p.setores || []).some((s) => s.toLowerCase().includes(q)) || p.setorNome?.toLowerCase().includes(q);
         const matchFilial = p.filialNome.toLowerCase().includes(q);
-        if (!matchNome && !matchMat && !matchSetor && !matchFilial) {
+        if (!matchNome && !matchAgencia && !matchMat && !matchSetor && !matchFilial) {
           return false;
         }
       }
@@ -345,11 +355,8 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
                   className="px-3 py-2 text-xs font-black uppercase rounded-xl border border-gray-200 bg-white text-gray-700 outline-hidden cursor-pointer"
                 >
                   <option value="TODOS">Todos os Setores</option>
-                  {SETORES_DISPONIVEIS.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.nome}
-                    </option>
-                  ))}
+                  <option value="FRIOS">FRIOS</option>
+                  <option value="LOJA">LOJA</option>
                 </select>
               </div>
             </div>
@@ -438,20 +445,39 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
                             <h3 className="text-base font-black text-gray-900 uppercase">
                               {promotor.nome}
                             </h3>
+                            {promotor.agenciaNome && (
+                              <span className="text-xs font-bold text-blue-800 bg-blue-50 px-2.5 py-0.5 rounded-md border border-blue-200">
+                                {promotor.agenciaNome}
+                              </span>
+                            )}
                             {promotor.matricula && (
                               <span className="text-[10px] font-mono font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded border border-gray-200">
-                                {promotor.matricula}
+                                Mat: {promotor.matricula}
                               </span>
                             )}
                           </div>
-                          <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500 font-medium mt-0.5">
+                          <div className="flex flex-wrap items-center gap-2.5 text-xs text-gray-500 font-medium mt-1">
                             <span>
                               Filial <strong>{promotor.filialId}</strong> ({promotor.filialNome})
                             </span>
                             <span>•</span>
-                            <span>
-                              Setor: <strong className="text-gray-800">{promotor.setorNome}</strong>
-                            </span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-gray-500 font-bold">Setor:</span>
+                              <div className="flex items-center gap-1">
+                                {getPromotorSetores(promotor).map((s) => (
+                                  <span
+                                    key={s}
+                                    className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider border ${
+                                      s === 'FRIOS'
+                                        ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
+                                        : 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                                    }`}
+                                  >
+                                    {s}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
                           </div>
                         </div>
                       </div>

@@ -1,21 +1,31 @@
 import {
   Ban,
+  Building2,
   Calendar,
   Check,
   CheckCircle,
+  CheckSquare,
   Edit2,
   Lock,
   QrCode,
   ShieldCheck,
   Smartphone,
+  Square,
   Unlock,
   Unlink,
   User,
   X
 } from 'lucide-react';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { promotorService } from '../../services/promotorService';
-import { PermissoesPromotor, Promotor } from '../../types';
+import {
+  formatarSetoresExibicao,
+  getPromotorSetores,
+  PermissoesPromotor,
+  Promotor,
+  SETORES_DISPONIVEIS,
+  SetorPromotor
+} from '../../types';
 import { ConfirmacaoModal } from './ConfirmacaoModal';
 
 interface DetalhePromotorModalProps {
@@ -35,15 +45,87 @@ export const DetalhePromotorModal: React.FC<DetalhePromotorModalProps> = ({
   onVerAuditoria,
   onRefresh,
 }) => {
+  const [isEditingCadastro, setIsEditingCadastro] = useState(false);
+  const [nomeEdit, setNomeEdit] = useState('');
+  const [agenciaEdit, setAgenciaEdit] = useState('');
+  const [matriculaEdit, setMatriculaEdit] = useState('');
+  const [setoresEdit, setSetoresEdit] = useState<SetorPromotor[]>([]);
+
   const [isEditingPermissoes, setIsEditingPermissoes] = useState(false);
   const [permissoesEdit, setPermissoesEdit] = useState<PermissoesPromotor | null>(null);
   const [isDesvincularConfirmOpen, setIsDesvincularConfirmOpen] = useState(false);
   const [isBloquearConfirmOpen, setIsBloquearConfirmOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [erroCadastro, setErroCadastro] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (promotor) {
+      setNomeEdit(promotor.nome);
+      setAgenciaEdit(promotor.agenciaNome || '');
+      setMatriculaEdit(promotor.matricula || '');
+      setSetoresEdit(getPromotorSetores(promotor));
+      setIsEditingCadastro(false);
+      setIsEditingPermissoes(false);
+      setErroCadastro(null);
+    }
+  }, [promotor]);
 
   if (!isOpen || !promotor) return null;
 
   const isOnline = promotorService.isPromotorOnline(promotor);
+  const promotorSetores = getPromotorSetores(promotor);
+
+  const handleStartEditCadastro = () => {
+    setNomeEdit(promotor.nome);
+    setAgenciaEdit(promotor.agenciaNome || '');
+    setMatriculaEdit(promotor.matricula || '');
+    setSetoresEdit(getPromotorSetores(promotor));
+    setErroCadastro(null);
+    setIsEditingCadastro(true);
+  };
+
+  const toggleSetorEdit = (setorId: SetorPromotor) => {
+    setSetoresEdit((prev) => {
+      if (prev.includes(setorId)) {
+        if (prev.length === 1) return prev; // Keep at least one
+        return prev.filter((s) => s !== setorId);
+      } else {
+        return [...prev, setorId];
+      }
+    });
+  };
+
+  const handleSalvarCadastro = async () => {
+    if (!nomeEdit.trim()) {
+      setErroCadastro('Informe o nome do promotor.');
+      return;
+    }
+    if (!agenciaEdit.trim()) {
+      setErroCadastro('Informe a agência ou empresa.');
+      return;
+    }
+    if (setoresEdit.length === 0) {
+      setErroCadastro('Selecione ao menos um setor (FRIOS ou LOJA).');
+      return;
+    }
+
+    setIsSubmitting(true);
+    setErroCadastro(null);
+    try {
+      await promotorService.atualizarPromotor(promotor.promotorId, {
+        nome: nomeEdit.trim(),
+        agenciaNome: agenciaEdit.trim(),
+        matricula: matriculaEdit.trim() || undefined,
+        setores: setoresEdit,
+      });
+      setIsEditingCadastro(false);
+      onRefresh();
+    } catch (err: any) {
+      setErroCadastro(err.message || 'Erro ao atualizar dados do promotor.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   const handleStartEditPermissoes = () => {
     setPermissoesEdit({ ...promotor.permissoes });
@@ -124,23 +206,28 @@ export const DetalhePromotorModal: React.FC<DetalhePromotorModalProps> = ({
           {/* Header */}
           <div className="flex items-start justify-between border-b border-gray-100 pb-4">
             <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-800 flex items-center justify-center shrink-0">
-                <User className="w-6 h-6 stroke-[2.5]" />
+              <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-800 flex items-center justify-center shrink-0 font-black text-base">
+                {promotor.nome.slice(0, 2).toUpperCase()}
               </div>
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <h2 className="text-lg font-black text-gray-900 uppercase tracking-tight">
                     {promotor.nome}
                   </h2>
+                  {promotor.agenciaNome && (
+                    <span className="text-xs font-bold text-blue-800 bg-blue-50 px-2.5 py-0.5 rounded-md border border-blue-200">
+                      {promotor.agenciaNome}
+                    </span>
+                  )}
                   {promotor.matricula && (
                     <span className="text-[11px] font-mono font-bold text-gray-500 bg-gray-100 px-2 py-0.5 rounded border border-gray-200">
-                      {promotor.matricula}
+                      Mat: {promotor.matricula}
                     </span>
                   )}
                 </div>
                 <div className="flex flex-wrap items-center gap-2 mt-1">
                   <span className="text-xs font-semibold text-gray-600">
-                    Filial {promotor.filialId} ({promotor.filialNome}) • Setor {promotor.setorNome}
+                    Filial {promotor.filialId} ({promotor.filialNome}) • Setor: <strong>{formatarSetoresExibicao(promotorSetores)}</strong>
                   </span>
                 </div>
               </div>
@@ -193,6 +280,172 @@ export const DetalhePromotorModal: React.FC<DetalhePromotorModalProps> = ({
                 </span>
               )}
             </div>
+          </div>
+
+          {/* Dados do Cadastro (Nome, Agência, Matrícula, Setor, Filial) */}
+          <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-2xs space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Building2 className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+                <h3 className="text-xs font-black text-gray-900 uppercase tracking-wider">
+                  Dados Cadastrais
+                </h3>
+              </div>
+              {!isEditingCadastro ? (
+                <button
+                  type="button"
+                  onClick={handleStartEditCadastro}
+                  className="px-2.5 py-1 rounded-lg bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-700 text-xs font-black uppercase tracking-wider flex items-center gap-1 transition-colors cursor-pointer"
+                >
+                  <Edit2 className="w-3 h-3" />
+                  <span>Editar Cadastro</span>
+                </button>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditingCadastro(false);
+                      setErroCadastro(null);
+                    }}
+                    className="text-xs text-gray-500 hover:underline uppercase font-bold cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSalvarCadastro}
+                    disabled={isSubmitting}
+                    className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black uppercase tracking-wider flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    <Check className="w-3 h-3 stroke-[3]" />
+                    <span>Salvar</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {erroCadastro && (
+              <div className="p-2 bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold rounded-lg">
+                ⚠ {erroCadastro}
+              </div>
+            )}
+
+            {!isEditingCadastro ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                <div className="p-2.5 bg-gray-50/60 rounded-lg border border-gray-100">
+                  <span className="text-[11px] font-bold text-gray-500 uppercase block mb-0.5">
+                    Nome do Promotor
+                  </span>
+                  <p className="text-sm font-black text-gray-900">{promotor.nome}</p>
+                </div>
+
+                <div className="p-2.5 bg-gray-50/60 rounded-lg border border-gray-100">
+                  <span className="text-[11px] font-bold text-gray-500 uppercase block mb-0.5">
+                    Agência / Empresa
+                  </span>
+                  <p className="text-sm font-black text-blue-900">{promotor.agenciaNome || '—'}</p>
+                </div>
+
+                <div className="p-2.5 bg-gray-50/60 rounded-lg border border-gray-100">
+                  <span className="text-[11px] font-bold text-gray-500 uppercase block mb-0.5">
+                    Identificação / Matrícula
+                  </span>
+                  <p className="text-sm font-semibold text-gray-800">{promotor.matricula || 'Não informada'}</p>
+                </div>
+
+                <div className="p-2.5 bg-gray-50/60 rounded-lg border border-gray-100">
+                  <span className="text-[11px] font-bold text-gray-500 uppercase block mb-1">
+                    Setor(es) de Atuação
+                  </span>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {promotorSetores.map((s) => (
+                      <span
+                        key={s}
+                        className={`px-2.5 py-0.5 rounded text-[11px] font-black uppercase tracking-wider border ${
+                          s === 'FRIOS'
+                            ? 'bg-cyan-50 text-cyan-800 border-cyan-200'
+                            : 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                        }`}
+                      >
+                        [ {s} ]
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3 pt-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-black text-gray-700 uppercase mb-1">
+                      Nome do Promotor *
+                    </label>
+                    <input
+                      type="text"
+                      value={nomeEdit}
+                      onChange={(e) => setNomeEdit(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-300 text-xs font-semibold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-black text-gray-700 uppercase mb-1">
+                      Agência / Empresa *
+                    </label>
+                    <input
+                      type="text"
+                      value={agenciaEdit}
+                      onChange={(e) => setAgenciaEdit(e.target.value)}
+                      placeholder="Ex: Trade Marketing ABC"
+                      className="w-full px-3 py-2 rounded-lg border border-gray-300 text-xs font-semibold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-black text-gray-700 uppercase mb-1">
+                      Matrícula (opcional)
+                    </label>
+                    <input
+                      type="text"
+                      value={matriculaEdit}
+                      onChange={(e) => setMatriculaEdit(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-gray-300 text-xs font-semibold"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-black text-gray-700 uppercase mb-1">
+                      Setores de Atuação *
+                    </label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {SETORES_DISPONIVEIS.map((s) => {
+                        const checked = setoresEdit.includes(s.id as SetorPromotor);
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => toggleSetorEdit(s.id as SetorPromotor)}
+                            className={`flex items-center gap-1.5 p-2 rounded-lg border text-xs font-black uppercase transition-all cursor-pointer ${
+                              checked
+                                ? 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-gray-50 text-gray-700 border-gray-200'
+                            }`}
+                          >
+                            {checked ? (
+                              <CheckSquare className="w-3.5 h-3.5 stroke-[2.5]" />
+                            ) : (
+                              <Square className="w-3.5 h-3.5 stroke-[2]" />
+                            )}
+                            <span>{s.nome}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Dados Operacionais e Dispositivo */}

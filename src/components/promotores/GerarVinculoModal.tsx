@@ -10,7 +10,7 @@ import {
 import QRCode from 'qrcode';
 import React, { useEffect, useState } from 'react';
 import { promotorService } from '../../services/promotorService';
-import { Promotor, VinculoPromotor } from '../../types';
+import { formatarSetoresExibicao, getPromotorSetores, Promotor, VinculoPromotor } from '../../types';
 import { ConfirmacaoModal } from './ConfirmacaoModal';
 
 interface GerarVinculoModalProps {
@@ -60,6 +60,8 @@ export const GerarVinculoModal: React.FC<GerarVinculoModalProps> = ({
           cod: v.codigoVinculo,
           filial: v.filialId,
           setor: v.setorId,
+          setores: v.setores || (v.setorId === 'AMBOS' ? ['FRIOS', 'LOJA'] : [v.setorId]),
+          agencia: v.agenciaNome || '',
         });
 
         const url = await QRCode.toDataURL(payloadQr, {
@@ -124,6 +126,8 @@ export const GerarVinculoModal: React.FC<GerarVinculoModalProps> = ({
         cod: novo.codigoVinculo,
         filial: novo.filialId,
         setor: novo.setorId,
+        setores: novo.setores || (novo.setorId === 'AMBOS' ? ['FRIOS', 'LOJA'] : [novo.setorId]),
+        agencia: novo.agenciaNome || '',
       });
 
       const url = await QRCode.toDataURL(payloadQr, {
@@ -179,11 +183,18 @@ export const GerarVinculoModal: React.FC<GerarVinculoModalProps> = ({
               <span className="text-[10px] font-black uppercase tracking-wider text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
                 VÍNCULO DE ACESSO AO APP
               </span>
-              <h2 className="text-lg font-black text-gray-900 uppercase tracking-tight mt-1">
-                {promotor.nome}
-              </h2>
-              <p className="text-xs text-gray-500 font-medium">
-                Filial {promotor.filialId} ({promotor.filialNome}) • Setor {promotor.setorNome}
+              <div className="flex flex-wrap items-center gap-2 mt-1">
+                <h2 className="text-lg font-black text-gray-900 uppercase tracking-tight">
+                  {promotor.nome}
+                </h2>
+                {promotor.agenciaNome && (
+                  <span className="text-xs font-bold text-blue-800 bg-blue-50 px-2.5 py-0.5 rounded-md border border-blue-200">
+                    {promotor.agenciaNome}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-gray-500 font-medium mt-0.5">
+                Filial {promotor.filialId} ({promotor.filialNome}) • Setor: <strong>{formatarSetoresExibicao(getPromotorSetores(promotor))}</strong>
               </p>
             </div>
             <button
