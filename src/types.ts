@@ -302,6 +302,8 @@ export interface VinculoPromotor {
 export type TipoAcaoAuditoria =
   | 'CONSULTOU_PRODUTO'
   | 'CADASTROU_VENCIMENTO'
+  | 'EDITOU_VENCIMENTO'
+  | 'EXCLUIU_VENCIMENTO'
   | 'ATUALIZOU_QUANTIDADE'
   | 'ENVIOU_COMPRADOR'
   | 'REMOVEU_ENVIO_COMPRADOR'

@@ -152,10 +152,10 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
     const mediaDiaria = (selectedProduto.vendas_qtde_30d / 30).toFixed(2);
     const conversaoEstoqueTotal = posEstoque.conversaoTexto;
 
-    const handleDeleteLote = (id: string, e: React.MouseEvent) => {
+    const handleDeleteLote = async (id: string, e: React.MouseEvent) => {
       e.stopPropagation();
       if (confirm('Deseja excluir este lote de vencimento?')) {
-        deleteVencimento(id);
+        await deleteVencimento(id);
         // Force refresh by triggering state update
         onSelectProduto({ ...selectedProduto });
       }

@@ -21,6 +21,7 @@ import { exportarCsvVencimentos, gerarPdfVencimentos } from '../services/pdfRepo
 import { calcularProjecaoVencimento, formatarDataBR, formatarDiasRestantes } from '../services/projection';
 import { deleteVencimento } from '../services/storage';
 import { productRepository } from '../services/productRepository';
+import { syncQueueService } from '../services/syncQueueService';
 import { LoteVencimento, ProdutoSMG } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 import { StatusBadge } from './StatusBadge';
@@ -48,6 +49,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [isLimparModalOpen, setIsLimparModalOpen] = useState(false);
   const [saeouCount, setSaeouCount] = useState(() => productRepository.getSaeou060Registros().length);
+  const [pendingSyncCount, setPendingSyncCount] = useState(() => syncQueueService.getPendingCount());
   const hoje = new Date();
 
   useEffect(() => {
@@ -60,7 +62,13 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
     const unsub = productRepository.subscribe(() => {
       setSaeouCount(productRepository.getSaeou060Registros().length);
     });
-    return unsub;
+    const unsubQueue = syncQueueService.subscribe(() => {
+      setPendingSyncCount(syncQueueService.getPendingCount());
+    });
+    return () => {
+      unsub();
+      unsubQueue();
+    };
   }, []);
 
   const produtosMap = useMemo(() => {
@@ -132,10 +140,10 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
     }).sort((a, b) => a.projecao.dias_restantes - b.projecao.dias_restantes);
   }, [lotesCalculados, activeFilter, searchTerm]);
 
-  const handleDeleteLote = (id: string, e: React.MouseEvent) => {
+  const handleDeleteLote = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (confirm('Deseja realmente remover este lote de vencimento?')) {
-      deleteVencimento(id);
+      await deleteVencimento(id);
     }
   };
 
@@ -226,6 +234,21 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
             )}
           </button>
         </div>
+
+        {pendingSyncCount > 0 && (
+          <div className="flex items-center justify-between text-xs bg-blue-500/30 border border-blue-300/40 rounded-lg px-3 py-1.5 text-blue-100">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+              <span>Dados salvos localmente • Sincronização em segundo plano ({pendingSyncCount} pendente{pendingSyncCount > 1 ? 's' : ''})</span>
+            </div>
+            <button
+              onClick={() => syncQueueService.processQueue()}
+              className="text-[11px] underline hover:text-white"
+            >
+              Sincronizar agora
+            </button>
+          </div>
+        )}
       </div>
 
       {/* RENDERIZAÇÃO DA SUB-ABA ATIVA */}

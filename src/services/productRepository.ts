@@ -25,6 +25,7 @@ import {
 } from './duplicateValidator';
 import { cloudSyncService } from './cloudSyncService';
 import { centralFirestoreService } from './centralFirestoreService';
+import { syncQueueService } from './syncQueueService';
 import { promotorService } from './promotorService';
 import {
   dbClear,
@@ -217,12 +218,7 @@ class ProductRepository {
             this.notify();
           },
           onRemoteVencimentosReceived: (remoteVencimentos) => {
-            if (remoteVencimentos.length > 0 || this._vencimentos.length > 0) {
-              this._vencimentos = remoteVencimentos;
-              this._metadados.total_vencimentos = remoteVencimentos.length;
-              dbPutAll(STORES.VENCIMENTOS, remoteVencimentos, true).catch(() => {});
-              this.notify();
-            }
+            this.mergeRemoteVencimentos(remoteVencimentos);
           },
           onRemoteHistoricoReceived: (remoteHist) => {
             this._historico = remoteHist;
@@ -970,6 +966,80 @@ class ProductRepository {
     return findDuplicateVencimento(candidate, this._vencimentos, ignoreLoteId);
   }
 
+  /**
+   * Mescla vencimentos vindos da nuvem preservando com estrita prioridade
+   * a base local, exclusões (tombstones) e operações pendentes de sincronização.
+   */
+  public mergeRemoteVencimentos(remoteVencimentos: LoteVencimento[]): void {
+    if (!remoteVencimentos || remoteVencimentos.length === 0) {
+      // REGRA: Nuvem vazia ou retorno vazio NUNCA apaga a base local!
+      return;
+    }
+
+    let modified = false;
+    const localMap = new Map<string, LoteVencimento>();
+    this._vencimentos.forEach((l) => localMap.set(l.id, l));
+
+    for (const remote of remoteVencimentos) {
+      if (!remote || !remote.id) continue;
+
+      // REGRA 19: EXCLUSÃO NÃO DEVE RESSUSCITAR
+      // Se foi excluído localmente (tombstone ativo), não restaurar
+      if (syncQueueService.isTombstoned(remote.id)) {
+        continue;
+      }
+
+      // REGRA 11: NÃO SOBRESCREVER COM DADOS ANTIGOS
+      // Se há operação pendente local para este registro, preservar a versão local
+      if (syncQueueService.hasPendingOperationFor(remote.id)) {
+        continue;
+      }
+
+      const local = localMap.get(remote.id);
+      if (!local) {
+        // Novo vencimento vindo de outro dispositivo:
+        // Verificar duplicidade antes de inserir
+        const duplicateCheck = findDuplicateVencimento(
+          {
+            codigo_interno: remote.codigo_interno,
+            digito: remote.digito,
+            codigo_exibicao: remote.codigo_exibicao,
+            descricao_produto: remote.descricao_produto,
+            data_validade: remote.data_validade,
+          },
+          this._vencimentos,
+          remote.id
+        );
+
+        if (!duplicateCheck.isDuplicate) {
+          this._vencimentos.push(remote);
+          localMap.set(remote.id, remote);
+          modified = true;
+        }
+      } else {
+        // Registro já existe localmente:
+        // Comparar timestamps para garantir que versão antiga não sobrescreva nova
+        const localTime = new Date(local.atualizado_em || local.criado_em || 0).getTime();
+        const remoteTime = new Date(remote.atualizado_em || remote.criado_em || 0).getTime();
+
+        if (remoteTime > localTime) {
+          const idx = this._vencimentos.findIndex((l) => l.id === remote.id);
+          if (idx !== -1) {
+            this._vencimentos[idx] = { ...local, ...remote };
+            localMap.set(remote.id, this._vencimentos[idx]);
+            modified = true;
+          }
+        }
+      }
+    }
+
+    if (modified) {
+      this._metadados.total_vencimentos = this._vencimentos.length;
+      dbPutAll(STORES.VENCIMENTOS, this._vencimentos, true).catch(() => {});
+      this.notify();
+    }
+  }
+
   public async addVencimento(
     novoLote: Omit<LoteVencimento, 'id' | 'criado_em' | 'atualizado_em'>
   ): Promise<LoteVencimento> {
@@ -1014,7 +1084,7 @@ class ProductRepository {
         throw err;
       }
 
-      // 6. Se não existir -> SALVAR normalmente
+      // 6. Se não existir -> SALVAR normalmente localmente
       const id = `venc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
       const agora = new Date().toISOString();
 
@@ -1028,7 +1098,11 @@ class ProductRepository {
         atualizado_em: agora,
       };
 
-      this._vencimentos.push(loteCriado);
+      // Limpar eventual tombstone
+      syncQueueService.removeTombstone(id);
+
+      // Persistir imediatamente na base local
+      this._vencimentos.unshift(loteCriado);
       await dbPut(STORES.VENCIMENTOS, loteCriado);
 
       const meta = {
@@ -1038,12 +1112,36 @@ class ProductRepository {
       this._metadados = meta;
       await dbSetMeta('metadados_gerais', meta);
 
-      // Real-time push to Cloud
-      cloudSyncService.pushLoteToCloud(loteCriado).catch((e) => {
-        console.warn('Erro ao sincronizar lote na nuvem:', e);
-      });
+      // Registrar auditoria local da operação
+      try {
+        await promotorService.registrarAuditoria({
+          promotorId: 'ADMIN',
+          promotorNome: 'Administrador / Loja',
+          filialId: this._metadados?.filial_numero || '172',
+          setorId: novoLote.descricao_produto || 'LOJA',
+          tipoAcao: 'CADASTROU_VENCIMENTO',
+          codigoInterno: codNorm,
+          digito: digNorm,
+          descricao: novoLote.descricao_produto,
+          valorNovo: JSON.stringify({
+            data_validade: dateIso,
+            quantidade: novoLote.quantidade_total_unidades,
+            preco_trabalhado: novoLote.preco_trabalhado,
+            enviar_ao_comprador: novoLote.enviar_ao_comprador,
+          }),
+          dataHora: agora,
+          statusSincronizacao: 'PENDENTE',
+        });
+      } catch (auditErr) {
+        console.warn('Aviso ao registrar auditoria de novo vencimento:', auditErr);
+      }
 
+      // Notificar interface imediatamente (sucesso operacional garantido)
       this.notify();
+
+      // Enfileirar sincronização com a nuvem em segundo plano
+      syncQueueService.enqueue('CREATE_VENCIMENTO', loteCriado.id, loteCriado);
+
       return loteCriado;
     } finally {
       this._savingLoteKeys.delete(lockKey);
@@ -1088,28 +1186,102 @@ class ProductRepository {
       }
     }
 
-    this._vencimentos[index] = {
+    const agora = new Date().toISOString();
+    const loteAtualizado: LoteVencimento = {
       ...this._vencimentos[index],
       ...updates,
       data_validade: newDateIso || this._vencimentos[index].data_validade,
-      atualizado_em: new Date().toISOString(),
+      atualizado_em: agora,
     };
 
-    await dbPut(STORES.VENCIMENTOS, this._vencimentos[index]);
+    this._vencimentos[index] = loteAtualizado;
 
-    // Real-time update in Cloud
-    cloudSyncService.pushLoteToCloud(this._vencimentos[index]).catch((e) => {
-      console.warn('Erro ao atualizar lote na nuvem:', e);
-    });
+    // Persistir imediatamente na base local
+    await dbPut(STORES.VENCIMENTOS, loteAtualizado);
 
+    // Determinar tipo de operação para fila e auditoria
+    let opType:
+      | 'UPDATE_QUANTIDADE'
+      | 'ENVIAR_COMPRADOR'
+      | 'REMOVER_ENVIO_COMPRADOR'
+      | 'UPDATE_VENCIMENTO' = 'UPDATE_VENCIMENTO';
+
+    let tipoAcaoAudit:
+      | 'ATUALIZOU_QUANTIDADE'
+      | 'ENVIOU_COMPRADOR'
+      | 'REMOVEU_ENVIO_COMPRADOR'
+      | 'EDITOU_VENCIMENTO' = 'EDITOU_VENCIMENTO';
+
+    if (
+      updates.quantidade_total_unidades !== undefined &&
+      updates.quantidade_total_unidades !== current.quantidade_total_unidades
+    ) {
+      opType = 'UPDATE_QUANTIDADE';
+      tipoAcaoAudit = 'ATUALIZOU_QUANTIDADE';
+    } else if (
+      updates.enviar_ao_comprador !== undefined &&
+      updates.enviar_ao_comprador !== current.enviar_ao_comprador
+    ) {
+      if (updates.enviar_ao_comprador) {
+        opType = 'ENVIAR_COMPRADOR';
+        tipoAcaoAudit = 'ENVIOU_COMPRADOR';
+      } else {
+        opType = 'REMOVER_ENVIO_COMPRADOR';
+        tipoAcaoAudit = 'REMOVEU_ENVIO_COMPRADOR';
+      }
+    }
+
+    // Registrar auditoria local da edição
+    try {
+      await promotorService.registrarAuditoria({
+        promotorId: 'ADMIN',
+        promotorNome: 'Administrador / Loja',
+        filialId: this._metadados?.filial_numero || '172',
+        setorId: loteAtualizado.descricao_produto || 'LOJA',
+        tipoAcao: tipoAcaoAudit,
+        codigoInterno: loteAtualizado.codigo_interno,
+        digito: loteAtualizado.digito,
+        descricao: loteAtualizado.descricao_produto,
+        valorAnterior: JSON.stringify({
+          quantidade: current.quantidade_total_unidades,
+          data_validade: current.data_validade,
+          enviar_ao_comprador: current.enviar_ao_comprador,
+          preco_trabalhado: current.preco_trabalhado,
+        }),
+        valorNovo: JSON.stringify({
+          quantidade: loteAtualizado.quantidade_total_unidades,
+          data_validade: loteAtualizado.data_validade,
+          enviar_ao_comprador: loteAtualizado.enviar_ao_comprador,
+          preco_trabalhado: loteAtualizado.preco_trabalhado,
+        }),
+        dataHora: agora,
+        statusSincronizacao: 'PENDENTE',
+      });
+    } catch (auditErr) {
+      console.warn('Aviso ao registrar auditoria de edição:', auditErr);
+    }
+
+    // Notificar interface imediatamente (edição visível instantaneamente)
     this.notify();
-    return this._vencimentos[index];
+
+    // Enfileirar sincronização com a nuvem em segundo plano
+    syncQueueService.enqueue(opType, loteAtualizado.id, loteAtualizado);
+
+    return loteAtualizado;
   }
 
   public async deleteVencimento(id: string): Promise<boolean> {
-    const filtrados = this._vencimentos.filter((l) => l.id !== id);
-    if (filtrados.length === this._vencimentos.length) return false;
+    const loteIndex = this._vencimentos.findIndex((l) => l.id === id);
+    if (loteIndex === -1) return false;
 
+    const loteRemovido = this._vencimentos[loteIndex];
+    const agora = new Date().toISOString();
+
+    // 1. Registrar tombstone imediatamente para evitar que retornos de nuvem ressuscitem o lote
+    syncQueueService.addTombstone(id);
+
+    // 2. Remover da base local
+    const filtrados = this._vencimentos.filter((l) => l.id !== id);
     this._vencimentos = filtrados;
     await dbPutAll(STORES.VENCIMENTOS, filtrados, true);
 
@@ -1120,12 +1292,41 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    // Real-time delete from Cloud
-    cloudSyncService.deleteLoteFromCloud(id).catch((e) => {
-      console.warn('Erro ao deletar lote da nuvem:', e);
+    // 3. Registrar auditoria local da exclusão
+    try {
+      await promotorService.registrarAuditoria({
+        promotorId: 'ADMIN',
+        promotorNome: 'Administrador / Loja',
+        filialId: this._metadados?.filial_numero || '172',
+        setorId: loteRemovido.descricao_produto || 'LOJA',
+        tipoAcao: 'EXCLUIU_VENCIMENTO',
+        codigoInterno: loteRemovido.codigo_interno,
+        digito: loteRemovido.digito,
+        descricao: loteRemovido.descricao_produto,
+        valorAnterior: JSON.stringify({
+          quantidade: loteRemovido.quantidade_total_unidades,
+          data_validade: loteRemovido.data_validade,
+          preco_trabalhado: loteRemovido.preco_trabalhado,
+        }),
+        valorNovo: 'REGISTRO_EXCLUIDO',
+        dataHora: agora,
+        statusSincronizacao: 'PENDENTE',
+      });
+    } catch (auditErr) {
+      console.warn('Aviso ao registrar auditoria de exclusão:', auditErr);
+    }
+
+    // 4. Notificar interface imediatamente (exclusão refletida na tela)
+    this.notify();
+
+    // 5. Enfileirar operação de exclusão para nuvem em segundo plano
+    syncQueueService.enqueue('DELETE_VENCIMENTO', id, {
+      id,
+      codigo_interno: loteRemovido.codigo_interno,
+      digito: loteRemovido.digito,
+      data_validade: loteRemovido.data_validade,
     });
 
-    this.notify();
     return true;
   }
 
