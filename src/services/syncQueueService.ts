@@ -4,7 +4,7 @@
  * and conflict-free background synchronizations to Firebase/Firestore.
  */
 
-import { db, ensureAuth } from './firebase';
+import { db, ensureAuth, isFirestoreQuotaExceeded, isQuotaError, markQuotaExceeded } from './firebase';
 import { doc, setDoc } from 'firebase/firestore';
 import {
   buildVencimentoCentralPayload,
@@ -250,6 +250,14 @@ class SyncQueueService {
       return;
     }
 
+    // Requisito 17: Se a cota estiver esgotada, não disparar requisições em loop
+    if (isFirestoreQuotaExceeded()) {
+      console.warn(
+        '[SyncQueue] Cota do Firestore temporariamente indisponível. Operações permanecerão salvas localmente.'
+      );
+      return;
+    }
+
     this._isProcessing = true;
 
     try {
@@ -261,6 +269,11 @@ class SyncQueueService {
       );
 
       for (const op of pendingOps) {
+        // Re-check quota before each operation in case an earlier one hit quota
+        if (isFirestoreQuotaExceeded()) {
+          break;
+        }
+
         op.status = 'SINCRONIZANDO';
         op.tentativas += 1;
         this.notify();
@@ -273,6 +286,17 @@ class SyncQueueService {
           op.erroMensagem = undefined;
         } catch (err: any) {
           console.warn(`[SyncQueue] Falha ao sincronizar operação ${op.operationId} (${op.tipoOperacao}):`, err?.message);
+          
+          if (isQuotaError(err)) {
+            markQuotaExceeded();
+            op.status = 'ERRO';
+            op.erroMensagem = 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.';
+            this.saveToStorage();
+            this.notify();
+            // Interromper tentativas subsequentes imediatamente (evita loop)
+            break;
+          }
+
           op.status = 'ERRO';
           op.erroMensagem = err?.message || 'Erro de comunicação';
         }

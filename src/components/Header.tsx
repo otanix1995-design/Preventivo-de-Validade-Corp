@@ -13,6 +13,7 @@ import React, { useEffect, useState } from 'react';
 import { cloudSyncService, SyncStatusInfo } from '../services/cloudSyncService';
 import { syncQueueService } from '../services/syncQueueService';
 import { productRepository } from '../services/productRepository';
+import { isFirestoreQuotaExceeded } from '../services/firebase';
 import { MetadadosBase } from '../types';
 
 interface HeaderProps {
@@ -52,6 +53,11 @@ export const Header: React.FC<HeaderProps> = ({
 
   const handleManualSync = async () => {
     if (isManualSyncing || syncStatus.state === 'syncing') return;
+    if (isFirestoreQuotaExceeded()) {
+      setSyncToast('Cota temporariamente indisponível. Operações continuam seguras e salvas localmente.');
+      setTimeout(() => setSyncToast(null), 4500);
+      return;
+    }
     setIsManualSyncing(true);
     try {
       // 1. Processar pendências locais primeiro

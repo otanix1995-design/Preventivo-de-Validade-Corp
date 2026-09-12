@@ -10,7 +10,9 @@ import {
   collection,
   doc,
   getDocs,
+  limit,
   onSnapshot,
+  query,
   setDoc,
   Unsubscribe
 } from 'firebase/firestore';
@@ -30,7 +32,13 @@ import {
 } from '../types';
 import { cleanForFirestore } from './cloudSyncService';
 import { dbGetAll, dbPut, dbPutAll, STORES } from './db';
-import { db } from './firebase';
+import {
+  db,
+  isFirestoreQuotaExceeded,
+  isQuotaError,
+  logFirestoreRead,
+  markQuotaExceeded
+} from './firebase';
 import { productRepository } from './productRepository';
 
 export interface PromotoresIndicators {
@@ -197,11 +205,24 @@ class PromotorService {
   private initFirestoreSync() {
     if (!db) return;
 
+    // Requisito 10: Limpar listeners anteriores antes de abrir novos (evita ouvintes duplicados)
+    this._firestoreUnsubs.forEach((u) => {
+      try { u(); } catch {}
+    });
+    this._firestoreUnsubs = [];
+
+    // Requisito 17: Se a cota estiver excedida, não abrir listeners
+    if (isFirestoreQuotaExceeded()) {
+      return;
+    }
+
     try {
-      // Promotores listener
+      // Requisito 9: Listener controlado apenas para Promotores (com limit)
+      const qPromotores = query(collection(db, 'promotores'), limit(60));
       const unsubPromotores = onSnapshot(
-        collection(db, 'promotores'),
+        qPromotores,
         (snapshot) => {
+          logFirestoreRead('promotoresListener', 'promotores', snapshot.size);
           if (!snapshot.empty) {
             const remote: Promotor[] = [];
             snapshot.forEach((docSnap) => {
@@ -217,107 +238,55 @@ class PromotorService {
             }
           }
         },
-        (err) => console.warn('Aviso Firestore promotores onSnapshot:', err.message)
+        (err) => {
+          console.warn('Aviso Firestore promotores onSnapshot:', err?.message);
+          if (isQuotaError(err)) {
+            markQuotaExceeded();
+          }
+        }
       );
       this._firestoreUnsubs.push(unsubPromotores);
 
-      // Vínculos listener (escuta vinculosPromotor e vinculos_promotores)
-      const processVinculosSnapshot = (snapshot: any) => {
-        if (!snapshot.empty) {
-          const remote: VinculoPromotor[] = [];
-          snapshot.forEach((docSnap: any) => {
-            const data = docSnap.data() as VinculoPromotor;
-            if (data && data.vinculoId) {
-              remote.push(normalizeVinculo(data));
-            }
-          });
-          if (remote.length > 0) {
-            // Unir sem duplicar
-            const map = new Map<string, VinculoPromotor>();
-            this._vinculos.forEach((v) => map.set(v.vinculoId, v));
-            remote.forEach((v) => map.set(v.vinculoId, v));
-            this._vinculos = Array.from(map.values());
-            dbPutAll(STORES.VINCULOS_PROMOTORES, this._vinculos, true).catch(() => {});
-            this.notify();
-          }
-        }
-      };
-
+      // Vínculos listener (apenas vinculosPromotor ativo com limit, sem duplicações)
+      const qVinculos = query(collection(db, 'vinculosPromotor'), limit(60));
       const unsubVinculosCentral = onSnapshot(
-        collection(db, 'vinculosPromotor'),
-        processVinculosSnapshot,
-        (err) => console.warn('Aviso Firestore vinculosPromotor onSnapshot:', err.message)
-      );
-      this._firestoreUnsubs.push(unsubVinculosCentral);
-
-      const unsubVinculos = onSnapshot(
-        collection(db, 'vinculos_promotores'),
-        processVinculosSnapshot,
-        (err) => console.warn('Aviso Firestore vinculos onSnapshot:', err.message)
-      );
-      this._firestoreUnsubs.push(unsubVinculos);
-
-      // Auditorias listener (escuta auditoria e auditoria_promotores)
-      const processAuditoriaSnapshot = (snapshot: any) => {
-        if (!snapshot.empty) {
-          const remote: RegistroAuditoriaPromotor[] = [];
-          snapshot.forEach((docSnap: any) => {
-            const data = docSnap.data() as RegistroAuditoriaPromotor;
-            if (data && data.auditoriaId) {
-              remote.push(data);
-            }
-          });
-          if (remote.length > 0) {
-            const map = new Map<string, RegistroAuditoriaPromotor>();
-            this._auditorias.forEach((a) => map.set(a.auditoriaId, a));
-            remote.forEach((a) => map.set(a.auditoriaId, a));
-            const merged = Array.from(map.values());
-            merged.sort((a, b) => new Date(b.dataHora).getTime() - new Date(a.dataHora).getTime());
-            this._auditorias = merged;
-            dbPutAll(STORES.AUDITORIA_PROMOTORES, merged, true).catch(() => {});
-            this.notify();
-          }
-        }
-      };
-
-      const unsubAuditoriaCentral = onSnapshot(
-        collection(db, 'auditoria'),
-        processAuditoriaSnapshot,
-        (err) => console.warn('Aviso Firestore auditoria onSnapshot:', err.message)
-      );
-      this._firestoreUnsubs.push(unsubAuditoriaCentral);
-
-      const unsubAuditoria = onSnapshot(
-        collection(db, 'auditoria_promotores'),
-        processAuditoriaSnapshot,
-        (err) => console.warn('Aviso Firestore auditoria_promotores onSnapshot:', err.message)
-      );
-      this._firestoreUnsubs.push(unsubAuditoria);
-
-      // Operações sync listener
-      const unsubOperacoes = onSnapshot(
-        collection(db, 'operacoes_promotores'),
+        qVinculos,
         (snapshot) => {
+          logFirestoreRead('vinculosListener', 'vinculosPromotor', snapshot.size);
           if (!snapshot.empty) {
-            const remote: OperacaoPromotorSync[] = [];
+            const remote: VinculoPromotor[] = [];
             snapshot.forEach((docSnap) => {
-              const data = docSnap.data() as OperacaoPromotorSync;
-              if (data && data.operationId) {
-                remote.push(data);
+              const data = docSnap.data() as VinculoPromotor;
+              if (data && data.vinculoId) {
+                remote.push(normalizeVinculo(data));
               }
             });
             if (remote.length > 0) {
-              this._operacoes = remote;
-              dbPutAll(STORES.OPERACOES_PROMOTORES, remote, true).catch(() => {});
+              const map = new Map<string, VinculoPromotor>();
+              this._vinculos.forEach((v) => map.set(v.vinculoId, v));
+              remote.forEach((v) => map.set(v.vinculoId, v));
+              this._vinculos = Array.from(map.values());
+              dbPutAll(STORES.VINCULOS_PROMOTORES, this._vinculos, true).catch(() => {});
               this.notify();
             }
           }
         },
-        (err) => console.warn('Aviso Firestore operacoes onSnapshot:', err.message)
+        (err) => {
+          console.warn('Aviso Firestore vinculosPromotor onSnapshot:', err?.message);
+          if (isQuotaError(err)) {
+            markQuotaExceeded();
+          }
+        }
       );
-      this._firestoreUnsubs.push(unsubOperacoes);
-    } catch (err) {
-      console.warn('Erro ao configurar Firestore listeners de promotores:', err);
+      this._firestoreUnsubs.push(unsubVinculosCentral);
+
+      // Requisito 9: REMOVIDOS listeners de auditoria, auditoria_promotores e operacoes_promotores
+      // para economizar centenas de leituras diárias desnecessárias no Firestore.
+    } catch (err: any) {
+      console.warn('Erro ao configurar Firestore listeners de promotores:', err?.message);
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+      }
     }
   }
 

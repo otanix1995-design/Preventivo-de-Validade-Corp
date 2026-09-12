@@ -13,11 +13,13 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
   query,
   setDoc,
   Unsubscribe,
-  writeBatch
+  where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   LoteVencimento,
@@ -25,14 +27,21 @@ import {
   ProdutoSMG,
   RegistroSaeou060,
   ResumoImportacao,
-  VinculoEan
+  VinculoEan,
 } from '../types';
-import { db, ensureAuth } from './firebase';
+import {
+  db,
+  ensureAuth,
+  isFirestoreQuotaExceeded,
+  isQuotaError,
+  logFirestoreRead,
+  markQuotaExceeded,
+} from './firebase';
 import {
   normalizeVencimentoRecord,
   buildVencimentoCentralPayload,
   getDeviceId,
-  cleanForFirestore as cleanCentralForFirestore
+  cleanForFirestore as cleanCentralForFirestore,
 } from './deviceId';
 
 export type SyncState = 'connecting' | 'connected' | 'syncing' | 'offline' | 'error';
@@ -167,6 +176,14 @@ class CloudSyncService {
   public async init(): Promise<void> {
     if (this._isInitialized) return;
 
+    if (isFirestoreQuotaExceeded()) {
+      this.updateStatus({
+        state: 'error',
+        message: 'Cota temporariamente indisponível. Operação 100% local ativa.',
+      });
+      return;
+    }
+
     try {
       this.updateStatus({ state: 'connecting', message: 'Conectando à Nuvem...' });
       await ensureAuth().catch(() => null);
@@ -177,89 +194,87 @@ class CloudSyncService {
       });
       this._unsubscribers = [];
 
-      // 1. Listen to Metadata for Catalog/Vinculos/Saeou060 updates across devices
+      // 1. Listen to Metadata (Requisito 1: Apenas metadados leves; NÃO baixar catálogo integral automaticamente)
       const metaDocRef = doc(db, 'metadados', 'geral');
-      const unsubMeta = onSnapshot(metaDocRef, async (snapshot) => {
-        if (!snapshot.exists()) {
-          return;
+      const unsubMeta = onSnapshot(
+        metaDocRef,
+        (snapshot) => {
+          if (!snapshot.exists()) return;
+          const data = snapshot.data();
+          if (data) {
+            logFirestoreRead('escutarMetadados', 'metadados/geral', 1);
+          }
+        },
+        (err) => {
+          console.warn('[CloudSync] Metadata listener aviso:', err?.message);
+          if (isQuotaError(err)) {
+            markQuotaExceeded();
+            this.updateStatus({
+              state: 'error',
+              message: 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.',
+            });
+          }
         }
-        const data = snapshot.data();
-        const remoteCatVersion = data.catalogo_version || 0;
-        const remoteVincVersion = data.vinculos_version || 0;
-        const remoteSaeouVersion = data.saeou060_version || 0;
-
-        // Check if another device published a newer SMGOI013 catalog
-        if (remoteCatVersion > this._localCatalogoVersion && data.total_produtos > 0) {
-          console.log(`[CloudSync] Novo catálogo SMGOI013 detectado na nuvem (versão ${remoteCatVersion}). Baixando...`);
-          await this.pullCatalogoFromCloud(remoteCatVersion);
-        }
-
-        // Check if another device published newer EAN vínculos
-        if (remoteVincVersion > this._localVinculosVersion && data.total_eans > 0) {
-          console.log(`[CloudSync] Novos vínculos EAN detectados na nuvem. Baixando...`);
-          await this.pullVinculosFromCloud(remoteVincVersion);
-        }
-
-        // Check if another device published newer SAEOU060
-        if (remoteSaeouVersion > this._localSaeou060Version && data.total_saeou060 > 0) {
-          console.log(`[CloudSync] Novo SAEOU060 detectado na nuvem. Baixando...`);
-          await this.pullSaeou060FromCloud(remoteSaeouVersion);
-        }
-      }, (err) => {
-        console.warn('[CloudSync] Metadata listener error:', err);
-      });
+      );
       this._unsubscribers.push(unsubMeta);
 
-      // 2. Real-Time Vencimentos (Expiration Lots) Listener
-      const vencimentosColRef = collection(db, 'vencimentos');
-      const unsubVenc = onSnapshot(vencimentosColRef, (snapshot) => {
-        const lotes: LoteVencimento[] = [];
-        snapshot.forEach((docSnap) => {
-          const raw = docSnap.data();
-          if (raw) {
-            try {
-              const norm = normalizeVencimentoRecord({
-                ...raw,
-                id: raw.vencimentoId || docSnap.id,
-                vencimentoId: raw.vencimentoId || docSnap.id,
-              });
-              // Filtrar somente filial 172 conforme requisito
-              if (!norm.filialId || norm.filialId === '172') {
-                lotes.push(norm);
-              }
-            } catch (errNorm) {
-              console.warn('[CloudSync] Aviso ao normalizar vencimento remoto:', errNorm);
-            }
-          }
-        });
+      // 2. Real-Time Vencimentos Listener (Requisitos 8 e 9: SOMENTE Filial 172)
+      const vencimentosQuery = query(
+        collection(db, 'vencimentos'),
+        where('filialId', '==', '172')
+      );
 
-        if (this._onRemoteVencimentosReceived) {
-          this._onRemoteVencimentosReceived(lotes);
+      const unsubVenc = onSnapshot(
+        vencimentosQuery,
+        (snapshot) => {
+          logFirestoreRead('sincronizarVencimentos', 'vencimentos', snapshot.size);
+
+          const lotes: LoteVencimento[] = [];
+          snapshot.forEach((docSnap) => {
+            const raw = docSnap.data();
+            if (raw) {
+              try {
+                const norm = normalizeVencimentoRecord({
+                  ...raw,
+                  id: raw.vencimentoId || docSnap.id,
+                  vencimentoId: raw.vencimentoId || docSnap.id,
+                });
+                if (!norm.filialId || norm.filialId === '172') {
+                  lotes.push(norm);
+                }
+              } catch (errNorm) {
+                console.warn('[CloudSync] Aviso ao normalizar vencimento remoto:', errNorm);
+              }
+            }
+          });
+
+          if (this._onRemoteVencimentosReceived) {
+            this._onRemoteVencimentosReceived(lotes);
+          }
+          this.updateStatus({
+            state: 'connected',
+            lastSyncTime: new Date().toLocaleTimeString('pt-BR', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+            message: 'Nuvem Conectada',
+          });
+        },
+        (err) => {
+          console.warn('[CloudSync] Vencimentos listener error:', err?.message);
+          if (isQuotaError(err)) {
+            markQuotaExceeded();
+            this.updateStatus({
+              state: 'error',
+              message: 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.',
+            });
+          }
         }
-        this.updateStatus({
-          state: 'connected',
-          lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          message: 'Nuvem Conectada',
-        });
-      }, (err) => {
-        console.warn('[CloudSync] Vencimentos listener error:', err);
-      });
+      );
       this._unsubscribers.push(unsubVenc);
 
-      // 3. Listen to Import History
-      const histColRef = collection(db, 'historico_importacoes');
-      const unsubHist = onSnapshot(histColRef, (snapshot) => {
-        const items: ResumoImportacao[] = [];
-        snapshot.forEach((d) => items.push(d.data() as ResumoImportacao));
-        if (this._onRemoteHistoricoReceived && items.length > 0) {
-          // Sort newest first
-          items.sort((a, b) => new Date(b.data_hora).getTime() - new Date(a.data_hora).getTime());
-          this._onRemoteHistoricoReceived(items);
-        }
-      }, (err) => {
-        console.warn('[CloudSync] Histórico listener error:', err);
-      });
-      this._unsubscribers.push(unsubHist);
+      // Requisito 9: REMOVER listener contínuo em historico_importacoes para poupar cotas
 
       this._isInitialized = true;
       this.updateStatus({
@@ -267,13 +282,18 @@ class CloudSyncService {
         message: 'Conectado à Nuvem',
         lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
       });
-
-      // Initial check to see if remote has data that local device is missing
-      this.pullLatestIfOutdated().catch(() => {});
     } catch (err: any) {
       console.warn('[CloudSync] Initialization warning:', err);
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+      }
       this._isInitialized = false;
-      this.updateStatus({ state: 'error', message: 'Erro ao conectar com a Nuvem' });
+      this.updateStatus({
+        state: 'error',
+        message: isQuotaError(err)
+          ? 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.'
+          : 'Erro ao conectar com a Nuvem',
+      });
     }
   }
 
@@ -321,6 +341,13 @@ class CloudSyncService {
       return { success: false, message: 'Dispositivo sem conexão à internet.' };
     }
 
+    // Requisito 17 e 23: Se a cota estiver excedida, não tentar enviar/baixar a base
+    if (isFirestoreQuotaExceeded()) {
+      const msg = 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.';
+      this.updateStatus({ state: 'error', message: msg });
+      return { success: false, message: msg };
+    }
+
     this.updateStatus({ state: 'syncing', message: 'Sincronizando com a Nuvem...' });
 
     try {
@@ -332,6 +359,7 @@ class CloudSyncService {
 
       const metaDocRef = doc(db, 'metadados', 'geral');
       const metaSnap = await getDoc(metaDocRef);
+      logFirestoreRead('verificarMetadados', 'metadados/geral', metaSnap.exists() ? 1 : 0);
       const nowStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
       if (!metaSnap.exists()) {
@@ -420,7 +448,13 @@ class CloudSyncService {
 
       // Sync vencimentos: bidirectional merge
       try {
-        const remoteLotesSnap = await getDocs(collection(db, 'vencimentos'));
+        const qLotes = query(
+          collection(db, 'vencimentos'),
+          where('filialId', '==', '172'),
+          limit(250)
+        );
+        const remoteLotesSnap = await getDocs(qLotes);
+        logFirestoreRead('syncFullVencimentos', 'vencimentos', remoteLotesSnap.size);
         const remoteLotes: LoteVencimento[] = [];
         remoteLotesSnap.forEach((d) => {
           const raw = d.data();
@@ -757,10 +791,20 @@ class CloudSyncService {
 
   public async pullVencimentosFromCloud(): Promise<LoteVencimento[]> {
     if (!db) return [];
+    if (isFirestoreQuotaExceeded()) {
+      return [];
+    }
     try {
       await ensureAuth().catch(() => null);
-      const vencimentosColRef = collection(db, 'vencimentos');
-      const snap = await getDocs(vencimentosColRef);
+      // Requisito 8: Consultar estritamente filialId = 172 com limite de segurança
+      const q = query(
+        collection(db, 'vencimentos'),
+        where('filialId', '==', '172'),
+        limit(250)
+      );
+      const snap = await getDocs(q);
+      logFirestoreRead('pullVencimentos', 'vencimentos', snap.size);
+
       const lotes: LoteVencimento[] = [];
       snap.forEach((docSnap) => {
         const raw = docSnap.data();
@@ -783,24 +827,36 @@ class CloudSyncService {
         this._onRemoteVencimentosReceived(lotes);
       }
       return lotes;
-    } catch (err) {
-      console.warn('[CloudSync] Erro ao buscar vencimentos da nuvem:', err);
+    } catch (err: any) {
+      console.warn('[CloudSync] Erro ao buscar vencimentos da nuvem:', err?.message);
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        this.updateStatus({
+          state: 'error',
+          message: 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.',
+        });
+      }
       return [];
     }
   }
 
   public async pushLoteToCloud(lote: LoteVencimento): Promise<void> {
+    if (isFirestoreQuotaExceeded()) return;
     try {
       await ensureAuth().catch(() => null);
       const payload = buildVencimentoCentralPayload(lote);
       const loteDocRef = doc(db, 'vencimentos', payload.vencimentoId || lote.id);
       await setDoc(loteDocRef, payload, { merge: true });
-    } catch (err) {
-      console.warn('[CloudSync] Error saving lote to cloud:', err);
+    } catch (err: any) {
+      console.warn('[CloudSync] Error saving lote to cloud:', err?.message);
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+      }
     }
   }
 
   public async pushAllLotesToCloud(lotes: LoteVencimento[]): Promise<void> {
+    if (isFirestoreQuotaExceeded()) return;
     try {
       await ensureAuth().catch(() => null);
       const batchSize = 300;
@@ -815,12 +871,16 @@ class CloudSyncService {
         });
         await batch.commit();
       }
-    } catch (err) {
-      console.warn('[CloudSync] Error batch saving lotes to cloud:', err);
+    } catch (err: any) {
+      console.warn('[CloudSync] Error batch saving lotes to cloud:', err?.message);
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+      }
     }
   }
 
   public async deleteLoteFromCloud(loteId: string): Promise<void> {
+    if (isFirestoreQuotaExceeded()) return;
     try {
       await ensureAuth().catch(() => null);
       const loteDocRef = doc(db, 'vencimentos', loteId);
@@ -837,50 +897,34 @@ class CloudSyncService {
         },
         { merge: true }
       );
-    } catch (err) {
-      console.warn('[CloudSync] Error deleting lote from cloud:', err);
+    } catch (err: any) {
+      console.warn('[CloudSync] Error deleting lote from cloud:', err?.message);
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+      }
     }
   }
 
   /**
    * Sincronização segura de vencimentos existentes locais com a nuvem (Requisito 20)
-   * Verifica a duplicidade central antes de enviar.
+   * Requisito 11 e 12: Gravação direta em lote sem pré-leitura getDocs da coleção inteira.
    */
   public async sincronizarVencimentosExistentes(
     locais: LoteVencimento[]
   ): Promise<{ enviados: number; ignorados: number }> {
     if (!db) return { enviados: 0, ignorados: 0 };
+    if (isFirestoreQuotaExceeded()) {
+      return { enviados: 0, ignorados: 0 };
+    }
     try {
       await ensureAuth().catch(() => null);
-      const snap = await getDocs(collection(db, 'vencimentos'));
-      const centralKeys = new Set<string>();
-      snap.forEach((d) => {
-        const data = d.data();
-        if (data) {
-          const filial = data.filialId || '172';
-          const cod = String(data.codigoInterno || data.codigo_interno || '').trim().replace(/^0+/, '');
-          const dig = String(data.digito || '').trim();
-          const dt = String(data.dataVencimento || data.data_validade || '').trim().slice(0, 10);
-          centralKeys.add(`${filial}_${cod}_${dig}_${dt}`);
-          if (data.vencimentoId) centralKeys.add(data.vencimentoId);
-          if (data.id) centralKeys.add(data.id);
-        }
-      });
-
       let enviados = 0;
       let ignorados = 0;
       const batch = writeBatch(db);
       let countInBatch = 0;
 
       for (const lote of locais) {
-        if (lote.isDeleted) continue;
-        const filial = lote.filialId || '172';
-        const cod = String(lote.codigo_interno || '').trim().replace(/^0+/, '');
-        const dig = String(lote.digito || '').trim();
-        const dt = String(lote.data_validade || '').trim().slice(0, 10);
-        const chave = `${filial}_${cod}_${dig}_${dt}`;
-
-        if (centralKeys.has(chave) || centralKeys.has(lote.id)) {
+        if (lote.isDeleted) {
           ignorados++;
           continue;
         }
@@ -888,7 +932,6 @@ class CloudSyncService {
         const payload = buildVencimentoCentralPayload(lote);
         const docRef = doc(db, 'vencimentos', payload.vencimentoId || lote.id);
         batch.set(docRef, payload, { merge: true });
-        centralKeys.add(chave);
         enviados++;
         countInBatch++;
 
@@ -903,8 +946,11 @@ class CloudSyncService {
       }
 
       return { enviados, ignorados };
-    } catch (err) {
-      console.warn('[CloudSync] Erro na sincronização de vencimentos existentes:', err);
+    } catch (err: any) {
+      console.warn('[CloudSync] Erro na sincronização de vencimentos existentes:', err?.message);
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+      }
       return { enviados: 0, ignorados: 0 };
     }
   }

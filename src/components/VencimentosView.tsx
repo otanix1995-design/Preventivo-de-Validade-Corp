@@ -59,11 +59,10 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
     }
   }, [initialSubTab]);
 
-  // Requisito 11: Sincronização leve ao entrar em Validades -> Controle
+  // Processar fila local pendente de vencimentos ao acessar aba Controle
   useEffect(() => {
     if (activeSubTab === 'controle') {
       syncQueueService.processQueue().catch(() => {});
-      cloudSyncService.pullVencimentosFromCloud().catch(() => {});
     }
   }, [activeSubTab]);
 

@@ -612,8 +612,8 @@ export class CentralFirestoreService {
       return qSnap.docs[0].data() as PromotorCentralDoc;
     }
 
-    // 3. Fallback: procurar em todos os promotores (coleção pequena)
-    const allSnap = await getDocs(collection(db, 'promotores'));
+    // 3. Fallback: procurar com limit de segurança
+    const allSnap = await getDocs(query(collection(db, 'promotores'), limit(30)));
     for (const d of allSnap.docs) {
       const data = d.data() as PromotorCentralDoc;
       if (data.nome?.toUpperCase().includes(termo.toUpperCase())) {
