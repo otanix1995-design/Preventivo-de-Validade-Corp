@@ -1,131 +1,143 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "entities": {
-    "Metadados": {
-      "collection": "metadados",
-      "fields": {
-        "filial_numero": { "type": "string" },
-        "filial_nome": { "type": "string" },
-        "status_base": { "type": "string" },
-        "total_produtos": { "type": "number" },
-        "total_vencimentos": { "type": "number" },
-        "total_eans": { "type": "number" },
-        "total_saeou060": { "type": "number" },
-        "catalogo_version": { "type": "number" },
-        "updatedAt": { "type": "string" }
-      }
+    "Produto": {
+      "title": "Produto",
+      "description": "Cadastro e estoque central de produtos da SMGOI013",
+      "type": "object",
+      "properties": {
+        "codigoInterno": { "type": "string", "description": "Código interno raiz do produto" },
+        "digito": { "type": "string", "description": "Dígito verificador do produto" },
+        "codigoCompleto": { "type": "string", "description": "Código completo original" },
+        "descricao": { "type": "string", "description": "Descrição da mercadoria" },
+        "embalagem": { "type": "string", "description": "Embalagem comercial" },
+        "setor": { "type": "string", "description": "Setor de atuação ou físico" },
+        "filialId": { "type": "string", "description": "Número da filial" },
+        "emb1": { "type": "number", "description": "Estoque embalagem principal (KG ou CX)" },
+        "emb9": { "type": "number", "description": "Estoque embalagem fracionada (G ou UN)" },
+        "tipoEstoque": { "type": "string", "description": "PESO ou UNIDADE" },
+        "dataImportacao": { "type": "string", "format": "date-time" },
+        "atualizadoEm": { "type": "string", "format": "date-time" }
+      },
+      "required": ["codigoInterno", "descricao", "filialId"]
     },
-    "CatalogoChunk": {
-      "collection": "catalogo_chunks",
-      "fields": {
-        "chunk_index": { "type": "number" },
-        "total_chunks": { "type": "number" },
-        "count": { "type": "number" },
-        "data": { "type": "string" },
-        "updatedAt": { "type": "string" }
-      }
+    "VinculoEanCentral": {
+      "title": "VinculoEanCentral",
+      "description": "Vínculo direto entre código de barras EAN e código interno do produto",
+      "type": "object",
+      "properties": {
+        "ean": { "type": "string" },
+        "codigoInterno": { "type": "string" },
+        "filialId": { "type": "string" },
+        "atualizadoEm": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ean", "codigoInterno", "filialId"]
     },
-    "VinculosChunk": {
-      "collection": "vinculos_chunks",
-      "fields": {
-        "chunk_index": { "type": "number" },
-        "total_chunks": { "type": "number" },
-        "count": { "type": "number" },
-        "data": { "type": "string" },
-        "updatedAt": { "type": "string" }
-      }
-    },
-    "Saeou060Chunk": {
-      "collection": "saeou060_chunks",
-      "fields": {
-        "chunk_index": { "type": "number" },
-        "total_chunks": { "type": "number" },
-        "count": { "type": "number" },
-        "data": { "type": "string" },
-        "updatedAt": { "type": "string" }
-      }
-    },
-    "LoteVencimento": {
-      "collection": "vencimentos",
-      "fields": {
-        "id": { "type": "string" },
-        "codigo_interno": { "type": "string" },
+    "VencimentoCentral": {
+      "title": "VencimentoCentral",
+      "description": "Lote de vencimento com garantia de unicidade",
+      "type": "object",
+      "properties": {
+        "vencimentoId": { "type": "string" },
+        "codigoInterno": { "type": "string" },
         "digito": { "type": "string" },
-        "descricao": { "type": "string" },
-        "data_vencimento": { "type": "string" },
+        "filialId": { "type": "string" },
+        "dataVencimento": { "type": "string" },
         "quantidade": { "type": "number" },
+        "enviarParaComprador": { "type": "boolean" },
         "status": { "type": "string" },
-        "setor": { "type": "string" },
-        "responsavel": { "type": "string" },
-        "criado_em": { "type": "string" },
-        "atualizado_em": { "type": "string" }
-      }
+        "criadoPorTipo": { "type": "string" },
+        "criadoPorId": { "type": "string" },
+        "atualizadoPorTipo": { "type": "string" },
+        "atualizadoPorId": { "type": "string" },
+        "criadoEm": { "type": "string", "format": "date-time" },
+        "atualizadoEm": { "type": "string", "format": "date-time" }
+      },
+      "required": ["codigoInterno", "filialId", "dataVencimento", "quantidade"]
     },
-    "HistoricoImportacao": {
-      "collection": "historico_importacoes",
-      "fields": {
-        "id": { "type": "string" },
-        "tipo": { "type": "string" },
-        "data_importacao": { "type": "string" },
-        "total_lidos": { "type": "number" }
-      }
-    },
-    "DivergenciaRegistro": {
-      "collection": "divergencias",
-      "fields": {
-        "id": { "type": "string" },
-        "codigo_interno": { "type": "string" },
-        "tipo": { "type": "string" }
-      }
-    },
-    "Promotor": {
-      "collection": "promotores",
-      "fields": {
+    "PromotorCentral": {
+      "title": "PromotorCentral",
+      "description": "Cadastro e credenciais do promotor de vendas",
+      "type": "object",
+      "properties": {
         "promotorId": { "type": "string" },
         "nome": { "type": "string" },
-        "matricula": { "type": "string" },
+        "agenciaNome": { "type": "string" },
         "filialId": { "type": "string" },
-        "filialNome": { "type": "string" },
-        "setorId": { "type": "string" },
-        "setorNome": { "type": "string" },
+        "setores": { "type": "array" },
+        "permissoes": { "type": "object" },
         "status": { "type": "string" },
-        "dataCadastro": { "type": "string" },
-        "ultimoAcesso": { "type": "string" }
-      }
+        "dispositivoVinculado": { "type": "object" },
+        "ultimoAcesso": { "type": "string" },
+        "ultimaSincronizacao": { "type": "string" }
+      },
+      "required": ["promotorId", "nome", "filialId", "setores"]
     },
-    "VinculoPromotor": {
-      "collection": "vinculos_promotores",
-      "fields": {
+    "VinculoPromotorCentral": {
+      "title": "VinculoPromotorCentral",
+      "description": "Código de vínculo e token temporário para ativação do App Promotor",
+      "type": "object",
+      "properties": {
         "vinculoId": { "type": "string" },
         "promotorId": { "type": "string" },
         "codigoVinculo": { "type": "string" },
         "tokenVinculo": { "type": "string" },
+        "filialId": { "type": "string" },
+        "setores": { "type": "array" },
         "status": { "type": "string" },
         "dataCriacao": { "type": "string" },
-        "dataExpiracao": { "type": "string" }
-      }
+        "dataExpiracao": { "type": "string" },
+        "dataUtilizacao": { "type": "string" },
+        "dispositivoId": { "type": "string" }
+      },
+      "required": ["vinculoId", "promotorId", "codigoVinculo", "status"]
     },
-    "RegistroAuditoriaPromotor": {
-      "collection": "auditoria_promotores",
-      "fields": {
+    "AuditoriaCentral": {
+      "title": "AuditoriaCentral",
+      "description": "Registro de auditoria de operações realizadas",
+      "type": "object",
+      "properties": {
         "auditoriaId": { "type": "string" },
         "promotorId": { "type": "string" },
         "promotorNome": { "type": "string" },
+        "filialId": { "type": "string" },
+        "setor": { "type": "string" },
         "tipoAcao": { "type": "string" },
-        "dataHora": { "type": "string" },
-        "statusSincronizacao": { "type": "string" }
-      }
-    },
-    "OperacaoPromotorSync": {
-      "collection": "operacoes_promotores",
-      "fields": {
+        "codigoInterno": { "type": "string" },
+        "digito": { "type": "string" },
+        "descricao": { "type": "string" },
+        "valorAnterior": { "type": "string" },
+        "valorNovo": { "type": "string" },
         "operationId": { "type": "string" },
-        "promotorId": { "type": "string" },
-        "tipoAcao": { "type": "string" },
-        "status": { "type": "string" },
-        "processado": { "type": "boolean" },
         "dataHora": { "type": "string" }
-      }
+      },
+      "required": ["auditoriaId", "filialId", "tipoAcao", "dataHora"]
+    }
+  },
+  "firestore": {
+    "/produtos/{produtoId}": {
+      "schema": "Produto",
+      "description": "Coleção central de produtos SMGOI013"
+    },
+    "/vinculosEAN/{vinculoEanId}": {
+      "schema": "VinculoEanCentral",
+      "description": "Vínculos diretos de EAN para Código Interno"
+    },
+    "/vencimentos/{vencimentoId}": {
+      "schema": "VencimentoCentral",
+      "description": "Coleção central de vencimentos com regra de unicidade"
+    },
+    "/promotores/{promotorId}": {
+      "schema": "PromotorCentral",
+      "description": "Cadastro e controle dos promotores"
+    },
+    "/vinculosPromotor/{vinculoId}": {
+      "schema": "VinculoPromotorCentral",
+      "description": "Códigos de 6 dígitos e tokens de vínculo do App Promotor"
+    },
+    "/auditoria/{auditoriaId}": {
+      "schema": "AuditoriaCentral",
+      "description": "Trilha de auditoria das ações e operações"
     }
   }
 }

@@ -1,7 +1,52 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allows operational read and write for store staff across handhelds and workstations
+
+    // Funções auxiliares
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // 1. PRODUTOS (Cadastro Central e Estoque SMGOI013)
+    match /produtos/{produtoId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // 2. VÍNCULOS EAN (EAN ↔ Código Interno)
+    match /vinculosEAN/{vinculoEanId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // 3. VENCIMENTOS (Lotes com Unicidade por filialId_codigoInterno_digito_dataVencimento)
+    match /vencimentos/{vencimentoId} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated();
+      allow delete: if isAuthenticated();
+    }
+
+    // 4. PROMOTORES (Cadastro, status, setores e permissões)
+    match /promotores/{promotorId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // 5. VÍNCULOS DE PROMOTOR (Códigos de 6 dígitos e tokens de ativação)
+    match /vinculosPromotor/{vinculoId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // 6. AUDITORIA (Registro imutável de operações)
+    match /auditoria/{auditoriaId} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update, delete: if false; // Auditoria é append-only
+    }
+
+    // Suporte a coleções legadas e sincronização transitória
     match /metadados/{docId} {
       allow read, write: if true;
     }
@@ -18,19 +63,11 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
-    match /vencimentos/{vencimentoId} {
-      allow read, write: if true;
-    }
-
     match /historico_importacoes/{histId} {
       allow read, write: if true;
     }
 
     match /divergencias/{divId} {
-      allow read, write: if true;
-    }
-
-    match /promotores/{promotorId} {
       allow read, write: if true;
     }
 

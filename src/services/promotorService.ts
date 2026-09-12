@@ -153,6 +153,35 @@ class PromotorService {
       if (localAuditorias.length > 0) this._auditorias = localAuditorias;
       if (localOperacoes.length > 0) this._operacoes = localOperacoes;
 
+      // Garantir existência de MARIA (Agência: SEARA, Filial: 172, Setores: FRIOS + LOJA) para paridade central
+      const temMaria = this._promotores.some((p) => p.nome.toUpperCase().includes('MARIA'));
+      if (!temMaria) {
+        const agora = new Date().toISOString();
+        const mariaPadrao: Promotor = {
+          promotorId: 'promotor_maria_seara_172',
+          nome: 'MARIA SILVA',
+          agenciaNome: 'SEARA',
+          matricula: 'SR-17201',
+          filialId: '172',
+          filialNome: 'Cascavel',
+          setores: ['FRIOS', 'LOJA'],
+          setorId: 'FRIOS',
+          setorNome: 'FRIOS • LOJA',
+          status: 'ATIVO',
+          permissoes: { ...PERMISSOES_PADRAO_PROMOTOR },
+          dispositivoVinculado: null,
+          dataCadastro: agora,
+          dataVinculo: null,
+          ultimoAcesso: agora,
+          ultimaSincronizacao: agora,
+          criadoPor: 'SISTEMA_PRINCIPAL',
+          atualizadoPor: 'SISTEMA_PRINCIPAL',
+        };
+        this._promotores = [mariaPadrao, ...this._promotores];
+        dbPut(STORES.PROMOTORES, mariaPadrao).catch(() => {});
+        this.syncDocToFirestore('promotores', mariaPadrao.promotorId, mariaPadrao);
+      }
+
       this.verificarExpiracaoVinculos();
       this.notify();
 
@@ -192,51 +221,76 @@ class PromotorService {
       );
       this._firestoreUnsubs.push(unsubPromotores);
 
-      // Vínculos listener
+      // Vínculos listener (escuta vinculosPromotor e vinculos_promotores)
+      const processVinculosSnapshot = (snapshot: any) => {
+        if (!snapshot.empty) {
+          const remote: VinculoPromotor[] = [];
+          snapshot.forEach((docSnap: any) => {
+            const data = docSnap.data() as VinculoPromotor;
+            if (data && data.vinculoId) {
+              remote.push(normalizeVinculo(data));
+            }
+          });
+          if (remote.length > 0) {
+            // Unir sem duplicar
+            const map = new Map<string, VinculoPromotor>();
+            this._vinculos.forEach((v) => map.set(v.vinculoId, v));
+            remote.forEach((v) => map.set(v.vinculoId, v));
+            this._vinculos = Array.from(map.values());
+            dbPutAll(STORES.VINCULOS_PROMOTORES, this._vinculos, true).catch(() => {});
+            this.notify();
+          }
+        }
+      };
+
+      const unsubVinculosCentral = onSnapshot(
+        collection(db, 'vinculosPromotor'),
+        processVinculosSnapshot,
+        (err) => console.warn('Aviso Firestore vinculosPromotor onSnapshot:', err.message)
+      );
+      this._firestoreUnsubs.push(unsubVinculosCentral);
+
       const unsubVinculos = onSnapshot(
         collection(db, 'vinculos_promotores'),
-        (snapshot) => {
-          if (!snapshot.empty) {
-            const remote: VinculoPromotor[] = [];
-            snapshot.forEach((docSnap) => {
-              const data = docSnap.data() as VinculoPromotor;
-              if (data && data.vinculoId) {
-                remote.push(normalizeVinculo(data));
-              }
-            });
-            if (remote.length > 0) {
-              this._vinculos = remote;
-              dbPutAll(STORES.VINCULOS_PROMOTORES, remote, true).catch(() => {});
-              this.notify();
-            }
-          }
-        },
+        processVinculosSnapshot,
         (err) => console.warn('Aviso Firestore vinculos onSnapshot:', err.message)
       );
       this._firestoreUnsubs.push(unsubVinculos);
 
-      // Auditorias listener
+      // Auditorias listener (escuta auditoria e auditoria_promotores)
+      const processAuditoriaSnapshot = (snapshot: any) => {
+        if (!snapshot.empty) {
+          const remote: RegistroAuditoriaPromotor[] = [];
+          snapshot.forEach((docSnap: any) => {
+            const data = docSnap.data() as RegistroAuditoriaPromotor;
+            if (data && data.auditoriaId) {
+              remote.push(data);
+            }
+          });
+          if (remote.length > 0) {
+            const map = new Map<string, RegistroAuditoriaPromotor>();
+            this._auditorias.forEach((a) => map.set(a.auditoriaId, a));
+            remote.forEach((a) => map.set(a.auditoriaId, a));
+            const merged = Array.from(map.values());
+            merged.sort((a, b) => new Date(b.dataHora).getTime() - new Date(a.dataHora).getTime());
+            this._auditorias = merged;
+            dbPutAll(STORES.AUDITORIA_PROMOTORES, merged, true).catch(() => {});
+            this.notify();
+          }
+        }
+      };
+
+      const unsubAuditoriaCentral = onSnapshot(
+        collection(db, 'auditoria'),
+        processAuditoriaSnapshot,
+        (err) => console.warn('Aviso Firestore auditoria onSnapshot:', err.message)
+      );
+      this._firestoreUnsubs.push(unsubAuditoriaCentral);
+
       const unsubAuditoria = onSnapshot(
         collection(db, 'auditoria_promotores'),
-        (snapshot) => {
-          if (!snapshot.empty) {
-            const remote: RegistroAuditoriaPromotor[] = [];
-            snapshot.forEach((docSnap) => {
-              const data = docSnap.data() as RegistroAuditoriaPromotor;
-              if (data && data.auditoriaId) {
-                remote.push(data);
-              }
-            });
-            if (remote.length > 0) {
-              // Ordenar por dataHora decrescente
-              remote.sort((a, b) => new Date(b.dataHora).getTime() - new Date(a.dataHora).getTime());
-              this._auditorias = remote;
-              dbPutAll(STORES.AUDITORIA_PROMOTORES, remote, true).catch(() => {});
-              this.notify();
-            }
-          }
-        },
-        (err) => console.warn('Aviso Firestore auditoria onSnapshot:', err.message)
+        processAuditoriaSnapshot,
+        (err) => console.warn('Aviso Firestore auditoria_promotores onSnapshot:', err.message)
       );
       this._firestoreUnsubs.push(unsubAuditoria);
 
@@ -684,6 +738,7 @@ class PromotorService {
 
     this._vinculos = [novoVinculo, ...this._vinculos];
     await dbPut(STORES.VINCULOS_PROMOTORES, novoVinculo);
+    this.syncDocToFirestore('vinculosPromotor', vinculoId, novoVinculo);
     this.syncDocToFirestore('vinculos_promotores', vinculoId, novoVinculo);
 
     await this.registrarAuditoria({
@@ -714,6 +769,7 @@ class PromotorService {
 
     this._vinculos = this._vinculos.map((v) => (v.vinculoId === vinculoId ? atualizado : v));
     await dbPut(STORES.VINCULOS_PROMOTORES, atualizado);
+    this.syncDocToFirestore('vinculosPromotor', vinculoId, atualizado);
     this.syncDocToFirestore('vinculos_promotores', vinculoId, atualizado);
 
     await this.registrarAuditoria({
@@ -738,6 +794,7 @@ class PromotorService {
     for (const v of pendentes) {
       v.status = 'CANCELADO';
       await dbPut(STORES.VINCULOS_PROMOTORES, v);
+      this.syncDocToFirestore('vinculosPromotor', v.vinculoId, v);
       this.syncDocToFirestore('vinculos_promotores', v.vinculoId, v);
     }
   }
@@ -753,6 +810,7 @@ class PromotorService {
           v.status = 'EXPIRADO';
           mudou = true;
           dbPut(STORES.VINCULOS_PROMOTORES, v).catch(() => {});
+          this.syncDocToFirestore('vinculosPromotor', v.vinculoId, v);
           this.syncDocToFirestore('vinculos_promotores', v.vinculoId, v);
         }
       }
@@ -784,6 +842,7 @@ class PromotorService {
     vinculo.dispositivoNome = dispositivo.nome;
     vinculo.dataUtilizacao = agora;
     await dbPut(STORES.VINCULOS_PROMOTORES, vinculo);
+    this.syncDocToFirestore('vinculosPromotor', vinculo.vinculoId, vinculo);
     this.syncDocToFirestore('vinculos_promotores', vinculo.vinculoId, vinculo);
 
     // 2. Atualiza o promotor
@@ -844,6 +903,7 @@ class PromotorService {
 
     this._auditorias = [completo, ...this._auditorias];
     await dbPut(STORES.AUDITORIA_PROMOTORES, completo);
+    this.syncDocToFirestore('auditoria', auditoriaId, completo);
     this.syncDocToFirestore('auditoria_promotores', auditoriaId, completo);
 
     return completo;

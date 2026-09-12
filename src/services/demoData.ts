@@ -2,6 +2,35 @@ import { DivergenciaRegistro, LoteVencimento, ProdutoSMG, RegistroSaeou060, Vinc
 
 export const DEMO_PRODUTOS: ProdutoSMG[] = [
   {
+    id: '54666',
+    codigo_original: '00054666-001',
+    codigo_interno: '54666',
+    digito: '001',
+    codigo_exibicao: '54666-001',
+    descricao: 'RF.MORTADELA DEF SEARA 500G',
+    embalagem: 'CXA 1 X 12 X 500G',
+    fator_embalagem: 12,
+    unidade_medida: 'CXA',
+    estoque_emb1: 15,
+    estoque_emb9: 6,
+    estoque_total: 21,
+    vendas_qtde_30d: 85,
+    vendas_preco: 14.90,
+    data_ultima_entrada: '2026-08-22',
+    qtde_ultima_entrada: 36,
+    dias_sem_venda: 0,
+    idade: 9,
+    qtde_ideal: 20,
+    comprador_filial: 'CARLOS SILVA',
+    comprador_matriz: 'ANDRE MATRIZ',
+    setor_fisico: 'FRIOS',
+    setor_balanco: '04 - FRIOS E LATICINIOS',
+    pedidos_pendentes: '12 CXA',
+    eans: ['7891515546660'],
+    atualizado_em: '2026-08-31 08:00:00',
+    is_demo: true,
+  },
+  {
     id: '46135',
     codigo_original: '00046135-156',
     codigo_interno: '46135',
@@ -411,6 +440,25 @@ export const DEMO_PRODUTOS: ProdutoSMG[] = [
 
 export const DEMO_VENCIMENTOS: LoteVencimento[] = [
   {
+    id: 'venc-54666',
+    codigo_interno: '54666',
+    digito: '001',
+    codigo_exibicao: '54666-001',
+    descricao_produto: 'RF.MORTADELA DEF SEARA 500G',
+    embalagem: 'CXA 1 X 12 X 500G',
+    fator_embalagem: 12,
+    data_validade: '2026-09-18',
+    quantidade_total_unidades: 18,
+    preco_trabalhado: 14.90,
+    data_preco: '2026-08-28',
+    observacao: 'Lote refrigerado em monitoramento',
+    lote_identificador: 'SEA-54666',
+    enviar_ao_comprador: true,
+    status_customizado: 'ENVIAR_AO_COMPRADOR',
+    criado_em: '2026-08-28T10:00:00.000Z',
+    atualizado_em: '2026-08-28T10:00:00.000Z',
+  },
+  {
     id: 'venc-1',
     codigo_interno: '46135',
     digito: '156',
@@ -493,6 +541,7 @@ export const DEMO_VENCIMENTOS: LoteVencimento[] = [
 ];
 
 export const DEMO_VINCULOS: VinculoEan[] = [
+  { id: 'vinc-54666', codigo_interno: '54666', digito: '001', ean: '7891515546660', descricao: 'RF.MORTADELA DEF SEARA 500G', status_vinculo: 'VINCULADO', criado_em: '2026-08-31T08:00:00.000Z' },
   { id: 'vinc-1', codigo_interno: '46135', digito: '156', ean: '7891234567895', descricao: 'RF.MARG.QUALY C/SAL', status_vinculo: 'VINCULADO', criado_em: '2026-08-31T08:00:00.000Z' },
   { id: 'vinc-2', codigo_interno: '46135', digito: '156', ean: '7891234567801', descricao: 'RF.MARG.QUALY C/SAL EMB PROMOCIONAL', status_vinculo: 'VINCULADO', criado_em: '2026-08-31T08:00:00.000Z' },
   { id: 'vinc-3', codigo_interno: '51208', digito: '009', ean: '7898215150016', descricao: 'LEITE UHT INTEGRAL PIRACANJUBA 1L', status_vinculo: 'VINCULADO', criado_em: '2026-08-31T08:00:00.000Z' },

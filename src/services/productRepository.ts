@@ -24,6 +24,8 @@ import {
   normalizeInternalCode
 } from './duplicateValidator';
 import { cloudSyncService } from './cloudSyncService';
+import { centralFirestoreService } from './centralFirestoreService';
+import { promotorService } from './promotorService';
 import {
   dbClear,
   dbGetAll,
@@ -1572,13 +1574,29 @@ class ProductRepository {
   // --- METADADOS ---
 
   public async syncWithCloud(): Promise<{ success: boolean; message: string }> {
-    return await cloudSyncService.syncFull(
+    const cloudRes = await cloudSyncService.syncFull(
       this._produtos,
       this._metadados,
       this._vinculos,
       this._saeou060,
       this._vencimentos
     );
+
+    // Também sincroniza as coleções centrais padronizadas no Firestore
+    try {
+      await centralFirestoreService.sincronizarBaseComNuvem({
+        produtos: this._produtos,
+        vinculos: this._vinculos,
+        vencimentos: this._vencimentos,
+        promotores: promotorService.getPromotores(),
+        vinculosPromotores: promotorService.getVinculos(),
+        filialPadrao: this._metadados?.filial_numero || '172',
+      });
+    } catch (e) {
+      console.warn('[ProductRepository] Sincronização central em segundo plano:', e);
+    }
+
+    return cloudRes;
   }
 
   public getMetadados(): MetadadosBase {
