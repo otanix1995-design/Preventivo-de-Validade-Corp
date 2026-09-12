@@ -22,6 +22,7 @@ import { calcularProjecaoVencimento, formatarDataBR, formatarDiasRestantes } fro
 import { deleteVencimento } from '../services/storage';
 import { productRepository } from '../services/productRepository';
 import { syncQueueService } from '../services/syncQueueService';
+import { cloudSyncService } from '../services/cloudSyncService';
 import { LoteVencimento, ProdutoSMG } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 import { StatusBadge } from './StatusBadge';
@@ -57,6 +58,14 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
       setActiveSubTab(initialSubTab);
     }
   }, [initialSubTab]);
+
+  // Requisito 11: Sincronização leve ao entrar em Validades -> Controle
+  useEffect(() => {
+    if (activeSubTab === 'controle') {
+      syncQueueService.processQueue().catch(() => {});
+      cloudSyncService.pullVencimentosFromCloud().catch(() => {});
+    }
+  }, [activeSubTab]);
 
   useEffect(() => {
     const unsub = productRepository.subscribe(() => {

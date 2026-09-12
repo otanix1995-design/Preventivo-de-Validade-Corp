@@ -1,6 +1,7 @@
 import {
   Calendar,
   Camera,
+  CheckCircle2,
   Cloud,
   CloudOff,
   Database,
@@ -10,6 +11,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
 import { cloudSyncService, SyncStatusInfo } from '../services/cloudSyncService';
+import { syncQueueService } from '../services/syncQueueService';
 import { productRepository } from '../services/productRepository';
 import { MetadadosBase } from '../types';
 
@@ -31,20 +33,34 @@ export const Header: React.FC<HeaderProps> = ({
   currentTabName,
 }) => {
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
+  const [pendingCount, setPendingCount] = useState<number>(() => syncQueueService.getPendingCount());
+  const [hasErrors, setHasErrors] = useState<boolean>(() => syncQueueService.hasErrors());
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
   useEffect(() => {
-    const unsub = cloudSyncService.subscribeStatus(setSyncStatus);
-    return unsub;
+    const unsubCloud = cloudSyncService.subscribeStatus(setSyncStatus);
+    const unsubQueue = syncQueueService.subscribe(() => {
+      setPendingCount(syncQueueService.getPendingCount());
+      setHasErrors(syncQueueService.hasErrors());
+    });
+    return () => {
+      unsubCloud();
+      unsubQueue();
+    };
   }, []);
 
   const handleManualSync = async () => {
     if (isManualSyncing || syncStatus.state === 'syncing') return;
     setIsManualSyncing(true);
     try {
+      // 1. Processar pendências locais primeiro
+      await syncQueueService.processQueue();
+      // 2. Puxar alterações mais recentes da nuvem
+      await cloudSyncService.pullVencimentosFromCloud();
+      // 3. Sincronizar catálogo/geral
       const res = await productRepository.syncWithCloud();
-      setSyncToast(res.message);
+      setSyncToast(res.message || 'Sincronização concluída com sucesso.');
       setTimeout(() => setSyncToast(null), 4500);
     } catch (e: any) {
       console.warn('Sync failed:', e);
@@ -115,25 +131,33 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-          {/* Cloud Sync Button & Status */}
+          {/* Cloud Sync Button & Status - Requisito 19 */}
           <button
             id="header-btn-cloud-sync"
             onClick={handleManualSync}
             disabled={isSyncing}
             title={
-              syncStatus.state === 'connected'
-                ? `Nuvem Conectada. Última sincronização: ${syncStatus.lastSyncTime || 'agora'}. Clique para sincronizar.`
-                : syncStatus.state === 'syncing'
-                ? 'Sincronizando com a nuvem...'
-                : syncStatus.state === 'connecting'
-                ? 'Conectando com a nuvem...'
-                : syncStatus.message || 'Clique para conectar e sincronizar com a nuvem'
+              isSyncing
+                ? 'Sincronizando dados com a nuvem...'
+                : hasErrors
+                ? 'Erro de sincronização. Clique para tentar novamente.'
+                : pendingCount > 0
+                ? `${pendingCount} alteraç${pendingCount > 1 ? 'ões pendentes' : 'ão pendente'} na fila local. Clique para sincronizar.`
+                : syncStatus.state === 'connected'
+                ? `Nuvem conectada e sincronizada. Última checagem: ${syncStatus.lastSyncTime || 'agora'}. Clique para forçar sincronização.`
+                : syncStatus.state === 'offline'
+                ? 'Sem conexão com a nuvem. Modo offline ativo.'
+                : syncStatus.message || 'Clique para sincronizar com a nuvem'
             }
             className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-xs uppercase tracking-wide transition-all border shrink-0 cursor-pointer ${
-              syncStatus.state === 'connected'
-                ? 'bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-100 border-emerald-400/50 hover:border-emerald-300 shadow-xs'
-                : syncStatus.state === 'syncing'
+              isSyncing
                 ? 'bg-amber-500/25 text-amber-200 border-amber-400/50 animate-pulse'
+                : hasErrors
+                ? 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-200 border-rose-400/50'
+                : pendingCount > 0
+                ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border-amber-400/40'
+                : syncStatus.state === 'connected'
+                ? 'bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-100 border-emerald-400/50 hover:border-emerald-300 shadow-xs'
                 : syncStatus.state === 'connecting'
                 ? 'bg-blue-500/25 text-blue-200 border-blue-400/50'
                 : 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-200 border-rose-400/50'
@@ -141,8 +165,12 @@ export const Header: React.FC<HeaderProps> = ({
           >
             {isSyncing ? (
               <RefreshCw className="w-4 h-4 animate-spin text-amber-300" />
+            ) : hasErrors ? (
+              <CloudOff className="w-4 h-4 text-rose-300" />
+            ) : pendingCount > 0 ? (
+              <RefreshCw className="w-4 h-4 text-amber-300" />
             ) : syncStatus.state === 'connected' ? (
-              <Cloud className="w-4 h-4 text-emerald-300" />
+              <CheckCircle2 className="w-4 h-4 text-emerald-300" />
             ) : syncStatus.state === 'connecting' ? (
               <RefreshCw className="w-4 h-4 animate-spin text-blue-300" />
             ) : (
@@ -151,11 +179,15 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="inline">
               {isSyncing
                 ? 'Sincronizando...'
+                : hasErrors
+                ? 'Erro Nuvem'
+                : pendingCount > 0
+                ? `${pendingCount} pendência${pendingCount > 1 ? 's' : ''}`
                 : syncStatus.state === 'connected'
-                ? 'Nuvem'
+                ? '✓ Sincronizado'
                 : syncStatus.state === 'connecting'
                 ? 'Conectando...'
-                : 'Conectar'}
+                : 'Offline'}
             </span>
           </button>
 

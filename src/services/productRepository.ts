@@ -28,6 +28,12 @@ import { centralFirestoreService } from './centralFirestoreService';
 import { syncQueueService } from './syncQueueService';
 import { promotorService } from './promotorService';
 import {
+  buildVencimentoKey,
+  normalizeVencimentoRecord,
+  getDeviceId,
+  generateOperationId,
+} from './deviceId';
+import {
   dbClear,
   dbGetAll,
   dbGetMeta,
@@ -977,27 +983,73 @@ class ProductRepository {
     }
 
     let modified = false;
-    const localMap = new Map<string, LoteVencimento>();
-    this._vencimentos.forEach((l) => localMap.set(l.id, l));
 
-    for (const remote of remoteVencimentos) {
-      if (!remote || !remote.id) continue;
+    for (const rawRemote of remoteVencimentos) {
+      if (!rawRemote) continue;
 
-      // REGRA 19: EXCLUSÃO NÃO DEVE RESSUSCITAR
-      // Se foi excluído localmente (tombstone ativo), não restaurar
-      if (syncQueueService.isTombstoned(remote.id)) {
+      let remote: LoteVencimento;
+      try {
+        remote = normalizeVencimentoRecord(rawRemote);
+      } catch {
         continue;
       }
 
-      // REGRA 11: NÃO SOBRESCREVER COM DADOS ANTIGOS
-      // Se há operação pendente local para este registro, preservar a versão local
-      if (syncQueueService.hasPendingOperationFor(remote.id)) {
+      // Requisito 13: Filtrar estritamente por Filial 172
+      if (remote.filialId && remote.filialId !== '172') {
         continue;
       }
 
-      const local = localMap.get(remote.id);
-      if (!local) {
-        // Novo vencimento vindo de outro dispositivo:
+      const remoteKey = buildVencimentoKey(
+        remote.filialId || '172',
+        remote.codigo_interno,
+        remote.digito,
+        remote.data_validade
+      );
+
+      // Requisito 7 & 19: Tombstone lógico / exclusão nunca ressuscita
+      const isRemoteDeleted = Boolean(
+        remote.isDeleted === true ||
+        (remote.deletedAt && remote.deletedAt !== '')
+      );
+      const isLocalTombstoned =
+        syncQueueService.isTombstoned(remote.id) ||
+        syncQueueService.isTombstoned(remoteKey);
+
+      if (isRemoteDeleted || isLocalTombstoned) {
+        // Assegurar tombstone localmente
+        syncQueueService.addTombstone(remote.id);
+        syncQueueService.addTombstone(remoteKey);
+
+        // Se existir na lista local, remover imediatamente
+        const beforeCount = this._vencimentos.length;
+        this._vencimentos = this._vencimentos.filter((l) => {
+          const lKey = buildVencimentoKey(l.filialId || '172', l.codigo_interno, l.digito, l.data_validade);
+          return l.id !== remote.id && l.vencimentoId !== remote.id && lKey !== remoteKey;
+        });
+
+        if (this._vencimentos.length !== beforeCount) {
+          modified = true;
+        }
+        continue;
+      }
+
+      // Requisito 1 & 14: Não sobrescrever se houver operação pendente local
+      if (
+        syncQueueService.hasPendingOperationFor(remote.id) ||
+        syncQueueService.hasPendingOperationFor(remoteKey)
+      ) {
+        continue;
+      }
+
+      // Localizar registro local existente por ID estável ou chave de negócio
+      const localIndex = this._vencimentos.findIndex((l) => {
+        if (l.id === remote.id || l.vencimentoId === remote.id || l.id === remote.vencimentoId) return true;
+        const lKey = buildVencimentoKey(l.filialId || '172', l.codigo_interno, l.digito, l.data_validade);
+        return lKey === remoteKey;
+      });
+
+      if (localIndex === -1) {
+        // Novo vencimento vindo de outro dispositivo (Ex: Dispositivo A cadastrou 51284-188)
         // Verificar duplicidade antes de inserir
         const duplicateCheck = findDuplicateVencimento(
           {
@@ -1012,23 +1064,26 @@ class ProductRepository {
         );
 
         if (!duplicateCheck.isDuplicate) {
-          this._vencimentos.push(remote);
-          localMap.set(remote.id, remote);
+          this._vencimentos.unshift(remote);
           modified = true;
         }
       } else {
         // Registro já existe localmente:
-        // Comparar timestamps para garantir que versão antiga não sobrescreva nova
-        const localTime = new Date(local.atualizado_em || local.criado_em || 0).getTime();
-        const remoteTime = new Date(remote.atualizado_em || remote.criado_em || 0).getTime();
+        // Comparar version e timestamps para garantir que versão mais nova vença
+        const local = this._vencimentos[localIndex];
+        const localVer = Number(local.version || 1);
+        const remoteVer = Number(remote.version || 1);
+        const localTime = new Date(local.updatedAt || local.atualizado_em || local.criado_em || 0).getTime();
+        const remoteTime = new Date(remote.updatedAt || remote.atualizado_em || remote.criado_em || 0).getTime();
 
-        if (remoteTime > localTime) {
-          const idx = this._vencimentos.findIndex((l) => l.id === remote.id);
-          if (idx !== -1) {
-            this._vencimentos[idx] = { ...local, ...remote };
-            localMap.set(remote.id, this._vencimentos[idx]);
-            modified = true;
-          }
+        if (remoteVer > localVer || (remoteVer === localVer && remoteTime > localTime)) {
+          this._vencimentos[localIndex] = {
+            ...local,
+            ...remote,
+            descricao_produto: remote.descricao_produto || local.descricao_produto,
+            codigo_exibicao: local.codigo_exibicao || remote.codigo_exibicao,
+          };
+          modified = true;
         }
       }
     }
@@ -1084,24 +1139,35 @@ class ProductRepository {
         throw err;
       }
 
-      // 6. Se não existir -> SALVAR normalmente localmente
-      const id = `venc-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+      // 6. Gerar ID canônico e estável compartilhado entre dispositivos
+      const filialPadrao = this._metadados?.filial_numero || '172';
+      const stableId = buildVencimentoKey(filialPadrao, codNorm, digNorm, dateIso);
       const agora = new Date().toISOString();
+      const opId = generateOperationId();
 
-      const loteCriado: LoteVencimento = {
+      const loteCriado: LoteVencimento = normalizeVencimentoRecord({
         ...novoLote,
         codigo_interno: codNorm,
         digito: digNorm,
         data_validade: dateIso,
-        id,
+        id: stableId,
+        vencimentoId: stableId,
+        filialId: filialPadrao,
         criado_em: agora,
         atualizado_em: agora,
-      };
+        createdAt: agora,
+        updatedAt: agora,
+        version: 1,
+        isDeleted: false,
+        deletedAt: null,
+        deviceId: getDeviceId(),
+        operationId: opId,
+      });
 
-      // Limpar eventual tombstone
-      syncQueueService.removeTombstone(id);
+      // Limpar eventual tombstone antigo deste lote
+      syncQueueService.removeTombstone(stableId);
 
-      // Persistir imediatamente na base local
+      // Persistir imediatamente na base local (Local-First)
       this._vencimentos.unshift(loteCriado);
       await dbPut(STORES.VENCIMENTOS, loteCriado);
 
@@ -1117,7 +1183,7 @@ class ProductRepository {
         await promotorService.registrarAuditoria({
           promotorId: 'ADMIN',
           promotorNome: 'Administrador / Loja',
-          filialId: this._metadados?.filial_numero || '172',
+          filialId: filialPadrao,
           setorId: novoLote.descricao_produto || 'LOJA',
           tipoAcao: 'CADASTROU_VENCIMENTO',
           codigoInterno: codNorm,
@@ -1187,12 +1253,20 @@ class ProductRepository {
     }
 
     const agora = new Date().toISOString();
-    const loteAtualizado: LoteVencimento = {
-      ...this._vencimentos[index],
+    const nextVersion = (Number(current.version || 1)) + 1;
+    const opId = generateOperationId();
+
+    const loteAtualizado: LoteVencimento = normalizeVencimentoRecord({
+      ...current,
       ...updates,
-      data_validade: newDateIso || this._vencimentos[index].data_validade,
+      data_validade: newDateIso || current.data_validade,
+      dataVencimento: newDateIso || current.data_validade,
       atualizado_em: agora,
-    };
+      updatedAt: agora,
+      version: nextVersion,
+      operationId: opId,
+      deviceId: getDeviceId(),
+    });
 
     this._vencimentos[index] = loteAtualizado;
 
@@ -1276,9 +1350,17 @@ class ProductRepository {
 
     const loteRemovido = this._vencimentos[loteIndex];
     const agora = new Date().toISOString();
+    const filialPadrao = this._metadados?.filial_numero || '172';
+    const stableKey = buildVencimentoKey(
+      filialPadrao,
+      loteRemovido.codigo_interno,
+      loteRemovido.digito,
+      loteRemovido.data_validade
+    );
 
-    // 1. Registrar tombstone imediatamente para evitar que retornos de nuvem ressuscitem o lote
+    // 1. Registrar tombstones imediatamente para evitar que retornos de nuvem ressuscitem o lote
     syncQueueService.addTombstone(id);
+    syncQueueService.addTombstone(stableKey);
 
     // 2. Remover da base local
     const filtrados = this._vencimentos.filter((l) => l.id !== id);
@@ -1297,7 +1379,7 @@ class ProductRepository {
       await promotorService.registrarAuditoria({
         promotorId: 'ADMIN',
         promotorNome: 'Administrador / Loja',
-        filialId: this._metadados?.filial_numero || '172',
+        filialId: filialPadrao,
         setorId: loteRemovido.descricao_produto || 'LOJA',
         tipoAcao: 'EXCLUIU_VENCIMENTO',
         codigoInterno: loteRemovido.codigo_interno,
@@ -1319,12 +1401,18 @@ class ProductRepository {
     // 4. Notificar interface imediatamente (exclusão refletida na tela)
     this.notify();
 
-    // 5. Enfileirar operação de exclusão para nuvem em segundo plano
+    // 5. Enfileirar operação de exclusão com tombstone lógico para a nuvem em segundo plano
+    const deleteOpId = generateOperationId();
     syncQueueService.enqueue('DELETE_VENCIMENTO', id, {
       id,
-      codigo_interno: loteRemovido.codigo_interno,
-      digito: loteRemovido.digito,
-      data_validade: loteRemovido.data_validade,
+      vencimentoId: id,
+      filialId: filialPadrao,
+      isDeleted: true,
+      deletedAt: agora,
+      updatedAt: agora,
+      version: (Number(loteRemovido.version || 1)) + 1,
+      operationId: deleteOpId,
+      deviceId: getDeviceId(),
     });
 
     return true;

@@ -5,8 +5,13 @@
  */
 
 import { db, ensureAuth } from './firebase';
-import { doc, setDoc, deleteDoc } from 'firebase/firestore';
-import { cleanForFirestore } from './cloudSyncService';
+import { doc, setDoc } from 'firebase/firestore';
+import {
+  buildVencimentoCentralPayload,
+  cleanForFirestore,
+  getDeviceId,
+  generateOperationId,
+} from './deviceId';
 import { LoteVencimento } from '../types';
 
 export type SyncOperationType =
@@ -305,8 +310,8 @@ class SyncQueueService {
 
     switch (op.tipoOperacao) {
       case 'CREATE_VENCIMENTO': {
-        const payloadClean = cleanForFirestore(op.payload);
-        await setDoc(loteDocRef, payloadClean, { merge: true });
+        const payload = buildVencimentoCentralPayload(op.payload, op.operationId);
+        await setDoc(loteDocRef, payload, { merge: true });
         break;
       }
 
@@ -314,18 +319,43 @@ class SyncQueueService {
       case 'UPDATE_QUANTIDADE':
       case 'ENVIAR_COMPRADOR':
       case 'REMOVER_ENVIO_COMPRADOR': {
-        // If it was already tombstoned in the meantime, don't recreate it
+        // Se foi excluído localmente (tombstoned), assegurar que na nuvem conste como tombstone lógico
         if (this.isTombstoned(op.registroId)) {
-          await deleteDoc(loteDocRef).catch(() => {});
+          const agora = new Date().toISOString();
+          await setDoc(
+            loteDocRef,
+            {
+              vencimentoId: op.registroId,
+              isDeleted: true,
+              deletedAt: agora,
+              updatedAt: agora,
+              operationId: op.operationId,
+              deviceId: getDeviceId(),
+            },
+            { merge: true }
+          );
           return;
         }
-        const payloadClean = cleanForFirestore(op.payload);
-        await setDoc(loteDocRef, payloadClean, { merge: true });
+        const payload = buildVencimentoCentralPayload(op.payload, op.operationId);
+        await setDoc(loteDocRef, payload, { merge: true });
         break;
       }
 
       case 'DELETE_VENCIMENTO': {
-        await deleteDoc(loteDocRef);
+        // Exclusão por tombstone lógico central (NÃO apaga fisicamente para evitar ressuscitação)
+        const agora = new Date().toISOString();
+        const deletePayload = {
+          vencimentoId: op.registroId,
+          id: op.registroId,
+          isDeleted: true,
+          deletedAt: agora,
+          updatedAt: agora,
+          operationId: op.operationId,
+          deviceId: getDeviceId(),
+          atualizadoPor: 'SISTEMA_PRINCIPAL',
+          filialId: op.payload?.filialId || '172',
+        };
+        await setDoc(loteDocRef, cleanForFirestore(deletePayload), { merge: true });
         break;
       }
     }
@@ -337,6 +367,15 @@ class SyncQueueService {
 
   public getPendingCount(): number {
     return this._queue.filter((op) => op.status === 'PENDENTE' || op.status === 'SINCRONIZANDO').length;
+  }
+
+  public hasErrors(): boolean {
+    return this._queue.some((op) => op.status === 'ERRO');
+  }
+
+  public getLastError(): string | undefined {
+    const errOp = this._queue.find((op) => op.status === 'ERRO');
+    return errOp?.erroMensagem;
   }
 
   public getQueue(): SyncOperation[] {

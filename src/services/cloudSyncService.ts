@@ -28,6 +28,12 @@ import {
   VinculoEan
 } from '../types';
 import { db, ensureAuth } from './firebase';
+import {
+  normalizeVencimentoRecord,
+  buildVencimentoCentralPayload,
+  getDeviceId,
+  cleanForFirestore as cleanCentralForFirestore
+} from './deviceId';
 
 export type SyncState = 'connecting' | 'connected' | 'syncing' | 'offline' | 'error';
 
@@ -209,7 +215,22 @@ class CloudSyncService {
       const unsubVenc = onSnapshot(vencimentosColRef, (snapshot) => {
         const lotes: LoteVencimento[] = [];
         snapshot.forEach((docSnap) => {
-          lotes.push(docSnap.data() as LoteVencimento);
+          const raw = docSnap.data();
+          if (raw) {
+            try {
+              const norm = normalizeVencimentoRecord({
+                ...raw,
+                id: raw.vencimentoId || docSnap.id,
+                vencimentoId: raw.vencimentoId || docSnap.id,
+              });
+              // Filtrar somente filial 172 conforme requisito
+              if (!norm.filialId || norm.filialId === '172') {
+                lotes.push(norm);
+              }
+            } catch (errNorm) {
+              console.warn('[CloudSync] Aviso ao normalizar vencimento remoto:', errNorm);
+            }
+          }
         });
 
         if (this._onRemoteVencimentosReceived) {
@@ -402,8 +423,21 @@ class CloudSyncService {
         const remoteLotesSnap = await getDocs(collection(db, 'vencimentos'));
         const remoteLotes: LoteVencimento[] = [];
         remoteLotesSnap.forEach((d) => {
-          const l = d.data() as LoteVencimento;
-          if (l && l.id) remoteLotes.push(l);
+          const raw = d.data();
+          if (raw) {
+            try {
+              const norm = normalizeVencimentoRecord({
+                ...raw,
+                id: raw.vencimentoId || d.id,
+                vencimentoId: raw.vencimentoId || d.id,
+              });
+              if (!norm.filialId || norm.filialId === '172') {
+                remoteLotes.push(norm);
+              }
+            } catch (errNorm) {
+              console.warn('[CloudSync] Erro ao normalizar registro remoto no syncFull:', errNorm);
+            }
+          }
         });
 
         if (remoteLotes.length > 0 && this._onRemoteVencimentosReceived) {
@@ -414,7 +448,7 @@ class CloudSyncService {
       }
 
       if (localVencimentos.length > 0) {
-        await this.pushAllLotesToCloud(localVencimentos);
+        await this.sincronizarVencimentosExistentes(localVencimentos);
       }
 
       this.updateStatus({
@@ -721,11 +755,46 @@ class CloudSyncService {
   // REAL-TIME VENCIMENTOS (INDIVIDUAL DOCS)
   // ==========================================
 
+  public async pullVencimentosFromCloud(): Promise<LoteVencimento[]> {
+    if (!db) return [];
+    try {
+      await ensureAuth().catch(() => null);
+      const vencimentosColRef = collection(db, 'vencimentos');
+      const snap = await getDocs(vencimentosColRef);
+      const lotes: LoteVencimento[] = [];
+      snap.forEach((docSnap) => {
+        const raw = docSnap.data();
+        if (raw) {
+          try {
+            const norm = normalizeVencimentoRecord({
+              ...raw,
+              id: raw.vencimentoId || docSnap.id,
+              vencimentoId: raw.vencimentoId || docSnap.id,
+            });
+            if (!norm.filialId || norm.filialId === '172') {
+              lotes.push(norm);
+            }
+          } catch (e) {
+            console.warn('[CloudSync] Erro ao normalizar lote recebido da nuvem:', e);
+          }
+        }
+      });
+      if (this._onRemoteVencimentosReceived && lotes.length > 0) {
+        this._onRemoteVencimentosReceived(lotes);
+      }
+      return lotes;
+    } catch (err) {
+      console.warn('[CloudSync] Erro ao buscar vencimentos da nuvem:', err);
+      return [];
+    }
+  }
+
   public async pushLoteToCloud(lote: LoteVencimento): Promise<void> {
     try {
-      await ensureAuth();
-      const loteDocRef = doc(db, 'vencimentos', lote.id);
-      await setDoc(loteDocRef, cleanForFirestore(lote));
+      await ensureAuth().catch(() => null);
+      const payload = buildVencimentoCentralPayload(lote);
+      const loteDocRef = doc(db, 'vencimentos', payload.vencimentoId || lote.id);
+      await setDoc(loteDocRef, payload, { merge: true });
     } catch (err) {
       console.warn('[CloudSync] Error saving lote to cloud:', err);
     }
@@ -733,15 +802,16 @@ class CloudSyncService {
 
   public async pushAllLotesToCloud(lotes: LoteVencimento[]): Promise<void> {
     try {
-      await ensureAuth();
-      // Write in batches of up to 400
-      const batchSize = 400;
+      await ensureAuth().catch(() => null);
+      const batchSize = 300;
       for (let i = 0; i < lotes.length; i += batchSize) {
         const batch = writeBatch(db);
         const slice = lotes.slice(i, i + batchSize);
         slice.forEach((lote) => {
-          const docRef = doc(db, 'vencimentos', lote.id);
-          batch.set(docRef, cleanForFirestore(lote));
+          if (lote.isDeleted) return;
+          const payload = buildVencimentoCentralPayload(lote);
+          const docRef = doc(db, 'vencimentos', payload.vencimentoId || lote.id);
+          batch.set(docRef, payload, { merge: true });
         });
         await batch.commit();
       }
@@ -752,11 +822,90 @@ class CloudSyncService {
 
   public async deleteLoteFromCloud(loteId: string): Promise<void> {
     try {
-      await ensureAuth();
+      await ensureAuth().catch(() => null);
       const loteDocRef = doc(db, 'vencimentos', loteId);
-      await deleteDoc(loteDocRef);
+      const agora = new Date().toISOString();
+      await setDoc(
+        loteDocRef,
+        {
+          vencimentoId: loteId,
+          id: loteId,
+          isDeleted: true,
+          deletedAt: agora,
+          updatedAt: agora,
+          deviceId: getDeviceId(),
+        },
+        { merge: true }
+      );
     } catch (err) {
       console.warn('[CloudSync] Error deleting lote from cloud:', err);
+    }
+  }
+
+  /**
+   * Sincronização segura de vencimentos existentes locais com a nuvem (Requisito 20)
+   * Verifica a duplicidade central antes de enviar.
+   */
+  public async sincronizarVencimentosExistentes(
+    locais: LoteVencimento[]
+  ): Promise<{ enviados: number; ignorados: number }> {
+    if (!db) return { enviados: 0, ignorados: 0 };
+    try {
+      await ensureAuth().catch(() => null);
+      const snap = await getDocs(collection(db, 'vencimentos'));
+      const centralKeys = new Set<string>();
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data) {
+          const filial = data.filialId || '172';
+          const cod = String(data.codigoInterno || data.codigo_interno || '').trim().replace(/^0+/, '');
+          const dig = String(data.digito || '').trim();
+          const dt = String(data.dataVencimento || data.data_validade || '').trim().slice(0, 10);
+          centralKeys.add(`${filial}_${cod}_${dig}_${dt}`);
+          if (data.vencimentoId) centralKeys.add(data.vencimentoId);
+          if (data.id) centralKeys.add(data.id);
+        }
+      });
+
+      let enviados = 0;
+      let ignorados = 0;
+      const batch = writeBatch(db);
+      let countInBatch = 0;
+
+      for (const lote of locais) {
+        if (lote.isDeleted) continue;
+        const filial = lote.filialId || '172';
+        const cod = String(lote.codigo_interno || '').trim().replace(/^0+/, '');
+        const dig = String(lote.digito || '').trim();
+        const dt = String(lote.data_validade || '').trim().slice(0, 10);
+        const chave = `${filial}_${cod}_${dig}_${dt}`;
+
+        if (centralKeys.has(chave) || centralKeys.has(lote.id)) {
+          ignorados++;
+          continue;
+        }
+
+        const payload = buildVencimentoCentralPayload(lote);
+        const docRef = doc(db, 'vencimentos', payload.vencimentoId || lote.id);
+        batch.set(docRef, payload, { merge: true });
+        centralKeys.add(chave);
+        enviados++;
+        countInBatch++;
+
+        if (countInBatch >= 300) {
+          await batch.commit();
+          countInBatch = 0;
+        }
+      }
+
+      if (countInBatch > 0) {
+        await batch.commit();
+      }
+
+      return { enviados, ignorados };
+    } catch (err) {
+      console.warn('[CloudSync] Erro na sincronização de vencimentos existentes:', err);
+      return { enviados: 0, ignorados: 0 };
     }
   }
 

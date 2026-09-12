@@ -93,6 +93,26 @@ export interface LoteVencimento {
   criadoPorId?: string;
   atualizadoPorTipo?: 'PRINCIPAL' | 'PROMOTOR' | 'SISTEMA';
   atualizadoPorId?: string;
+
+  // Sincronização Central Multi-Dispositivos (Campos Mínimos da Nuvem)
+  vencimentoId?: string;
+  filialId?: string;
+  codigoInterno?: string;
+  descricao?: string;
+  dataVencimento?: string; // YYYY-MM-DD
+  quantidade?: number;
+  precoTrabalhado?: number | null;
+  enviarParaComprador?: boolean;
+  status?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  deletedAt?: string | null;
+  isDeleted?: boolean;
+  version?: number;
+  criadoPor?: string;
+  atualizadoPor?: string;
+  deviceId?: string;
+  operationId?: string;
 }
 
 export type StatusSaeou060 =

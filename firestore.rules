@@ -21,10 +21,7 @@ service cloud.firestore {
 
     // 3. VENCIMENTOS (Lotes com Unicidade por filialId_codigoInterno_digito_dataVencimento)
     match /vencimentos/{vencimentoId} {
-      allow read: if true;
-      allow create: if isAuthenticated();
-      allow update: if isAuthenticated();
-      allow delete: if isAuthenticated();
+      allow read, write: if true;
     }
 
     // 4. PROMOTORES (Cadastro, status, setores e permissões)
