@@ -83,7 +83,10 @@ export interface LoteVencimento {
 
   // Auditoria e Origem
   origem?: 'MANUAL' | 'SMGOI013' | 'SAEOU060';
-  preco_trabalhado?: number;
+  preco_normal?: number | null; // Preço Normal (DE)
+  precoNormal?: number | null;
+  preco_trabalhado?: number | null; // Preço de Rebaixe (POR)
+  precoTrabalhado?: number | null;
   data_preco?: string;
   saeou060_id?: string;
   arquivo_origem?: string;
@@ -101,7 +104,6 @@ export interface LoteVencimento {
   descricao?: string;
   dataVencimento?: string; // YYYY-MM-DD
   quantidade?: number;
-  precoTrabalhado?: number | null;
   enviarParaComprador?: boolean;
   status?: string;
   createdAt?: string;
@@ -143,7 +145,10 @@ export interface RegistroSaeou060 {
   data_cadastro?: string;
   periodo_vencimento?: string;
   promotor?: string;
+  preco_normal?: number;
+  precoNormal?: number;
   preco_trabalhado?: number;
+  precoTrabalhado?: number;
   data_preco?: string;
   observacao?: string;
   status_saeou: StatusSaeou060;

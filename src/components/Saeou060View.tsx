@@ -190,7 +190,10 @@ export const Saeou060View: React.FC<Saeou060ViewProps> = ({
       data_vencimento?: string;
       data_vencimento_exibicao?: string;
       quantidade?: number;
+      preco_normal?: number;
+      precoNormal?: number;
       preco_trabalhado?: number;
+      precoTrabalhado?: number;
       data_preco?: string;
       observacao?: string;
     }

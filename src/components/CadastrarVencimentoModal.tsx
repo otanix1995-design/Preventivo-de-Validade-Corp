@@ -21,6 +21,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { parseEmbalagem } from '../services/codeParser';
 import { DuplicateValidationResult } from '../services/duplicateValidator';
 import { calcularProjecaoVencimento, formatarDataBR } from '../services/projection';
+import { formatarMoedaBR, parseMoedaBR } from '../services/deviceId';
 import {
   addVencimento,
   checkDuplicateVencimento,
@@ -68,8 +69,14 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
     return loteParaEditar?.quantidade_total_unidades ? String(loteParaEditar.quantidade_total_unidades) : '12';
   });
 
+  const [precoNormal, setPrecoNormal] = useState<string>(() => {
+    const val = loteParaEditar?.precoNormal ?? loteParaEditar?.preco_normal;
+    return val !== undefined && val !== null ? String(val).replace('.', ',') : '';
+  });
+
   const [precoTrabalhado, setPrecoTrabalhado] = useState<string>(() => {
-    return loteParaEditar?.preco_trabalhado !== undefined ? String(loteParaEditar.preco_trabalhado) : '';
+    const val = loteParaEditar?.precoTrabalhado ?? loteParaEditar?.preco_trabalhado;
+    return val !== undefined && val !== null ? String(val).replace('.', ',') : '';
   });
 
   const [dataPreco, setDataPreco] = useState<string>(() => {
@@ -97,9 +104,12 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
     setIsSubmitting(false);
 
     if (loteParaEditar) {
+      const pNorm = loteParaEditar.precoNormal ?? loteParaEditar.preco_normal;
+      const pTrab = loteParaEditar.precoTrabalhado ?? loteParaEditar.preco_trabalhado;
       setDataValidade(loteParaEditar.data_validade || '');
       setQuantidadeStr(String(loteParaEditar.quantidade_total_unidades || '12'));
-      setPrecoTrabalhado(loteParaEditar.preco_trabalhado !== undefined ? String(loteParaEditar.preco_trabalhado) : '');
+      setPrecoNormal(pNorm !== undefined && pNorm !== null ? String(pNorm).replace('.', ',') : '');
+      setPrecoTrabalhado(pTrab !== undefined && pTrab !== null ? String(pTrab).replace('.', ',') : '');
       setDataPreco(loteParaEditar.data_preco || '');
       setObservacao(loteParaEditar.observacao || '');
       setLoteIdentificador(loteParaEditar.lote_identificador || '');
@@ -109,6 +119,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
       d.setDate(d.getDate() + 7);
       setDataValidade(d.toISOString().slice(0, 10));
       setQuantidadeStr('12');
+      setPrecoNormal('');
       setPrecoTrabalhado('');
       setDataPreco('');
       setObservacao('');
@@ -122,9 +133,12 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
   const handleVerCadastroExistente = (existingLote: LoteVencimento) => {
     setActiveLoteParaEditar(existingLote);
     setIsViewingExistingLote(true);
+    const pNorm = existingLote.precoNormal ?? existingLote.preco_normal;
+    const pTrab = existingLote.precoTrabalhado ?? existingLote.preco_trabalhado;
     setDataValidade(existingLote.data_validade || '');
     setQuantidadeStr(String(existingLote.quantidade_total_unidades || '12'));
-    setPrecoTrabalhado(existingLote.preco_trabalhado !== undefined ? String(existingLote.preco_trabalhado) : '');
+    setPrecoNormal(pNorm !== undefined && pNorm !== null ? String(pNorm).replace('.', ',') : '');
+    setPrecoTrabalhado(pTrab !== undefined && pTrab !== null ? String(pTrab).replace('.', ',') : '');
     setDataPreco(existingLote.data_preco || '');
     setObservacao(existingLote.observacao || '');
     setLoteIdentificador(existingLote.lote_identificador || '');
@@ -140,6 +154,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
     d.setDate(d.getDate() + 7);
     setDataValidade(d.toISOString().slice(0, 10));
     setQuantidadeStr('12');
+    setPrecoNormal('');
     setPrecoTrabalhado('');
     setDataPreco('');
     setObservacao('');
@@ -179,23 +194,35 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
 
   // Price calculations & discount percentages
   const precoVendaBase = produto?.vendas_preco;
-  const precoTrabalhadoNum = precoTrabalhado ? parseFloat(precoTrabalhado.replace(',', '.')) : undefined;
+  const precoNormalNum = useMemo(() => parseMoedaBR(precoNormal), [precoNormal]);
+  const precoTrabalhadoNum = useMemo(() => parseMoedaBR(precoTrabalhado), [precoTrabalhado]);
+
+  // Preço base de cálculo comercial (DE): se o usuário informou o Preço Normal, usa ele; senão usa o preço de venda da SMG se houver
+  const precoBaseReferencia = precoNormalNum !== null ? precoNormalNum : precoVendaBase;
 
   let percentualDesconto: number | null = null;
   let economiaPorUnidade: number | null = null;
+  let precoInconsistente = false;
 
-  if (precoVendaBase && precoVendaBase > 0 && precoTrabalhadoNum && precoTrabalhadoNum > 0) {
-    if (precoTrabalhadoNum < precoVendaBase) {
-      economiaPorUnidade = precoVendaBase - precoTrabalhadoNum;
-      percentualDesconto = Math.round(((precoVendaBase - precoTrabalhadoNum) / precoVendaBase) * 100);
+  if (precoNormalNum !== null && precoTrabalhadoNum !== null) {
+    if (precoTrabalhadoNum >= precoNormalNum) {
+      precoInconsistente = true;
+    } else {
+      economiaPorUnidade = Number((precoNormalNum - precoTrabalhadoNum).toFixed(2));
+      percentualDesconto = Math.round(((precoNormalNum - precoTrabalhadoNum) / precoNormalNum) * 100);
+    }
+  } else if (precoBaseReferencia && precoBaseReferencia > 0 && precoTrabalhadoNum && precoTrabalhadoNum > 0) {
+    if (precoTrabalhadoNum < precoBaseReferencia) {
+      economiaPorUnidade = Number((precoBaseReferencia - precoTrabalhadoNum).toFixed(2));
+      percentualDesconto = Math.round(((precoBaseReferencia - precoTrabalhadoNum) / precoBaseReferencia) * 100);
     }
   }
 
   // Quick discount calculation helper
   const handleApplyQuickDiscount = (pct: number) => {
-    if (!precoVendaBase || precoVendaBase <= 0) return;
-    const discounted = precoVendaBase * (1 - pct / 100);
-    setPrecoTrabalhado(discounted.toFixed(2));
+    if (!precoBaseReferencia || precoBaseReferencia <= 0) return;
+    const discounted = precoBaseReferencia * (1 - pct / 100);
+    setPrecoTrabalhado(discounted.toFixed(2).replace('.', ','));
     if (!dataPreco) {
       setDataPreco(new Date().toISOString().slice(0, 10));
     }
@@ -212,7 +239,10 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
     fator_embalagem: produto.fator_embalagem,
     data_validade: dataValidade,
     quantidade_total_unidades: quantidadeNum,
+    preco_normal: precoNormalNum,
+    precoNormal: precoNormalNum,
     preco_trabalhado: precoTrabalhadoNum,
+    precoTrabalhado: precoTrabalhadoNum,
     data_preco: dataPreco || undefined,
     enviar_ao_comprador: enviarComprador,
     criado_em: activeLoteParaEditar?.criado_em || new Date().toISOString(),
@@ -250,16 +280,29 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
       return;
     }
 
-    const precoFinal = precoTrabalhado.trim()
-      ? parseFloat(precoTrabalhado.trim().replace(',', '.'))
-      : undefined;
+    if (precoNormal.trim()) {
+      if (precoNormalNum === null || precoNormalNum < 0) {
+        setErrorMsg('Informe um valor de Preço Normal (DE) válido (ex: 14,99).');
+        return;
+      }
+    }
 
-    if (precoFinal !== undefined && (isNaN(precoFinal) || precoFinal < 0)) {
-      setErrorMsg('Informe um valor de preço válido.');
+    if (precoTrabalhado.trim()) {
+      if (precoTrabalhadoNum === null || precoTrabalhadoNum < 0) {
+        setErrorMsg('Informe um valor de Preço de Rebaixe (POR) válido (ex: 9,99).');
+        return;
+      }
+    }
+
+    // Validação estrita: Preço de Rebaixe < Preço Normal (quando ambos informados)
+    if (precoNormalNum !== null && precoTrabalhadoNum !== null && precoTrabalhadoNum >= precoNormalNum) {
+      setErrorMsg(
+        `Inconsistência de preços: O Preço de Rebaixe (${formatarMoedaBR(precoTrabalhadoNum)}) não pode ser maior ou igual ao Preço Normal (${formatarMoedaBR(precoNormalNum)}). Por favor, ajuste os valores.`
+      );
       return;
     }
 
-    const dataPrecoFinal = precoFinal !== undefined
+    const dataPrecoFinal = precoTrabalhadoNum !== null
       ? (dataPreco || new Date().toISOString().slice(0, 10))
       : undefined;
 
@@ -299,7 +342,10 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
         const updated = await updateVencimento(activeLoteParaEditar.id, {
           data_validade: dataValidade,
           quantidade_total_unidades: quantidadeNum,
-          preco_trabalhado: precoFinal,
+          preco_normal: precoNormalNum,
+          precoNormal: precoNormalNum,
+          preco_trabalhado: precoTrabalhadoNum,
+          precoTrabalhado: precoTrabalhadoNum,
           data_preco: dataPrecoFinal,
           observacao: observacao.trim() || undefined,
           lote_identificador: loteIdentificador.trim() || undefined,
@@ -321,7 +367,10 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
           fator_embalagem: produto.fator_embalagem || embData.fator,
           data_validade: dataValidade,
           quantidade_total_unidades: quantidadeNum,
-          preco_trabalhado: precoFinal,
+          preco_normal: precoNormalNum,
+          precoNormal: precoNormalNum,
+          preco_trabalhado: precoTrabalhadoNum,
+          precoTrabalhado: precoTrabalhadoNum,
           data_preco: dataPrecoFinal,
           observacao: observacao.trim() || undefined,
           lote_identificador: loteIdentificador.trim() || undefined,
@@ -606,23 +655,68 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
             </p>
           </div>
 
-          {/* Section 3: Preço de Rebaixe / Preço Trabalhado (NOVA SEÇÃO DESTAQUE) */}
+          {/* Section 3: Preço Normal (DE) e Preço de Rebaixe (POR) */}
           <div className="space-y-2.5 bg-amber-50/60 border-2 border-amber-200 rounded-xl p-4">
             <div className="flex items-center justify-between">
-              <label htmlFor="input-preco-rebaixe" className="text-xs font-black text-amber-950 uppercase tracking-wider flex items-center gap-1.5">
+              <label className="text-xs font-black text-amber-950 uppercase tracking-wider flex items-center gap-1.5">
                 <Tag className="w-4 h-4 text-amber-700 stroke-[2.5]" />
-                <span>3. Preço de Rebaixe / Preço Trabalhado</span>
+                <span>3. Preços Comerciais (DE / POR)</span>
               </label>
               <span className="text-[10px] uppercase font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
                 Ação Comercial
               </span>
             </div>
 
-            {/* Price input + Date of Markdown */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Inconsistency Alert if Preço Rebaixe >= Preço Normal */}
+            {precoInconsistente && precoNormalNum !== null && precoTrabalhadoNum !== null && (
+              <div className="p-3 bg-red-50 border-2 border-red-300 rounded-xl text-xs text-red-900 font-bold flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-black">Inconsistência de Preços:</p>
+                  <p className="font-normal text-[11px] text-red-800">
+                    O Preço de Rebaixe ({formatarMoedaBR(precoTrabalhadoNum)}) deve ser menor que o Preço Normal ({formatarMoedaBR(precoNormalNum)}). Por favor, ajuste os valores.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Inputs: Preço Normal (DE), Preço Rebaixado (POR) and Data do Rebaixe */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Preço Normal (DE) */}
+              <div>
+                <label htmlFor="input-preco-normal" className="block text-[11px] font-bold text-gray-700 mb-1">
+                  Preço Normal (DE):
+                </label>
+                <div className="relative">
+                  <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center pointer-events-none text-xs font-black text-gray-500">
+                    R$
+                  </div>
+                  <input
+                    id="input-preco-normal"
+                    type="text"
+                    inputMode="decimal"
+                    placeholder={produto.vendas_preco ? `Ex: ${produto.vendas_preco.toFixed(2).replace('.', ',')}` : 'Ex: 14,99'}
+                    value={precoNormal}
+                    onChange={(e) => setPrecoNormal(e.target.value)}
+                    className="w-full pl-9 pr-8 py-2.5 bg-white border-2 border-amber-300 focus:border-amber-600 rounded-xl text-base font-black font-mono text-gray-900 focus:outline-hidden shadow-2xs"
+                  />
+                  {precoNormal && (
+                    <button
+                      type="button"
+                      onClick={() => setPrecoNormal('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5"
+                      title="Limpar preço normal"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Preço Rebaixado (POR) */}
               <div>
                 <label htmlFor="input-preco-rebaixe" className="block text-[11px] font-bold text-gray-700 mb-1">
-                  Preço Rebaixado (R$):
+                  Preço Rebaixado (POR):
                 </label>
                 <div className="relative">
                   <div className="absolute left-3 top-1/2 -translate-y-1/2 flex items-center pointer-events-none text-xs font-black text-gray-500">
@@ -632,7 +726,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                     id="input-preco-rebaixe"
                     type="text"
                     inputMode="decimal"
-                    placeholder="Ex: 8,90"
+                    placeholder="Ex: 9,99"
                     value={precoTrabalhado}
                     onChange={(e) => {
                       setPrecoTrabalhado(e.target.value);
@@ -640,14 +734,16 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                         setDataPreco(new Date().toISOString().slice(0, 10));
                       }
                     }}
-                    className="w-full pl-9 pr-8 py-2.5 bg-white border-2 border-amber-300 focus:border-amber-600 rounded-xl text-base font-black font-mono text-gray-900 focus:outline-hidden shadow-2xs"
+                    className={`w-full pl-9 pr-8 py-2.5 bg-white border-2 rounded-xl text-base font-black font-mono text-gray-900 focus:outline-hidden shadow-2xs ${
+                      precoInconsistente ? 'border-red-500 focus:border-red-600' : 'border-amber-300 focus:border-amber-600'
+                    }`}
                   />
                   {precoTrabalhado && (
                     <button
                       type="button"
                       onClick={() => setPrecoTrabalhado('')}
                       className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5"
-                      title="Limpar preço"
+                      title="Limpar preço trabalhado"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -655,6 +751,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                 </div>
               </div>
 
+              {/* Data do Rebaixe */}
               <div>
                 <label htmlFor="input-data-preco" className="block text-[11px] font-bold text-gray-700 mb-1">
                   Data do Rebaixe:
@@ -670,12 +767,12 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
             </div>
 
             {/* Quick Discount Percentage Buttons based on Normal Price */}
-            {precoVendaBase !== undefined && precoVendaBase > 0 && (
+            {precoBaseReferencia !== undefined && precoBaseReferencia > 0 && (
               <div className="pt-1">
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-[10px] font-bold text-gray-600 uppercase flex items-center gap-1">
                     <TrendingDown className="w-3 h-3 text-amber-700" />
-                    Atalhos de Rebaixe sobre R$ {precoVendaBase.toFixed(2).replace('.', ',')}:
+                    Atalhos de Rebaixe sobre Preço Normal ({formatarMoedaBR(precoBaseReferencia)}):
                   </span>
                 </div>
                 <div className="flex flex-wrap gap-1.5">
@@ -686,7 +783,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                       onClick={() => handleApplyQuickDiscount(pct)}
                       className="px-2.5 py-1 rounded-lg bg-white hover:bg-amber-100 border border-amber-300 text-amber-900 text-xs font-black uppercase transition-colors shadow-2xs"
                     >
-                      -{pct}% (R$ {(precoVendaBase * (1 - pct / 100)).toFixed(2).replace('.', ',')})
+                      -{pct}% (R$ {(precoBaseReferencia * (1 - pct / 100)).toFixed(2).replace('.', ',')})
                     </button>
                   ))}
                 </div>
@@ -694,14 +791,16 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
             )}
 
             {/* Discount Evaluation Banner */}
-            {percentualDesconto !== null && economiaPorUnidade !== null && (
+            {!precoInconsistente && percentualDesconto !== null && economiaPorUnidade !== null && (
               <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-bold flex items-center justify-between">
                 <span className="flex items-center gap-1.5">
                   <DollarSign className="w-4 h-4 text-emerald-600 stroke-[2.5]" />
-                  <span>Desconto de <strong>-{percentualDesconto}%</strong> aplicado</span>
+                  <span>
+                    DE {precoBaseReferencia ? formatarMoedaBR(precoBaseReferencia) : ''} POR {precoTrabalhadoNum ? formatarMoedaBR(precoTrabalhadoNum) : ''} (<strong>-{percentualDesconto}%</strong>)
+                  </span>
                 </span>
                 <span className="font-mono text-emerald-800">
-                  Economia de <strong>R$ {economiaPorUnidade.toFixed(2).replace('.', ',')}</strong>/un
+                  Economia: <strong>{formatarMoedaBR(economiaPorUnidade)}</strong>/un
                 </span>
               </div>
             )}

@@ -1192,7 +1192,8 @@ class ProductRepository {
           valorNovo: JSON.stringify({
             data_validade: dateIso,
             quantidade: novoLote.quantidade_total_unidades,
-            preco_trabalhado: novoLote.preco_trabalhado,
+            preco_normal: loteCriado.preco_normal ?? loteCriado.precoNormal ?? null,
+            preco_trabalhado: loteCriado.preco_trabalhado ?? loteCriado.precoTrabalhado ?? null,
             enviar_ao_comprador: novoLote.enviar_ao_comprador,
           }),
           dataHora: agora,
@@ -1320,13 +1321,15 @@ class ProductRepository {
           quantidade: current.quantidade_total_unidades,
           data_validade: current.data_validade,
           enviar_ao_comprador: current.enviar_ao_comprador,
-          preco_trabalhado: current.preco_trabalhado,
+          preco_normal: current.preco_normal ?? current.precoNormal ?? null,
+          preco_trabalhado: current.preco_trabalhado ?? current.precoTrabalhado ?? null,
         }),
         valorNovo: JSON.stringify({
           quantidade: loteAtualizado.quantidade_total_unidades,
           data_validade: loteAtualizado.data_validade,
           enviar_ao_comprador: loteAtualizado.enviar_ao_comprador,
-          preco_trabalhado: loteAtualizado.preco_trabalhado,
+          preco_normal: loteAtualizado.preco_normal ?? loteAtualizado.precoNormal ?? null,
+          preco_trabalhado: loteAtualizado.preco_trabalhado ?? loteAtualizado.precoTrabalhado ?? null,
         }),
         dataHora: agora,
         statusSincronizacao: 'PENDENTE',
@@ -1511,7 +1514,10 @@ class ProductRepository {
       data_vencimento?: string;
       data_vencimento_exibicao?: string;
       quantidade?: number;
+      preco_normal?: number;
+      precoNormal?: number;
       preco_trabalhado?: number;
+      precoTrabalhado?: number;
       data_preco?: string;
       observacao?: string;
       status_saeou?: StatusSaeou060;
@@ -1523,7 +1529,20 @@ class ProductRepository {
     if (updates.data_vencimento !== undefined) reg.data_vencimento = updates.data_vencimento;
     if (updates.data_vencimento_exibicao !== undefined) reg.data_vencimento_exibicao = updates.data_vencimento_exibicao;
     if (updates.quantidade !== undefined) reg.quantidade = updates.quantidade;
-    if (updates.preco_trabalhado !== undefined) reg.preco_trabalhado = updates.preco_trabalhado;
+    if (updates.preco_normal !== undefined) {
+      reg.preco_normal = updates.preco_normal;
+      reg.precoNormal = updates.preco_normal;
+    } else if (updates.precoNormal !== undefined) {
+      reg.preco_normal = updates.precoNormal;
+      reg.precoNormal = updates.precoNormal;
+    }
+    if (updates.preco_trabalhado !== undefined) {
+      reg.preco_trabalhado = updates.preco_trabalhado;
+      reg.precoTrabalhado = updates.preco_trabalhado;
+    } else if (updates.precoTrabalhado !== undefined) {
+      reg.preco_trabalhado = updates.precoTrabalhado;
+      reg.precoTrabalhado = updates.precoTrabalhado;
+    }
     if (updates.data_preco !== undefined) reg.data_preco = updates.data_preco;
     if (updates.observacao !== undefined) reg.observacao = updates.observacao;
     if (updates.status_saeou !== undefined) reg.status_saeou = updates.status_saeou;
@@ -1567,7 +1586,10 @@ class ProductRepository {
       reg.vencimento_id_vinculado = existingLote.id;
       reg.adicionado_ao_controle_em = new Date().toLocaleString('pt-BR');
       if (customData?.observacao) existingLote.observacao = customData.observacao;
+      if (customData?.preco_normal !== undefined) existingLote.preco_normal = customData.preco_normal;
+      if (customData?.precoNormal !== undefined) existingLote.precoNormal = customData.precoNormal;
       if (customData?.preco_trabalhado !== undefined) existingLote.preco_trabalhado = customData.preco_trabalhado;
+      if (customData?.precoTrabalhado !== undefined) existingLote.precoTrabalhado = customData.precoTrabalhado;
       if (customData?.data_preco) existingLote.data_preco = customData.data_preco;
       existingLote.atualizado_em = new Date().toISOString();
 
@@ -1580,6 +1602,24 @@ class ProductRepository {
       this.notify();
       return existingLote;
     }
+
+    const precoNormalFinal =
+      customData?.preco_normal !== undefined
+        ? customData.preco_normal
+        : customData?.precoNormal !== undefined
+        ? customData.precoNormal
+        : reg.preco_normal !== undefined
+        ? reg.preco_normal
+        : (reg as any).precoNormal;
+
+    const precoTrabalhadoFinal =
+      customData?.preco_trabalhado !== undefined
+        ? customData.preco_trabalhado
+        : customData?.precoTrabalhado !== undefined
+        ? customData.precoTrabalhado
+        : reg.preco_trabalhado !== undefined
+        ? reg.preco_trabalhado
+        : (reg as any).precoTrabalhado;
 
     const novoLote: LoteVencimento = {
       id: `venc-saeou-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -1599,7 +1639,10 @@ class ProductRepository {
       criado_em: new Date().toISOString(),
       atualizado_em: new Date().toISOString(),
       origem: 'SAEOU060',
-      preco_trabalhado: customData?.preco_trabalhado !== undefined ? customData.preco_trabalhado : reg.preco_trabalhado,
+      preco_normal: precoNormalFinal ?? null,
+      precoNormal: precoNormalFinal ?? null,
+      preco_trabalhado: precoTrabalhadoFinal ?? null,
+      precoTrabalhado: precoTrabalhadoFinal ?? null,
       data_preco: customData?.data_preco || reg.data_preco,
       saeou060_id: reg.id,
       arquivo_origem: reg.arquivo_origem,

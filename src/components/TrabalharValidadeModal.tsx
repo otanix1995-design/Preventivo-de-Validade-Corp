@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { LoteVencimento, ProdutoSMG, RegistroSaeou060, StatusSaeou060 } from '../types';
 import { parseEmbalagem } from '../services/codeParser';
+import { formatarMoedaBR, parseMoedaBR } from '../services/deviceId';
 
 interface TrabalharValidadeModalProps {
   registro: RegistroSaeou060;
@@ -37,7 +38,10 @@ interface TrabalharValidadeModalProps {
     data_vencimento?: string;
     data_vencimento_exibicao?: string;
     quantidade?: number;
+    preco_normal?: number;
+    precoNormal?: number;
     preco_trabalhado?: number;
+    precoTrabalhado?: number;
     data_preco?: string;
     observacao?: string;
   }) => Promise<void>;
@@ -58,8 +62,21 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
   // Form State
   const [dataValidade, setDataValidade] = useState(registro?.data_vencimento || '');
   const [quantidade, setQuantidade] = useState<number>(registro?.quantidade || 1);
+  const [precoNormal, setPrecoNormal] = useState<string>(
+    registro?.preco_normal !== undefined
+      ? String(registro.preco_normal)
+      : (registro as any)?.precoNormal !== undefined
+      ? String((registro as any).precoNormal)
+      : produto?.vendas_preco !== undefined && produto.vendas_preco > 0
+      ? String(produto.vendas_preco)
+      : ''
+  );
   const [precoTrabalhado, setPrecoTrabalhado] = useState<string>(
-    registro?.preco_trabalhado !== undefined ? String(registro.preco_trabalhado) : ''
+    registro?.preco_trabalhado !== undefined
+      ? String(registro.preco_trabalhado)
+      : (registro as any)?.precoTrabalhado !== undefined
+      ? String((registro as any).precoTrabalhado)
+      : ''
   );
   const [dataPreco, setDataPreco] = useState(registro?.data_preco || '');
   const [observacao, setObservacao] = useState(registro?.observacao || '');
@@ -71,17 +88,32 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
     'Validade não confirmada em gôndola ou já tratada na loja.'
   );
 
-  // Sync state when registro or isOpen changes
+  // Sync state when registro, produto or isOpen changes
   useEffect(() => {
     if (isOpen && registro) {
       setDataValidade(registro.data_vencimento || '');
       setQuantidade(registro.quantidade || 1);
-      setPrecoTrabalhado(registro.preco_trabalhado !== undefined ? String(registro.preco_trabalhado) : '');
+      setPrecoNormal(
+        registro.preco_normal !== undefined
+          ? String(registro.preco_normal)
+          : (registro as any)?.precoNormal !== undefined
+          ? String((registro as any).precoNormal)
+          : produto?.vendas_preco !== undefined && produto.vendas_preco > 0
+          ? String(produto.vendas_preco)
+          : ''
+      );
+      setPrecoTrabalhado(
+        registro.preco_trabalhado !== undefined
+          ? String(registro.preco_trabalhado)
+          : (registro as any)?.precoTrabalhado !== undefined
+          ? String((registro as any).precoTrabalhado)
+          : ''
+      );
       setDataPreco(registro.data_preco || '');
       setObservacao(registro.observacao || '');
       setShowDesconsiderarDialog(false);
     }
-  }, [isOpen, registro]);
+  }, [isOpen, registro, produto]);
 
   const embInfo = parseEmbalagem(produto?.embalagem || registro?.embalagem || '');
   const fator = embInfo.fator || produto?.fator_embalagem || 1;
@@ -102,8 +134,41 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
   const isNoControle = registro?.status_saeou === 'JA_NO_CONTROLE';
   const isDesconsiderado = registro?.status_saeou === 'DESCONSIDERADO';
 
+  // Preço parsing and consistency check
+  const precoNormalNum = parseMoedaBR(precoNormal);
+  const precoTrabalhadoNum = parseMoedaBR(precoTrabalhado);
+
+  // Inconsistência de preços: Preço de Rebaixe >= Preço Normal (quando ambos preenchidos)
+  const precoInconsistente =
+    precoNormalNum !== null &&
+    precoTrabalhadoNum !== null &&
+    precoTrabalhadoNum >= precoNormalNum;
+
+  // Preço base de referência para cálculo comercial
+  const precoBaseReferencia = precoNormalNum ?? produto?.vendas_preco;
+
+  let percentualDesconto: number | null = null;
+  let economiaPorUnidade: number | null = null;
+  if (precoBaseReferencia && precoBaseReferencia > 0 && precoTrabalhadoNum !== null && precoTrabalhadoNum < precoBaseReferencia) {
+    percentualDesconto = Math.round(((precoBaseReferencia - precoTrabalhadoNum) / precoBaseReferencia) * 100);
+    economiaPorUnidade = precoBaseReferencia - precoTrabalhadoNum;
+  }
+
+  const handleApplyQuickDiscount = (percentual: number) => {
+    if (!precoBaseReferencia || precoBaseReferencia <= 0) return;
+    const novoValor = precoBaseReferencia * (1 - percentual / 100);
+    setPrecoTrabalhado(novoValor.toFixed(2).replace('.', ','));
+    if (!dataPreco) {
+      setDataPreco(new Date().toISOString().slice(0, 10));
+    }
+  };
+
   const handleSalvarApenas = async () => {
     if (!registro) return;
+    if (precoInconsistente && precoNormalNum !== null && precoTrabalhadoNum !== null) {
+      alert(`Inconsistência de Preços: O Preço de Rebaixe (${formatarMoedaBR(precoTrabalhadoNum)}) deve ser menor que o Preço Normal (${formatarMoedaBR(precoNormalNum)}).`);
+      return;
+    }
     setIsSubmitting(true);
     try {
       let dataExibicao = dataValidade;
@@ -116,7 +181,10 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
         data_vencimento: dataValidade,
         data_vencimento_exibicao: dataExibicao,
         quantidade: Number(quantidade),
-        preco_trabalhado: precoTrabalhado ? parseFloat(precoTrabalhado.replace(',', '.')) : undefined,
+        preco_normal: precoNormalNum ?? undefined,
+        precoNormal: precoNormalNum ?? undefined,
+        preco_trabalhado: precoTrabalhadoNum ?? undefined,
+        precoTrabalhado: precoTrabalhadoNum ?? undefined,
         data_preco: dataPreco,
         observacao,
       });
@@ -128,12 +196,19 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
 
   const handleAdicionarControleClick = async () => {
     if (!registro) return;
+    if (precoInconsistente && precoNormalNum !== null && precoTrabalhadoNum !== null) {
+      alert(`Inconsistência de Preços: O Preço de Rebaixe (${formatarMoedaBR(precoTrabalhadoNum)}) deve ser menor que o Preço Normal (${formatarMoedaBR(precoNormalNum)}).`);
+      return;
+    }
     setIsSubmitting(true);
     try {
       await onAdicionarAoControle(registro.id, {
         data_validade: dataValidade,
         quantidade_total_unidades: Number(quantidade),
-        preco_trabalhado: precoTrabalhado ? parseFloat(precoTrabalhado.replace(',', '.')) : undefined,
+        preco_normal: precoNormalNum ?? undefined,
+        precoNormal: precoNormalNum ?? undefined,
+        preco_trabalhado: precoTrabalhadoNum ?? undefined,
+        precoTrabalhado: precoTrabalhadoNum ?? undefined,
         data_preco: dataPreco,
         observacao: observacao || `Importado via SAEOU060 (Promotor: ${registro.promotor || 'N/I'})`,
       });
@@ -415,36 +490,107 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
 
           {/* SEÇÃO 4: TRATAMENTO E AÇÕES OPERACIONAIS */}
           <div className="space-y-2.5">
-            <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
-              <Tag className="w-3.5 h-3.5 text-blue-600" />
-              <span>4. Tratamento Operacional (Preço & Observações)</span>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
+                <Tag className="w-3.5 h-3.5 text-blue-600" />
+                <span>4. Tratamento Operacional (Preços DE / POR & Observações)</span>
+              </div>
+              <span className="text-[10px] uppercase font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
+                Ação Comercial
+              </span>
             </div>
 
             <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* Alerta de Inconsistência se Preço Rebaixe >= Preço Normal */}
+              {precoInconsistente && precoNormalNum !== null && precoTrabalhadoNum !== null && (
+                <div className="p-3 bg-red-50 border-2 border-red-300 rounded-xl text-xs text-red-900 font-bold flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-black">Inconsistência de Preços:</p>
+                    <p className="font-normal text-[11px] text-red-800">
+                      O Preço de Rebaixe ({formatarMoedaBR(precoTrabalhadoNum)}) deve ser menor que o Preço Normal ({formatarMoedaBR(precoNormalNum)}).
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {/* Preço Normal (DE) */}
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Preço Trabalhado (R$):
+                  <label htmlFor="input-saeou-preco-normal" className="block text-xs font-semibold text-slate-700 mb-1">
+                    Preço Normal (DE):
                   </label>
                   <div className="relative">
                     <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">
                       R$
                     </span>
                     <input
+                      id="input-saeou-preco-normal"
                       type="text"
-                      placeholder="0,00"
-                      value={precoTrabalhado}
-                      onChange={(e) => setPrecoTrabalhado(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 bg-white border border-slate-300 rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      inputMode="decimal"
+                      placeholder={produto?.vendas_preco ? `Ex: ${produto.vendas_preco.toFixed(2).replace('.', ',')}` : 'Ex: 14,99'}
+                      value={precoNormal}
+                      onChange={(e) => setPrecoNormal(e.target.value)}
+                      className="w-full pl-9 pr-8 py-2 bg-white border border-slate-300 rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono"
                     />
+                    {precoNormal && (
+                      <button
+                        type="button"
+                        onClick={() => setPrecoNormal('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5"
+                        title="Limpar preço normal"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
 
+                {/* Preço Rebaixado (POR) */}
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Data do Preço Trabalhado:
+                  <label htmlFor="input-saeou-preco-rebaixe" className="block text-xs font-semibold text-slate-700 mb-1">
+                    Preço Rebaixado (POR):
+                  </label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">
+                      R$
+                    </span>
+                    <input
+                      id="input-saeou-preco-rebaixe"
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="Ex: 9,99"
+                      value={precoTrabalhado}
+                      onChange={(e) => {
+                        setPrecoTrabalhado(e.target.value);
+                        if (e.target.value && !dataPreco) {
+                          setDataPreco(new Date().toISOString().slice(0, 10));
+                        }
+                      }}
+                      className={`w-full pl-9 pr-8 py-2 bg-white border rounded-xl text-sm font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono ${
+                        precoInconsistente ? 'border-red-500' : 'border-slate-300'
+                      }`}
+                    />
+                    {precoTrabalhado && (
+                      <button
+                        type="button"
+                        onClick={() => setPrecoTrabalhado('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-0.5"
+                        title="Limpar preço trabalhado"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Data do Preço */}
+                <div>
+                  <label htmlFor="input-saeou-data-preco" className="block text-xs font-semibold text-slate-700 mb-1">
+                    Data do Rebaixe:
                   </label>
                   <input
+                    id="input-saeou-data-preco"
                     type="date"
                     value={dataPreco}
                     onChange={(e) => setDataPreco(e.target.value)}
@@ -453,11 +599,51 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
                 </div>
               </div>
 
+              {/* Quick Discount Shortcuts based on Normal Price */}
+              {precoBaseReferencia !== undefined && precoBaseReferencia > 0 && (
+                <div className="pt-1">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[10px] font-bold text-gray-600 uppercase flex items-center gap-1">
+                      <TrendingDown className="w-3 h-3 text-amber-700" />
+                      Atalhos de Rebaixe sobre Preço Normal ({formatarMoedaBR(precoBaseReferencia)}):
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[10, 20, 30, 40, 50].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => handleApplyQuickDiscount(pct)}
+                        className="px-2 py-0.5 rounded-lg bg-white hover:bg-amber-100 border border-amber-300 text-amber-900 text-xs font-bold uppercase transition-colors"
+                      >
+                        -{pct}% ({formatarMoedaBR(precoBaseReferencia * (1 - pct / 100))})
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Discount Evaluation Banner */}
+              {!precoInconsistente && percentualDesconto !== null && economiaPorUnidade !== null && (
+                <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-bold flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <DollarSign className="w-4 h-4 text-emerald-600 stroke-[2.5]" />
+                    <span>
+                      DE {precoBaseReferencia ? formatarMoedaBR(precoBaseReferencia) : ''} POR {precoTrabalhadoNum ? formatarMoedaBR(precoTrabalhadoNum) : ''} (<strong>-{percentualDesconto}%</strong>)
+                    </span>
+                  </span>
+                  <span className="font-mono text-emerald-800">
+                    Economia: <strong>{formatarMoedaBR(economiaPorUnidade)}</strong>/un
+                  </span>
+                </div>
+              )}
+
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                <label htmlFor="input-saeou-observacao" className="block text-xs font-semibold text-slate-700 mb-1">
                   Observação Operacional:
                 </label>
                 <textarea
+                  id="input-saeou-observacao"
                   rows={2}
                   value={observacao}
                   onChange={(e) => setObservacao(e.target.value)}

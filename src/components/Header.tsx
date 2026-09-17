@@ -22,6 +22,7 @@ interface HeaderProps {
   metadados?: MetadadosBase;
   onOpenScanner: () => void;
   onQuickSearchClick?: () => void;
+  onOpenSincronizacaoCentral?: () => void;
   currentTabName?: string;
 }
 
@@ -31,6 +32,7 @@ export const Header: React.FC<HeaderProps> = ({
   metadados,
   onOpenScanner,
   onQuickSearchClick,
+  onOpenSincronizacaoCentral,
   currentTabName,
 }) => {
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
@@ -137,10 +139,16 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-          {/* Cloud Sync Button & Status - Requisito 19 */}
+          {/* Cloud Sync Button & Status - Requisito 19 / Requisito 7 */}
           <button
             id="header-btn-cloud-sync"
-            onClick={handleManualSync}
+            onClick={() => {
+              if (onOpenSincronizacaoCentral) {
+                onOpenSincronizacaoCentral();
+              } else {
+                handleManualSync();
+              }
+            }}
             disabled={isSyncing}
             title={
               isSyncing

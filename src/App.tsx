@@ -14,6 +14,7 @@ import { RelatoriosView } from './components/RelatoriosView';
 import { Saeou060View } from './components/Saeou060View';
 import { SelecionarProdutoCadastroModal } from './components/SelecionarProdutoCadastroModal';
 import { SemVendaView } from './components/SemVendaView';
+import { SincronizacaoCentralModal } from './components/SincronizacaoCentralModal';
 import { VencimentosView } from './components/VencimentosView';
 import { VincularEanModal } from './components/VincularEanModal';
 import {
@@ -52,6 +53,9 @@ export default function App() {
   const [isVincularModalOpen, setIsVincularModalOpen] = useState(false);
   const [vincularInitialEan, setVincularInitialEan] = useState<string | undefined>(undefined);
   const [vincularInitialProduto, setVincularInitialProduto] = useState<ProdutoSMG | null>(null);
+
+  // Modal Central de Sincronização e Homologação (Requisito 7 e 22)
+  const [isCentralSyncModalOpen, setIsCentralSyncModalOpen] = useState(false);
 
   // Selected product detail view state
   const [selectedProduto, setSelectedProduto] = useState<ProdutoSMG | null>(null);
@@ -178,6 +182,7 @@ export default function App() {
         statusBase={metadados.status_base}
         metadados={metadados}
         onOpenScanner={() => setIsScannerOpen(true)}
+        onOpenSincronizacaoCentral={() => setIsCentralSyncModalOpen(true)}
       />
 
       {/* 2. Main Content Container */}
@@ -460,6 +465,19 @@ export default function App() {
           setProdutos(getProdutos());
           setVinculosEan(getVinculosEan());
           setActiveTab('consulta');
+        }}
+      />
+
+      {/* 8. Modal Central de Sincronização e Homologação */}
+      <SincronizacaoCentralModal
+        isOpen={isCentralSyncModalOpen}
+        onClose={() => setIsCentralSyncModalOpen(false)}
+        metadados={metadados}
+        onRefreshData={() => {
+          setProdutos(getProdutos());
+          setVencimentos(getVencimentos());
+          setVinculosEan(getVinculosEan());
+          setMetadados(getMetadados());
         }}
       />
     </div>

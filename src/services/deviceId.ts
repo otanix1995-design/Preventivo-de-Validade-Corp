@@ -60,6 +60,46 @@ export function buildVencimentoKey(
 }
 
 /**
+ * Formata um valor numérico para a moeda brasileira (pt-BR)
+ * Ex: 14.99 -> "R$ 14,99"
+ * Se for null/undefined/NaN, retorna o fallback (padrão: "Não informado")
+ */
+export function formatarMoedaBR(valor?: number | null, fallback: string = 'Não informado'): string {
+  if (valor === undefined || valor === null || isNaN(valor)) {
+    return fallback;
+  }
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(valor);
+}
+
+/**
+ * Converte entradas numéricas ou em string no padrão monetário brasileiro para float seguro de 2 casas decimais.
+ * Aceita: "14,99", "14.99", "R$ 14,99", "1.234,56", 14.99
+ * Retorna null caso inválido ou vazio.
+ */
+export function parseMoedaBR(val?: string | number | null): number | null {
+  if (val === undefined || val === null) return null;
+  if (typeof val === 'number') {
+    return isNaN(val) ? null : Number(val.toFixed(2));
+  }
+  const str = String(val).trim();
+  if (!str) return null;
+  const clean = str.replace(/^R\$\s*/i, '').trim();
+  if (!clean) return null;
+  let normalized = clean;
+  if (clean.includes(',') && clean.includes('.')) {
+    normalized = clean.replace(/\./g, '').replace(',', '.');
+  } else if (clean.includes(',')) {
+    normalized = clean.replace(',', '.');
+  }
+  const parsed = parseFloat(normalized);
+  if (isNaN(parsed) || parsed < 0) return null;
+  return Number(parsed.toFixed(2));
+}
+
+/**
  * Normaliza qualquer objeto de vencimento (seja vindo da nuvem com camelCase ou local com snake_case)
  * garantindo que TODOS os campos estejam devidamente preenchidos e compatíveis.
  */
@@ -89,11 +129,34 @@ export function normalizeVencimentoRecord(raw: any): LoteVencimento {
       : 0
   );
 
-  const preco =
-    raw.precoTrabalhado !== undefined
+  // Preço Normal (DE) - Suporta number, string brasileira ou null
+  const precoNormalRaw =
+    raw.precoNormal !== undefined && raw.precoNormal !== null && raw.precoNormal !== ''
+      ? raw.precoNormal
+      : raw.preco_normal !== undefined && raw.preco_normal !== null && raw.preco_normal !== ''
+      ? raw.preco_normal
+      : null;
+
+  const precoNormal =
+    precoNormalRaw !== null
+      ? typeof precoNormalRaw === 'number'
+        ? (isNaN(precoNormalRaw) ? null : Number(precoNormalRaw.toFixed(2)))
+        : parseMoedaBR(precoNormalRaw)
+      : null;
+
+  // Preço de Rebaixe / Trabalhado (POR)
+  const precoTrabalhadoRaw =
+    raw.precoTrabalhado !== undefined && raw.precoTrabalhado !== null && raw.precoTrabalhado !== ''
       ? raw.precoTrabalhado
-      : raw.preco_trabalhado !== undefined
+      : raw.preco_trabalhado !== undefined && raw.preco_trabalhado !== null && raw.preco_trabalhado !== ''
       ? raw.preco_trabalhado
+      : null;
+
+  const preco =
+    precoTrabalhadoRaw !== null
+      ? typeof precoTrabalhadoRaw === 'number'
+        ? (isNaN(precoTrabalhadoRaw) ? null : Number(precoTrabalhadoRaw.toFixed(2)))
+        : parseMoedaBR(precoTrabalhadoRaw)
       : null;
 
   const enviarComprador = Boolean(
@@ -138,7 +201,10 @@ export function normalizeVencimentoRecord(raw: any): LoteVencimento {
     atualizado_em: updatedAt,
     status_customizado: status as any,
     enviar_ao_comprador: enviarComprador,
+    preco_normal: precoNormal,
+    precoNormal: precoNormal,
     preco_trabalhado: preco,
+    precoTrabalhado: preco,
     data_preco: raw.data_preco,
     origem: raw.origem || 'MANUAL',
     saeou060_id: raw.saeou060_id,
@@ -155,7 +221,6 @@ export function normalizeVencimentoRecord(raw: any): LoteVencimento {
     descricao: desc,
     dataVencimento: dataVenc,
     quantidade: qtd,
-    precoTrabalhado: preco,
     enviarParaComprador: enviarComprador,
     status: status,
     createdAt: createdAt,
@@ -194,6 +259,8 @@ export function buildVencimentoCentralPayload(lote: LoteVencimento, operationId?
     data_validade: norm.data_validade,
     quantidade: Number(norm.quantidade || 0),
     quantidade_total_unidades: Number(norm.quantidade_total_unidades || 0),
+    precoNormal: norm.precoNormal !== undefined ? norm.precoNormal : null,
+    preco_normal: norm.preco_normal !== undefined ? norm.preco_normal : null,
     precoTrabalhado: norm.precoTrabalhado !== undefined ? norm.precoTrabalhado : null,
     preco_trabalhado: norm.preco_trabalhado !== undefined ? norm.preco_trabalhado : null,
     data_preco: norm.data_preco || null,
