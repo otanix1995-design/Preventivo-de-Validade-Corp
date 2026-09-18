@@ -1,7 +1,11 @@
 import * as XLSX from 'xlsx';
 import { LoteVencimento, ProdutoSMG } from '../types';
 import { cleanEanCode, isProdutoPesavel, parseEmbalagem } from './codeParser';
-import { extractBrandFromDescription, removeBrandFromDescription } from './brandIdentifierService';
+import {
+  extractBrandFromDescription,
+  removeBrandFromDescription,
+  buildTagsellDescription,
+} from './brandIdentifierService';
 
 /**
  * MODELO OFICIAL TAGSELL - EXATAMENTE 19 COLUNAS
@@ -274,7 +278,7 @@ export function validarItemParaCartaz(
   const gramagem = extrairGramagemTagsell(produto, lote);
   const ean = extrairEanTagsell(produto);
   const marca = extrairMarcaTagsell(produto, lote);
-  const descricaoTagsell = removeBrandFromDescription(descricao, marca);
+  const descricaoTagsell = buildTagsellDescription(descricao, marca);
 
   return {
     lote,
@@ -319,8 +323,8 @@ export function validarItemParaCartaz(
  * 19. PREÇO VAREJO = Preço de Rebaixe (POR) em número
  */
 export function gerarLinhaTagsell(item: ItemCartazValidacao): (string | number)[] {
-  // Coluna 9: DESCRIÇÃO PRINCIPAL (descrição tratada com a marca identificada removida)
-  const descricaoParaTagsell = item.descricaoTagsell || removeBrandFromDescription(item.descricao, item.marca);
+  // Coluna 9: DESCRIÇÃO PRINCIPAL (descrição tratada para o Tagsell sem RF. e sem duplicar a marca)
+  const descricaoParaTagsell = item.descricaoTagsell || buildTagsellDescription(item.descricao, item.marca);
 
   const linha: (string | number)[] = [
     'DE POR', // 1. DINÂMICA COMERCIAL
@@ -465,5 +469,9 @@ export function exportarCartazesTagsellXLSX(
   };
 }
 
-export { extractBrandFromDescription, removeBrandFromDescription } from './brandIdentifierService';
+export {
+  extractBrandFromDescription,
+  removeBrandFromDescription,
+  buildTagsellDescription,
+} from './brandIdentifierService';
 
