@@ -31,12 +31,14 @@ import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 import { GerarCartazesModal } from './GerarCartazesModal';
 import { StatusBadge } from './StatusBadge';
 import { Saeou060View } from './Saeou060View';
+import { AnalisePromotorView } from './AnalisePromotorView';
+import { analisePromotorService } from '../services/analisePromotorService';
 
 interface VencimentosViewProps {
   vencimentos: LoteVencimento[];
   produtos: ProdutoSMG[];
   initialFilter?: string;
-  initialSubTab?: 'controle' | 'saeou060';
+  initialSubTab?: 'controle' | 'saeou060' | 'analise_promotor';
   onSelectProduto: (produto: ProdutoSMG) => void;
   onOpenCadastrarModal: (produto?: ProdutoSMG, lote?: LoteVencimento) => void;
 }
@@ -49,7 +51,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
   onSelectProduto,
   onOpenCadastrarModal,
 }) => {
-  const [activeSubTab, setActiveSubTab] = useState<'controle' | 'saeou060'>(initialSubTab);
+  const [activeSubTab, setActiveSubTab] = useState<'controle' | 'saeou060' | 'analise_promotor'>(initialSubTab);
   const [activeFilter, setActiveFilter] = useState<string>(initialFilter);
   const [searchTerm, setSearchTerm] = useState('');
   const [isLimparModalOpen, setIsLimparModalOpen] = useState(false);
@@ -57,6 +59,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
   const [isGerarCartazesModalOpen, setIsGerarCartazesModalOpen] = useState(false);
   const [saeouCount, setSaeouCount] = useState(() => productRepository.getSaeou060Registros().length);
   const [pendingSyncCount, setPendingSyncCount] = useState(() => syncQueueService.getPendingCount());
+  const [solicitacoesPendentesCount, setSolicitacoesPendentesCount] = useState(0);
   const hoje = new Date();
 
   useEffect(() => {
@@ -64,6 +67,22 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
       setActiveSubTab(initialSubTab);
     }
   }, [initialSubTab]);
+
+  // Listener em tempo real para contador de solicitações pendentes do App Promotor (Filial 172)
+  useEffect(() => {
+    const unsubSolic = analisePromotorService.subscribeSolicitacoesPendentes(
+      '172',
+      (lista) => {
+        setSolicitacoesPendentesCount(lista.length);
+      },
+      () => {
+        analisePromotorService.getSolicitacoesPendentes('172').then((lista) => {
+          setSolicitacoesPendentesCount(lista.length);
+        });
+      }
+    );
+    return () => unsubSolic();
+  }, []);
 
   // Processar fila local pendente de vencimentos ao acessar aba Controle
   useEffect(() => {
@@ -235,7 +254,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                 VALIDADES
               </h1>
               <p className="text-xs text-blue-100 font-medium mt-0.5">
-                Trabalho diário {activeSubTab === 'saeou060' ? '• Próximos 15 dias' : '• Controle de Vencimentos'}
+                Trabalho diário {activeSubTab === 'saeou060' ? '• Próximos 15 dias' : activeSubTab === 'analise_promotor' ? '• Análise e Aprovação de Promotores' : '• Controle de Vencimentos'}
               </p>
             </div>
           </div>
@@ -249,22 +268,22 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
           </button>
         </div>
 
-        {/* SELETOR DE ALTERNÂNCIA [ CONTROLE ] [ SAEOU060 ] */}
-        <div className="grid grid-cols-2 bg-blue-700/70 p-1 rounded-xl border border-blue-400/40">
+        {/* SELETOR DE ALTERNÂNCIA [ CONTROLE ] [ SAEOU060 ] [ ANÁLISE PROMOTOR ] */}
+        <div className="grid grid-cols-3 bg-blue-700/70 p-1 rounded-xl border border-blue-400/40 gap-1">
           <button
             id="tab-btn-controle"
             onClick={() => setActiveSubTab('controle')}
-            className={`py-2 px-3 rounded-lg text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+            className={`py-2 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1 sm:gap-1.5 ${
               activeSubTab === 'controle'
                 ? 'bg-white text-blue-900 shadow-sm'
                 : 'text-blue-100 hover:text-white hover:bg-blue-600/50'
             }`}
           >
-            <Calendar className="w-4 h-4" />
-            <span>CONTROLE</span>
+            <Calendar className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">CONTROLE</span>
             {vencimentos.length > 0 && (
               <span
-                className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold shrink-0 ${
                   activeSubTab === 'controle'
                     ? 'bg-blue-100 text-blue-800'
                     : 'bg-blue-800/80 text-blue-200'
@@ -278,23 +297,47 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
           <button
             id="tab-btn-saeou060"
             onClick={() => setActiveSubTab('saeou060')}
-            className={`py-2 px-3 rounded-lg text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-2 ${
+            className={`py-2 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1 sm:gap-1.5 ${
               activeSubTab === 'saeou060'
                 ? 'bg-white text-blue-900 shadow-sm'
                 : 'text-blue-100 hover:text-white hover:bg-blue-600/50'
             }`}
           >
-            <FileSpreadsheet className="w-4 h-4" />
-            <span>SAEOU060</span>
+            <FileSpreadsheet className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">SAEOU060</span>
             {saeouCount > 0 && (
               <span
-                className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold shrink-0 ${
                   activeSubTab === 'saeou060'
                     ? 'bg-blue-100 text-blue-800'
                     : 'bg-blue-800/80 text-blue-200'
                 }`}
               >
                 {saeouCount}
+              </span>
+            )}
+          </button>
+
+          <button
+            id="tab-btn-analise-promotor"
+            onClick={() => setActiveSubTab('analise_promotor')}
+            className={`py-2 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1 sm:gap-1.5 ${
+              activeSubTab === 'analise_promotor'
+                ? 'bg-white text-blue-900 shadow-sm'
+                : 'text-blue-100 hover:text-white hover:bg-blue-600/50'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">ANÁLISE PROMOTOR</span>
+            {solicitacoesPendentesCount > 0 && (
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-black shrink-0 ${
+                  activeSubTab === 'analise_promotor'
+                    ? 'bg-amber-500 text-white animate-pulse'
+                    : 'bg-amber-400 text-amber-950 font-black'
+                }`}
+              >
+                {solicitacoesPendentesCount}
               </span>
             )}
           </button>
@@ -317,7 +360,15 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
       </div>
 
       {/* RENDERIZAÇÃO DA SUB-ABA ATIVA */}
-      {activeSubTab === 'saeou060' ? (
+      {activeSubTab === 'analise_promotor' ? (
+        <AnalisePromotorView
+          filialId="172"
+          onVencimentosAtualizados={() => {
+            // Notificar que a base foi alterada
+          }}
+          onNavigateToControle={() => setActiveSubTab('controle')}
+        />
+      ) : activeSubTab === 'saeou060' ? (
         <Saeou060View
           onSelectProduto={onSelectProduto}
           onNavigateToControle={() => setActiveSubTab('controle')}

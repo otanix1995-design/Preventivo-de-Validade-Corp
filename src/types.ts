@@ -332,7 +332,9 @@ export type TipoAcaoAuditoria =
   | 'ATUALIZOU_QUANTIDADE'
   | 'ENVIOU_COMPRADOR'
   | 'REMOVEU_ENVIO_COMPRADOR'
-  | 'SINCRONIZOU_ALTERACAO';
+  | 'SINCRONIZOU_ALTERACAO'
+  | 'APROVOU_SOLICITACAO_PROMOTOR'
+  | 'RECUSOU_SOLICITACAO_PROMOTOR';
 
 export type StatusSincronizacaoAuditoria = 'SINCRONIZADO' | 'PENDENTE' | 'ERRO';
 
@@ -413,4 +415,73 @@ export interface FilialItem {
 export const FILIAIS_DISPONIVEIS: FilialItem[] = [
   { filialId: '172', filialNome: 'Cascavel' },
 ];
+
+export type StatusSolicitacaoPromotor = 'PENDENTE_ANALISE' | 'APROVADO' | 'RECUSADO';
+export type ResultadoAprovacaoSolicitacao = 'NOVO_VENCIMENTO' | 'QUANTIDADE_ATUALIZADA';
+
+export interface SolicitacaoVencimentoPromotor {
+  id: string;
+  solicitacaoId?: string;
+  filialId: string;
+  codigoInterno: string;
+  digito: string;
+  codigoCompleto?: string;
+  descricao: string;
+  embalagem?: string;
+  fator_embalagem?: number;
+  unidade_medida?: string;
+  ean?: string;
+  eans?: string[];
+  dataVencimento: string; // YYYY-MM-DD
+  quantidadeInformada: number;
+  quantidadeCaixas?: number;
+  quantidadeUnidades?: number;
+  quantidadeTexto?: string;
+  setor?: string;
+  setorTipo?: 'FRIOS' | 'LOJA' | string;
+  promotorId: string;
+  promotorNome: string;
+  vinculoPromotorId?: string;
+  agencia?: string;
+  agenciaNome?: string;
+  industriaAgencia?: string;
+  enviadoEm: string;
+  status: StatusSolicitacaoPromotor;
+  criadoEm?: string;
+  atualizadoEm?: string;
+
+  // Campos de resolução / aprovação
+  aprovadoEm?: string;
+  aprovadoPor?: string;
+  resultadoAprovacao?: ResultadoAprovacaoSolicitacao;
+  referenciaVencimento?: string;
+  quantidadeAnterior?: number;
+  quantidadeAprovada?: number;
+
+  // Campos de recusa
+  recusadoEm?: string;
+  recusadoPor?: string;
+  motivoRecusa?: string;
+
+  // Campos consolidados de análise
+  dataAnalise?: string;
+  analisadoPor?: string;
+}
+
+export interface FiltrosHistoricoPromotor {
+  mesAno: string; // 'YYYY-MM', ex: '2026-09'
+  promotorId: string; // 'TODOS' ou promotorId
+  industriaAgencia: string; // 'TODAS' ou agência
+  setor: 'TODOS' | 'FRIOS' | 'LOJA' | string;
+  status: 'TODOS' | 'PENDENTE' | 'APROVADO' | 'RECUSADO';
+}
+
+export interface ResumoHistoricoPromotor {
+  totalEnvios: number;
+  aprovados: number;
+  recusados: number;
+  pendentes: number;
+  novosVencimentos: number;
+  atualizacoesQuantidade: number;
+}
 

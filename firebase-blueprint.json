@@ -142,6 +142,10 @@
     "/auditoria/{auditoriaId}": {
       "schema": "AuditoriaCentral",
       "description": "Trilha de auditoria das ações e operações"
+    },
+    "/solicitacoesVencimentoPromotor/{solicitacaoId}": {
+      "schema": "SolicitacaoVencimentoPromotor",
+      "description": "Solicitações de cadastro e contagem enviadas pelos promotores para análise"
     }
   }
 }

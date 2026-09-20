@@ -33,6 +33,11 @@ service cloud.firestore {
       allow update, delete: if false; // Auditoria é append-only
     }
 
+    // 7. SOLICITAÇÕES DE VENCIMENTO DO PROMOTOR (Análise pelo Aplicativo Principal)
+    match /solicitacoesVencimentoPromotor/{solicitacaoId} {
+      allow read, write: if true;
+    }
+
     // Suporte a coleções legadas e sincronização transitória
     match /metadados/{docId} {
       allow read, write: if true;

@@ -61,7 +61,7 @@ export default function App() {
   const [selectedProduto, setSelectedProduto] = useState<ProdutoSMG | null>(null);
   const [initialSearchQuery, setInitialSearchQuery] = useState<string>('');
   const [initialVencimentoFilter, setInitialVencimentoFilter] = useState<string>('TODOS');
-  const [initialVencimentoSubTab, setInitialVencimentoSubTab] = useState<'controle' | 'saeou060'>('controle');
+  const [initialVencimentoSubTab, setInitialVencimentoSubTab] = useState<'controle' | 'saeou060' | 'analise_promotor'>('controle');
 
   // Sync state when store updates and on init
   useEffect(() => {
@@ -96,6 +96,8 @@ export default function App() {
     if (tab === 'vencimentos') {
       if (filterOrSub === 'saeou060') {
         setInitialVencimentoSubTab('saeou060');
+      } else if (filterOrSub === 'analise_promotor') {
+        setInitialVencimentoSubTab('analise_promotor');
       } else if (filterOrSub) {
         setInitialVencimentoSubTab('controle');
         setInitialVencimentoFilter(filterOrSub);
