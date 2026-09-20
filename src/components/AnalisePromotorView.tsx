@@ -522,6 +522,12 @@ export const AnalisePromotorView: React.FC<AnalisePromotorViewProps> = ({
                             {solic.embalagem}
                           </span>
                         )}
+
+                        {solic.precoNormal !== undefined && solic.precoNormal !== null && (
+                          <span className="font-mono text-emerald-800 text-[11px] bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 font-bold">
+                            Preço DE: R$ {Number(solic.precoNormal).toFixed(2).replace('.', ',')}
+                          </span>
+                        )}
                       </div>
                       {solic.setor && (
                         <p className="text-[11px] text-gray-400 font-medium">
@@ -535,12 +541,26 @@ export const AnalisePromotorView: React.FC<AnalisePromotorViewProps> = ({
                       <span className="text-[10px] font-black uppercase text-blue-600 tracking-wider block">
                         Data de Validade
                       </span>
-                      <span className="text-sm font-black text-blue-900 font-mono">
-                        {formatarDataBR(solic.dataVencimento)}
+                      <span className={`text-sm font-black font-mono ${solic.isDataValida ? 'text-blue-900' : 'text-rose-600'}`}>
+                        {solic.isDataValida ? formatarDataBR(solic.dataValidade || solic.dataVencimento) : 'DATA NÃO INFORMADA'}
                       </span>
                       {(() => {
+                        if (!solic.isDataValida || !solic.dataVencimento) {
+                          return (
+                            <span className="text-[10px] block text-rose-600 font-bold">
+                              Inválida / Ausente
+                            </span>
+                          );
+                        }
                         const diffMs = new Date(solic.dataVencimento + 'T12:00:00').getTime() - new Date().setHours(0, 0, 0, 0);
                         const dias = Math.round(diffMs / (1000 * 60 * 60 * 24));
+                        if (isNaN(dias)) {
+                          return (
+                            <span className="text-[10px] block text-rose-600 font-bold">
+                              Data Inválida
+                            </span>
+                          );
+                        }
                         const info = formatarDiasRestantes(dias);
                         return (
                           <span className={`text-[10px] block ${info.cor}`}>
@@ -551,6 +571,37 @@ export const AnalisePromotorView: React.FC<AnalisePromotorViewProps> = ({
                     </div>
                   </div>
 
+                  {/* SINALIZAÇÃO DE ENVIO DUPLICADO (REQUISITO 9) */}
+                  {solic.isDuplicada && (
+                    <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 flex items-start gap-2 text-xs text-amber-950">
+                      <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-bold">Aviso: Envio Duplicado Detectado</p>
+                        <p className="text-[11px] text-amber-900">
+                          Este promotor enviou outra contagem para este mesmo produto e validade. As contagens estão listadas separadamente para análise da liderança.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* AVISO DE INCONSISTÊNCIAS COM BLOQUEIO DE APROVAÇÃO (REQUISITO 8) */}
+                  {solic.inconsistencias && solic.inconsistencias.length > 0 && (
+                    <div className="bg-rose-50 border border-rose-200 rounded-xl p-3 space-y-1 text-xs text-rose-950">
+                      <div className="flex items-center gap-1.5 font-black uppercase tracking-wide text-rose-700">
+                        <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                        <span>DADOS DA SOLICITAÇÃO INCONSISTENTES</span>
+                      </div>
+                      <ul className="list-disc list-inside space-y-0.5 text-[11px] text-rose-800 font-medium pl-1">
+                        {solic.inconsistencias.map((inc, i) => (
+                          <li key={i}>{inc}</li>
+                        ))}
+                      </ul>
+                      <p className="text-[10px] text-rose-600 font-semibold italic pt-0.5">
+                        * Aprovação direta bloqueada. Corrija os dados via "Editar e Aprovar" ou recuse a solicitação.
+                      </p>
+                    </div>
+                  )}
+
                   {/* QUANTIDADE INFORMADA PELO PROMOTOR */}
                   <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3 flex items-center justify-between">
                     <div>
@@ -558,12 +609,17 @@ export const AnalisePromotorView: React.FC<AnalisePromotorViewProps> = ({
                         Quantidade Informada pelo Promotor
                       </span>
                       <p className="text-sm font-black text-amber-950 mt-0.5">
-                        {solic.quantidadeTexto || `${solic.quantidadeInformada} UN`}
+                        {solic.quantidadeTexto || `${solic.quantidadeTotalUnidades ?? solic.quantidadeInformada} UN`}
                       </p>
+                      {solic.fator_embalagem && solic.fator_embalagem > 1 && (
+                        <span className="text-[11px] text-amber-800/80 font-medium block">
+                          Fator SMGOI013: {solic.fator_embalagem} UN / {solic.embalagem || 'CX'}
+                        </span>
+                      )}
                     </div>
                     <div className="text-right">
-                      <span className="text-xs font-mono font-bold text-amber-900 bg-amber-100/80 px-2.5 py-1 rounded-lg border border-amber-300">
-                        Total: {solic.quantidadeInformada} UN
+                      <span className="text-xs font-mono font-bold text-amber-900 bg-amber-100/80 px-2.5 py-1 rounded-lg border border-amber-300 block">
+                        Total: {solic.quantidadeTotalUnidades ?? solic.quantidadeInformada} UN
                       </span>
                     </div>
                   </div>
@@ -582,11 +638,11 @@ export const AnalisePromotorView: React.FC<AnalisePromotorViewProps> = ({
                         </div>
                         <div className="bg-white/80 p-2 rounded-lg border border-orange-200">
                           <span className="text-gray-500 block text-[10px] uppercase font-bold">Promotor informou:</span>
-                          <span className="font-mono font-black text-amber-900 text-xs">{solic.quantidadeInformada} UN</span>
+                          <span className="font-mono font-black text-amber-900 text-xs">{solic.quantidadeTotalUnidades ?? solic.quantidadeInformada} UN</span>
                         </div>
                         <div className="bg-orange-100/80 p-2 rounded-lg border border-orange-300">
                           <span className="text-orange-800 block text-[10px] uppercase font-black">Após aprovação:</span>
-                          <span className="font-mono font-black text-orange-950 text-xs">{solic.quantidadeInformada} UN</span>
+                          <span className="font-mono font-black text-orange-950 text-xs">{solic.quantidadeTotalUnidades ?? solic.quantidadeInformada} UN</span>
                         </div>
                       </div>
                       <p className="text-[10px] text-orange-700 font-medium italic">
@@ -597,7 +653,7 @@ export const AnalisePromotorView: React.FC<AnalisePromotorViewProps> = ({
                     <div className="bg-blue-50/50 border border-blue-100 rounded-xl p-2.5 flex items-center gap-2 text-xs text-blue-900">
                       <CheckCircle2 className="w-4 h-4 text-blue-600 shrink-0" />
                       <span>
-                        <strong>Novo vencimento:</strong> Será inserido oficialmente no Controle de Vencimentos com <strong>{solic.quantidadeInformada} UN</strong>.
+                        <strong>Novo vencimento:</strong> Será inserido oficialmente no Controle de Vencimentos com <strong>{solic.quantidadeTotalUnidades ?? solic.quantidadeInformada} UN</strong>.
                       </span>
                     </div>
                   )}
@@ -626,9 +682,14 @@ export const AnalisePromotorView: React.FC<AnalisePromotorViewProps> = ({
 
                     <button
                       type="button"
-                      disabled={isProcessing}
+                      disabled={isProcessing || Boolean(solic.inconsistencias && solic.inconsistencias.length > 0)}
                       onClick={() => handleAprovar(solic)}
-                      className={`px-4 py-2 text-white rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-sm active:scale-95 disabled:opacity-50 ${
+                      title={
+                        solic.inconsistencias && solic.inconsistencias.length > 0
+                          ? 'Aprovação bloqueada por inconsistência nos dados'
+                          : undefined
+                      }
+                      className={`px-4 py-2 text-white rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-sm active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed ${
                         isExisting
                           ? 'bg-orange-600 hover:bg-orange-700 active:bg-orange-800'
                           : 'bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800'

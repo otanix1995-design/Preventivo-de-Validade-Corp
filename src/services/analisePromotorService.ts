@@ -25,6 +25,7 @@ import { productRepository } from './productRepository';
 import { promotorService } from './promotorService';
 import { buildVencimentoKey } from './deviceId';
 import { normalizeDateToIso, normalizeInternalCode } from './duplicateValidator';
+import { parseEmbalagem } from './codeParser';
 import { findProdutoByCodeOrEan } from './storage';
 import {
   LoteVencimento,
@@ -33,28 +34,161 @@ import {
 } from '../types';
 
 /**
- * Normaliza documento bruto do Firestore no formato tipado SolicitacaoVencimentoPromotor
+ * Normaliza documento bruto do Firestore no formato tipado canônico SolicitacaoVencimentoPromotor.
+ * Resolve validade canônica YYYY-MM-DD, fator de embalagem da SMGOI013 e quantidade em unidades totais.
  */
-function parseDocToSolicitacao(id: string, data: any, fallbackFilial: string = '172'): SolicitacaoVencimentoPromotor {
+export function parseDocToSolicitacao(id: string, data: any, fallbackFilial: string = '172'): SolicitacaoVencimentoPromotor {
+  const filialId = data.filialId || fallbackFilial;
+  const codigoInterno = String(data.codigoInterno || '').trim();
+  const digito = String(data.digito || '0').trim();
+  const codigoCompleto = data.codigoCompleto || (digito ? `${codigoInterno}-${digito}` : codigoInterno);
+  const ean = data.ean || (Array.isArray(data.eans) && data.eans[0]) || '';
+
+  // 1. Resolver dados cadastrais da mercadoria na SMGOI013 (para fator de embalagem e setor)
+  const produtoSmg = findProdutoByCodeOrEan(codigoInterno || codigoCompleto || ean);
+
+  // 2. Determinar FATOR DE EMBALAGEM real da SMGOI013
+  let fatorEmbalagem = 1;
+  if (data.fatorEmbalagem !== undefined && Number(data.fatorEmbalagem) > 0) {
+    fatorEmbalagem = Number(data.fatorEmbalagem);
+  } else if (data.fator_embalagem !== undefined && Number(data.fator_embalagem) > 0) {
+    fatorEmbalagem = Number(data.fator_embalagem);
+  } else if (produtoSmg?.fator_embalagem && Number(produtoSmg.fator_embalagem) > 0) {
+    fatorEmbalagem = Number(produtoSmg.fator_embalagem);
+  } else {
+    const rawEmb = data.embalagem || produtoSmg?.embalagem;
+    if (rawEmb) {
+      const parsed = parseEmbalagem(rawEmb);
+      if (parsed && parsed.fator && parsed.fator > 0) {
+        fatorEmbalagem = parsed.fator;
+      }
+    }
+  }
+
+  const embalagem = data.embalagem || produtoSmg?.embalagem || (fatorEmbalagem > 1 ? `CXA 1 X ${fatorEmbalagem}` : 'UN');
+  const unidadeMedida = data.unidadeMedida || data.unidade_medida || produtoSmg?.unidade_medida || (fatorEmbalagem > 1 ? 'CXA' : 'UN');
+
+  // 3. Resolver DATA DE VALIDADE (ISO YYYY-MM-DD)
+  // Verifica: dataValidade / validade / dataVencimento / data_validade / expirationDate
+  const rawDate = data.dataValidade || data.validade || data.dataVencimento || data.data_validade || data.expirationDate || '';
+  const dataIso = normalizeDateToIso(rawDate);
+  const isDataValida = !!dataIso;
+  const dataValidade = dataIso || '';
+  const dataVencimento = dataValidade; // Mantém sincronizado para retrocompatibilidade
+
+  // 4. Resolver QUANTIDADE (CANÔNICA EM UNIDADES TOTAIS)
+  // Regra fundamental: NUNCA somar 4 CX + 1 UN como 5 UN.
+  // Ex: 4 CX + 1 UN com fator 15 = 4 * 15 + 1 = 61 UNIDADES.
+  let quantidadeTotalUnidades = 0;
+  let quantidadeCaixas: number | undefined = undefined;
+  let quantidadeUnidades: number | undefined = undefined;
+  const quantidadeEmb1 = data.quantidadeEmb1 !== undefined ? Number(data.quantidadeEmb1) : undefined;
+  const quantidadeEmb9 = data.quantidadeEmb9 !== undefined ? Number(data.quantidadeEmb9) : undefined;
+  const rawQuantidade = Number(data.quantidadeInformada ?? data.quantidade ?? 0);
+
+  if (data.quantidadeTotalUnidades !== undefined && data.quantidadeTotalUnidades !== null && !isNaN(Number(data.quantidadeTotalUnidades))) {
+    // Documento já possui total em unidades canônico
+    quantidadeTotalUnidades = Number(data.quantidadeTotalUnidades);
+    if (fatorEmbalagem > 1) {
+      quantidadeCaixas = data.quantidadeCaixas !== undefined ? Number(data.quantidadeCaixas) : Math.floor(quantidadeTotalUnidades / fatorEmbalagem);
+      quantidadeUnidades = data.quantidadeUnidades !== undefined ? Number(data.quantidadeUnidades) : Math.round((quantidadeTotalUnidades % fatorEmbalagem) * 100) / 100;
+    } else {
+      quantidadeCaixas = 0;
+      quantidadeUnidades = quantidadeTotalUnidades;
+    }
+  } else if (quantidadeEmb1 !== undefined || data.quantidadeCaixas !== undefined) {
+    // Documento original do App Promotor com caixas e unidades separadas
+    const cx = Number(data.quantidadeCaixas ?? quantidadeEmb1 ?? 0);
+    const un = Number(data.quantidadeUnidades ?? data.quantidadeUnidadesRestantes ?? quantidadeEmb9 ?? 0);
+    quantidadeCaixas = cx;
+    quantidadeUnidades = un;
+    quantidadeTotalUnidades = (cx * fatorEmbalagem) + un;
+  } else {
+    // Apenas quantidade simples enviada
+    quantidadeTotalUnidades = rawQuantidade;
+    if (fatorEmbalagem > 1) {
+      quantidadeCaixas = Math.floor(rawQuantidade / fatorEmbalagem);
+      quantidadeUnidades = rawQuantidade % fatorEmbalagem;
+    } else {
+      quantidadeCaixas = 0;
+      quantidadeUnidades = rawQuantidade;
+    }
+  }
+
+  // 5. Montar texto descritivo da quantidade (ex: "4 CX + 1 UN")
+  let quantidadeTexto = data.quantidadeTexto;
+  if (!quantidadeTexto) {
+    if (fatorEmbalagem > 1) {
+      const cx = quantidadeCaixas ?? 0;
+      const un = quantidadeUnidades ?? 0;
+      if (cx > 0 && un > 0) {
+        quantidadeTexto = `${cx} CX + ${un} UN`;
+      } else if (cx > 0) {
+        quantidadeTexto = `${cx} CX`;
+      } else {
+        quantidadeTexto = `${un} UN`;
+      }
+    } else if (unidadeMedida === 'KG') {
+      quantidadeTexto = `${quantidadeTotalUnidades.toFixed(3)} KG`;
+    } else {
+      quantidadeTexto = `${quantidadeTotalUnidades} UN`;
+    }
+  }
+
+  // 6. Preço Normal (DE:)
+  const precoNormal = Number(
+    data.precoNormal ?? data.preco_normal ?? data.precoDe ?? produtoSmg?.vendas_preco ?? 0
+  ) || null;
+
+  // 7. Validação de Inconsistências (para bloqueio de aprovação conforme Requisito 8)
+  const inconsistencias: string[] = [];
+  if (!isDataValida) {
+    inconsistencias.push('Data de validade ausente ou inválida (necessário informar no formato DD/MM/AAAA).');
+  }
+  if (isNaN(quantidadeTotalUnidades) || quantidadeTotalUnidades <= 0) {
+    inconsistencias.push('Quantidade informada inválida ou zerada (necessário valor maior que zero).');
+  }
+
   return {
     id: id,
     solicitacaoId: data.solicitacaoId || id,
-    filialId: data.filialId || fallbackFilial,
-    codigoInterno: String(data.codigoInterno || ''),
-    digito: String(data.digito || '0'),
-    codigoCompleto: data.codigoCompleto || (data.digito ? `${data.codigoInterno}-${data.digito}` : data.codigoInterno),
-    descricao: data.descricao || 'Produto sem descrição',
-    embalagem: data.embalagem || '',
-    fator_embalagem: Number(data.fator_embalagem || 1),
-    unidade_medida: data.unidade_medida || 'UN',
-    ean: data.ean || (Array.isArray(data.eans) && data.eans[0]) || '',
-    eans: data.eans || (data.ean ? [data.ean] : []),
-    dataVencimento: data.dataVencimento || data.data_validade || '',
-    quantidadeInformada: Number(data.quantidadeInformada ?? data.quantidade ?? 0),
-    quantidadeCaixas: data.quantidadeCaixas,
-    quantidadeUnidades: data.quantidadeUnidades,
-    quantidadeTexto: data.quantidadeTexto,
-    setor: data.setor || '',
+    filialId: filialId,
+    codigoInterno: codigoInterno,
+    digito: digito,
+    codigoCompleto: codigoCompleto,
+    descricao: data.descricao || produtoSmg?.descricao || 'Produto sem descrição',
+    embalagem: embalagem,
+    fator_embalagem: fatorEmbalagem,
+    fatorEmbalagem: fatorEmbalagem,
+    unidade_medida: unidadeMedida,
+    unidadeMedida: unidadeMedida,
+    ean: ean,
+    eans: data.eans || (ean ? [ean] : (produtoSmg?.eans || [])),
+
+    // Data de validade
+    dataValidade: dataValidade,
+    dataVencimento: dataVencimento,
+    validade: data.validade || rawDate,
+    isDataValida: isDataValida,
+
+    // Quantidades
+    quantidadeTotalUnidades: quantidadeTotalUnidades,
+    quantidadeInformada: quantidadeTotalUnidades,
+    quantidadeInformadaOriginal: rawQuantidade,
+    quantidadeCaixas: quantidadeCaixas,
+    quantidadeUnidades: quantidadeUnidades,
+    quantidadeEmb1: quantidadeEmb1,
+    quantidadeEmb9: quantidadeEmb9,
+    quantidadeTexto: quantidadeTexto,
+    tipoEmbalagem: data.tipoEmbalagem || (fatorEmbalagem > 1 ? 'CAIXA_UNIDADE' : 'UNIDADE'),
+
+    // Preço Normal
+    precoNormal: precoNormal,
+
+    // Inconsistências
+    inconsistencias: inconsistencias.length > 0 ? inconsistencias : undefined,
+
+    setor: data.setor || (produtoSmg as any)?.setor || '',
     setorTipo: data.setorTipo || (data.descricao?.startsWith('RF.') ? 'FRIOS' : 'LOJA'),
     promotorId: data.promotorId || 'PROMOTOR_DESCONHECIDO',
     promotorNome: data.promotorNome || 'Promotor',
@@ -78,6 +212,36 @@ function parseDocToSolicitacao(id: string, data: any, fallbackFilial: string = '
     dataAnalise: data.dataAnalise || data.aprovadoEm || data.recusadoEm,
     analisadoPor: data.analisadoPor || data.aprovadoPor || data.recusadoPor,
   };
+}
+
+/**
+ * Identifica e sinaliza duplicidades entre solicitações pendentes
+ * Chave de pendência: filialId + promotorId + codigoInterno + digito + dataValidade
+ */
+function marcarDuplicidadesPendentes(lista: SolicitacaoVencimentoPromotor[]): SolicitacaoVencimentoPromotor[] {
+  const grupos = new Map<string, SolicitacaoVencimentoPromotor[]>();
+
+  for (const item of lista) {
+    if (item.status !== 'PENDENTE_ANALISE') continue;
+    const chave = `${item.filialId}_${item.promotorId}_${item.codigoInterno}_${item.digito}_${item.dataValidade || 'SEM_DATA'}`;
+    const grupo = grupos.get(chave) || [];
+    grupo.push(item);
+    grupos.set(chave, grupo);
+  }
+
+  for (const grupo of grupos.values()) {
+    if (grupo.length > 1) {
+      // Ordena decrescente por data/hora de envio (o mais recente primeiro)
+      grupo.sort((a, b) => new Date(b.enviadoEm || 0).getTime() - new Date(a.enviadoEm || 0).getTime());
+      const principal = grupo[0];
+      for (let i = 1; i < grupo.length; i++) {
+        grupo[i].isDuplicada = true;
+        grupo[i].duplicadaDeId = principal.id;
+      }
+    }
+  }
+
+  return lista;
 }
 
 export class AnalisePromotorService {
@@ -119,6 +283,9 @@ export class AnalisePromotorService {
             lista.push(parseDocToSolicitacao(d.id, d.data(), filialPadrao));
           });
 
+          // Marcar duplicidades entre solicitações pendentes
+          marcarDuplicidadesPendentes(lista);
+
           // Ordenar por data de envio decrescente
           lista.sort((a, b) => {
             const tA = new Date(a.enviadoEm || 0).getTime();
@@ -158,11 +325,248 @@ export class AnalisePromotorService {
       snap.forEach((d) => {
         lista.push(parseDocToSolicitacao(d.id, d.data(), filialId));
       });
+      marcarDuplicidadesPendentes(lista);
       return lista;
     } catch (err) {
       console.warn('[AnalisePromotorService] Erro ao buscar solicitações pendentes:', err);
       return [];
     }
+  }
+
+  /**
+   * REGRA PARA NOVOS ENVIOS (REQUISITO 10 E 11)
+   * Salva ou atualiza uma solicitação do promotor aplicando a regra de unicidade de pendência:
+   * Chave: filialId + promotorId + codigoInterno + digito + dataValidade + status: PENDENTE_ANALISE
+   * 
+   * Se o MESMO promotor enviar novamente o MESMO produto com a MESMA validade enquanto a
+   * solicitação anterior ainda estiver PENDENTE:
+   * NÃO criar outro documento.
+   * Atualizar a solicitação pendente existente com a nova contagem e novo Preço DE.
+   * Registrar auditoria da atualização.
+   */
+  public async salvarOuAtualizarSolicitacaoPromotor(params: {
+    filialId: string;
+    promotorId: string;
+    promotorNome: string;
+    agencia?: string;
+    codigoInterno: string;
+    digito: string;
+    codigoCompleto?: string;
+    descricao?: string;
+    ean?: string;
+    dataValidade: string; // YYYY-MM-DD ou DD/MM/AAAA
+    quantidadeCaixas?: number;
+    quantidadeUnidades?: number;
+    quantidadeTotalUnidades?: number;
+    precoNormal?: number | null;
+    setor?: string;
+    observacao?: string;
+  }): Promise<{
+    solicitacaoId: string;
+    acao: 'CRIADA' | 'ATUALIZADA';
+    quantidadeTotalUnidades: number;
+    message: string;
+  }> {
+    const filialId = params.filialId || '172';
+    const codigoInterno = String(params.codigoInterno).trim();
+    const digito = String(params.digito || '0').trim();
+    const promotorId = String(params.promotorId).trim();
+
+    const dataIso = normalizeDateToIso(params.dataValidade);
+    if (!dataIso) {
+      throw new Error('Data de validade inválida. Informe uma data válida no formato DD/MM/AAAA.');
+    }
+
+    // Resolver fator de embalagem da mercadoria na SMGOI013
+    const produtoSmg = findProdutoByCodeOrEan(codigoInterno || params.codigoCompleto || params.ean);
+    let fatorEmbalagem = 1;
+    if (produtoSmg?.fator_embalagem && Number(produtoSmg.fator_embalagem) > 0) {
+      fatorEmbalagem = Number(produtoSmg.fator_embalagem);
+    } else if (produtoSmg?.embalagem) {
+      const parsed = parseEmbalagem(produtoSmg.embalagem);
+      if (parsed?.fator && parsed.fator > 0) {
+        fatorEmbalagem = parsed.fator;
+      }
+    }
+
+    // Calcular quantidade canônica em unidades totais
+    let quantidadeTotalUnidades = 0;
+    let cx = params.quantidadeCaixas ?? 0;
+    let un = params.quantidadeUnidades ?? 0;
+
+    if (params.quantidadeTotalUnidades !== undefined && !isNaN(Number(params.quantidadeTotalUnidades))) {
+      quantidadeTotalUnidades = Number(params.quantidadeTotalUnidades);
+      if (fatorEmbalagem > 1) {
+        cx = Math.floor(quantidadeTotalUnidades / fatorEmbalagem);
+        un = Math.round((quantidadeTotalUnidades % fatorEmbalagem) * 100) / 100;
+      } else {
+        cx = 0;
+        un = quantidadeTotalUnidades;
+      }
+    } else {
+      quantidadeTotalUnidades = (cx * fatorEmbalagem) + un;
+    }
+
+    if (quantidadeTotalUnidades <= 0) {
+      throw new Error('Quantidade informada deve ser maior que zero.');
+    }
+
+    // Montar texto descritivo
+    let quantidadeTexto = '';
+    if (fatorEmbalagem > 1) {
+      if (cx > 0 && un > 0) {
+        quantidadeTexto = `${cx} CX + ${un} UN`;
+      } else if (cx > 0) {
+        quantidadeTexto = `${cx} CX`;
+      } else {
+        quantidadeTexto = `${un} UN`;
+      }
+    } else {
+      quantidadeTexto = `${quantidadeTotalUnidades} UN`;
+    }
+
+    const agora = new Date().toISOString();
+
+    // 1. Verificar se já existe solicitação PENDENTE do MESMO promotor para o MESMO produto e validade
+    const qPendente = query(
+      collection(db, 'solicitacoesVencimentoPromotor'),
+      where('filialId', '==', filialId),
+      where('promotorId', '==', promotorId),
+      where('codigoInterno', '==', codigoInterno),
+      where('status', '==', 'PENDENTE_ANALISE'),
+      limit(20)
+    );
+
+    const snap = await getDocs(qPendente);
+    let docExistenteId: string | null = null;
+    let docExistenteData: any = null;
+
+    snap.forEach((d) => {
+      const dData = d.data();
+      const dValidade = normalizeDateToIso(dData.dataValidade || dData.validade || dData.dataVencimento);
+      const dDigito = String(dData.digito || '0').trim();
+      if (dValidade === dataIso && dDigito === digito) {
+        docExistenteId = d.id;
+        docExistenteData = dData;
+      }
+    });
+
+    if (docExistenteId && docExistenteData) {
+      // ATUALIZAR SOLICITAÇÃO PENDENTE EXISTENTE (SEM DUPLICAR DOCUMENTO)
+      const solicRef = doc(db, 'solicitacoesVencimentoPromotor', docExistenteId);
+      const qtdAnterior = docExistenteData.quantidadeTotalUnidades ?? docExistenteData.quantidadeInformada ?? docExistenteData.quantidade;
+
+      await setDoc(
+        solicRef,
+        {
+          quantidadeTotalUnidades: quantidadeTotalUnidades,
+          quantidadeInformada: quantidadeTotalUnidades,
+          quantidadeCaixas: cx,
+          quantidadeUnidades: un,
+          quantidadeEmb1: cx,
+          quantidadeEmb9: un,
+          quantidadeTexto: quantidadeTexto,
+          fatorEmbalagem: fatorEmbalagem,
+          fator_embalagem: fatorEmbalagem,
+          dataValidade: dataIso,
+          dataVencimento: dataIso,
+          precoNormal: params.precoNormal ?? docExistenteData.precoNormal ?? produtoSmg?.vendas_preco ?? null,
+          observacao: params.observacao || docExistenteData.observacao || '',
+          atualizadoEm: agora,
+        },
+        { merge: true }
+      );
+
+      // Registrar auditoria
+      try {
+        await promotorService.registrarAuditoria({
+          promotorId: promotorId,
+          promotorNome: params.promotorNome,
+          agenciaNome: params.agencia || '',
+          filialId: filialId,
+          setorId: params.setor || docExistenteData.setor || 'FRIOS',
+          tipoAcao: 'ATUALIZOU_CONTAGEM_PROMOTOR',
+          codigoInterno: codigoInterno,
+          digito: digito,
+          descricao: params.descricao || docExistenteData.descricao,
+          valorAnterior: String(qtdAnterior),
+          valorNovo: JSON.stringify({
+            solicitacaoId: docExistenteId,
+            quantidadeTotalUnidades: quantidadeTotalUnidades,
+            quantidadeTexto: quantidadeTexto,
+            precoNormal: params.precoNormal,
+            dataValidade: dataIso,
+            atualizadoEm: agora,
+          }),
+          dataHora: agora,
+          statusSincronizacao: 'SINCRONIZADO',
+        });
+      } catch (auditErr) {
+        console.warn('[AnalisePromotorService] Aviso ao registrar auditoria de atualização:', auditErr);
+      }
+
+      return {
+        solicitacaoId: docExistenteId,
+        acao: 'ATUALIZADA',
+        quantidadeTotalUnidades,
+        message: `Solicitação pendente existente atualizada com sucesso (${quantidadeTexto}).`,
+      };
+    }
+
+    // CRIAR NOVA SOLICITAÇÃO CANÔNICA
+    const novoId = `solic-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const solicRef = doc(db, 'solicitacoesVencimentoPromotor', novoId);
+
+    const docNovo = {
+      id: novoId,
+      solicitacaoId: novoId,
+      filialId: filialId,
+      promotorId: promotorId,
+      promotorNome: params.promotorNome,
+      agencia: params.agencia || '',
+      agenciaNome: params.agencia || '',
+      codigoInterno: codigoInterno,
+      digito: digito,
+      codigoCompleto: params.codigoCompleto || (digito ? `${codigoInterno}-${digito}` : codigoInterno),
+      descricao: params.descricao || produtoSmg?.descricao || 'Produto sem descrição',
+      embalagem: produtoSmg?.embalagem || (fatorEmbalagem > 1 ? `CXA 1 X ${fatorEmbalagem}` : 'UN'),
+      fatorEmbalagem: fatorEmbalagem,
+      fator_embalagem: fatorEmbalagem,
+      unidadeMedida: produtoSmg?.unidade_medida || (fatorEmbalagem > 1 ? 'CXA' : 'UN'),
+      unidade_medida: produtoSmg?.unidade_medida || (fatorEmbalagem > 1 ? 'CXA' : 'UN'),
+      ean: params.ean || (produtoSmg?.eans && produtoSmg.eans[0]) || '',
+      eans: produtoSmg?.eans || (params.ean ? [params.ean] : []),
+      dataValidade: dataIso,
+      dataVencimento: dataIso,
+      validade: dataIso,
+      quantidadeTotalUnidades: quantidadeTotalUnidades,
+      quantidadeInformada: quantidadeTotalUnidades,
+      quantidadeInformadaOriginal: quantidadeTotalUnidades,
+      quantidadeCaixas: cx,
+      quantidadeUnidades: un,
+      quantidadeEmb1: cx,
+      quantidadeEmb9: un,
+      quantidadeTexto: quantidadeTexto,
+      tipoEmbalagem: fatorEmbalagem > 1 ? 'CAIXA_UNIDADE' : 'UNIDADE',
+      precoNormal: params.precoNormal ?? produtoSmg?.vendas_preco ?? null,
+      setor: params.setor || (produtoSmg as any)?.setor || 'LOJA',
+      setorTipo: params.descricao?.startsWith('RF.') ? 'FRIOS' : 'LOJA',
+      observacao: params.observacao || '',
+      enviadoEm: agora,
+      criadoEm: agora,
+      atualizadoEm: agora,
+      status: 'PENDENTE_ANALISE',
+      origem: 'APP_PROMOTOR',
+    };
+
+    await setDoc(solicRef, docNovo);
+
+    return {
+      solicitacaoId: novoId,
+      acao: 'CRIADA',
+      quantidadeTotalUnidades,
+      message: `Solicitação enviada com sucesso (${quantidadeTexto}).`,
+    };
   }
 
   /**
@@ -458,19 +862,56 @@ export class AnalisePromotorService {
       const filialId = solicData.filialId || '172';
       const codigoInterno = String(solicData.codigoInterno || '').trim();
       const digito = String(solicData.digito || '0').trim();
-      const dataVencimento = normalizeDateToIso(solicData.dataVencimento || solicData.data_validade);
+      const rawDate = solicData.dataValidade || solicData.validade || solicData.dataVencimento || solicData.data_validade || solicData.expirationDate;
+      const dataVencimento = normalizeDateToIso(rawDate);
 
-      if (!codigoInterno || !dataVencimento) {
-        throw new Error('Dados da solicitação incompletos (código ou validade ausente).');
+      if (!codigoInterno) {
+        throw new Error('DADOS DA SOLICITAÇÃO INCONSISTENTES: Código do produto ausente.');
+      }
+      if (!dataVencimento) {
+        throw new Error('DADOS DA SOLICITAÇÃO INCONSISTENTES: Data de validade ausente ou inválida. Corrija antes de aprovar.');
+      }
+
+      // Buscar dados cadastrais do produto na SMGOI013 para enriquecer o lote oficial e obter fator de embalagem
+      const produtoSmg = findProdutoByCodeOrEan(codigoInterno || solicData.codigoCompleto || solicData.ean);
+
+      // Determinar fator real da SMGOI013
+      let fatorEmbalagem = 1;
+      if (solicData.fatorEmbalagem !== undefined && Number(solicData.fatorEmbalagem) > 0) {
+        fatorEmbalagem = Number(solicData.fatorEmbalagem);
+      } else if (solicData.fator_embalagem !== undefined && Number(solicData.fator_embalagem) > 0) {
+        fatorEmbalagem = Number(solicData.fator_embalagem);
+      } else if (produtoSmg?.fator_embalagem && Number(produtoSmg.fator_embalagem) > 0) {
+        fatorEmbalagem = Number(produtoSmg.fator_embalagem);
+      } else {
+        const rawEmb = solicData.embalagem || produtoSmg?.embalagem;
+        if (rawEmb) {
+          const parsed = parseEmbalagem(rawEmb);
+          if (parsed && parsed.fator && parsed.fator > 0) {
+            fatorEmbalagem = parsed.fator;
+          }
+        }
+      }
+
+      // Quantidade padrão canônica em unidades totais
+      let qtdePadrao = 0;
+      if (solicData.quantidadeTotalUnidades !== undefined && !isNaN(Number(solicData.quantidadeTotalUnidades))) {
+        qtdePadrao = Number(solicData.quantidadeTotalUnidades);
+      } else if (solicData.quantidadeEmb1 !== undefined || solicData.quantidadeCaixas !== undefined) {
+        const cx = Number(solicData.quantidadeCaixas ?? solicData.quantidadeEmb1 ?? 0);
+        const un = Number(solicData.quantidadeUnidades ?? solicData.quantidadeUnidadesRestantes ?? solicData.quantidadeEmb9 ?? 0);
+        qtdePadrao = (cx * fatorEmbalagem) + un;
+      } else {
+        qtdePadrao = Number(solicData.quantidadeInformada ?? solicData.quantidade ?? 0);
       }
 
       // Quantidade final definida para aprovação (se editada ou a informada original)
       const qtdeFinal = Number(
-        quantidadeAprovada !== undefined ? quantidadeAprovada : (solicData.quantidadeInformada ?? solicData.quantidade ?? 0)
+        quantidadeAprovada !== undefined ? quantidadeAprovada : qtdePadrao
       );
 
-      if (isNaN(qtdeFinal) || qtdeFinal < 0) {
-        throw new Error('A quantidade aprovada deve ser um número válido e maior ou igual a zero.');
+      if (isNaN(qtdeFinal) || qtdeFinal <= 0) {
+        throw new Error('DADOS DA SOLICITAÇÃO INCONSISTENTES: A quantidade aprovada deve ser um número válido e maior que zero.');
       }
 
       // 3. Verificar se já existe vencimento com mesma filialId + codigoInterno + digito + dataVencimento
@@ -495,6 +936,7 @@ export class AnalisePromotorService {
         await productRepository.updateVencimento(loteExistente.id, {
           quantidade_total_unidades: qtdeFinal,
           quantidade: qtdeFinal,
+          fator_embalagem: fatorEmbalagem,
           atualizado_em: agora,
         });
 
@@ -505,18 +947,15 @@ export class AnalisePromotorService {
         // ====================================================================
         resultado = 'NOVO_VENCIMENTO';
 
-        // Buscar dados cadastrais do produto na SMGOI013 para enriquecer o lote oficial
-        const produtoSmg = findProdutoByCodeOrEan(codigoInterno);
-
         const novoLote = {
           filialId: filialId,
           codigo_interno: codigoInterno,
           digito: digito,
           codigo_exibicao: digito ? `${codigoInterno}-${digito}` : codigoInterno,
           descricao_produto: solicData.descricao || produtoSmg?.descricao || 'PRODUTO PROMOTOR',
-          embalagem: solicData.embalagem || produtoSmg?.embalagem || 'UN',
-          fator_embalagem: Number(solicData.fator_embalagem || produtoSmg?.fator_embalagem || 1),
-          unidade_medida: solicData.unidade_medida || produtoSmg?.unidade_medida || 'UN',
+          embalagem: solicData.embalagem || produtoSmg?.embalagem || (fatorEmbalagem > 1 ? `CXA 1 X ${fatorEmbalagem}` : 'UN'),
+          fator_embalagem: fatorEmbalagem,
+          unidade_medida: solicData.unidade_medida || solicData.unidadeMedida || produtoSmg?.unidade_medida || (fatorEmbalagem > 1 ? 'CXA' : 'UN'),
           data_validade: dataVencimento,
           quantidade_total_unidades: qtdeFinal,
           quantidade: qtdeFinal,
@@ -525,7 +964,7 @@ export class AnalisePromotorService {
           criado_por_tipo: 'ADMIN' as const,
           criado_por_nome: `Aprovado do Promotor: ${solicData.promotorNome || 'Promotor'} (${solicData.agencia || ''})`,
           status_operacional: 'NORMAL' as const,
-          preco_normal: produtoSmg?.vendas_preco || null,
+          preco_normal: solicData.precoNormal ?? produtoSmg?.vendas_preco ?? null,
           preco_trabalhado: null,
           eans: solicData.ean ? [solicData.ean] : (produtoSmg?.eans || []),
         };
@@ -547,6 +986,10 @@ export class AnalisePromotorService {
           referenciaVencimento: vencimentoFinalId,
           quantidadeAnterior: qtdeAnterior,
           quantidadeAprovada: qtdeFinal,
+          quantidadeTotalUnidades: qtdeFinal,
+          dataValidade: dataVencimento,
+          dataVencimento: dataVencimento,
+          fatorEmbalagem: fatorEmbalagem,
           atualizadoEm: agora,
         },
         { merge: true }

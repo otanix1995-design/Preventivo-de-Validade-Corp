@@ -334,7 +334,8 @@ export type TipoAcaoAuditoria =
   | 'REMOVEU_ENVIO_COMPRADOR'
   | 'SINCRONIZOU_ALTERACAO'
   | 'APROVOU_SOLICITACAO_PROMOTOR'
-  | 'RECUSOU_SOLICITACAO_PROMOTOR';
+  | 'RECUSOU_SOLICITACAO_PROMOTOR'
+  | 'ATUALIZOU_CONTAGEM_PROMOTOR';
 
 export type StatusSincronizacaoAuditoria = 'SINCRONIZADO' | 'PENDENTE' | 'ERRO';
 
@@ -429,14 +430,37 @@ export interface SolicitacaoVencimentoPromotor {
   descricao: string;
   embalagem?: string;
   fator_embalagem?: number;
+  fatorEmbalagem?: number;
   unidade_medida?: string;
+  unidadeMedida?: string;
   ean?: string;
   eans?: string[];
-  dataVencimento: string; // YYYY-MM-DD
-  quantidadeInformada: number;
-  quantidadeCaixas?: number;
-  quantidadeUnidades?: number;
-  quantidadeTexto?: string;
+
+  // Data de validade - canônica (YYYY-MM-DD) e validação
+  dataValidade: string; // YYYY-MM-DD canônico (ex: '2026-10-23')
+  dataVencimento: string; // YYYY-MM-DD (mantido para compatibilidade total)
+  validade?: string; // Campo bruto original recebido
+  isDataValida: boolean; // Flag de consistência da data
+
+  // Quantidade - canônica em unidades totais e derivações
+  quantidadeTotalUnidades: number; // Quantidade oficial em UNIDADES para estoque/vencimento
+  quantidadeInformada: number; // Mantido para compatibilidade (= quantidadeTotalUnidades)
+  quantidadeInformadaOriginal?: number; // Valor bruto original (ex: 5)
+  quantidadeCaixas?: number; // CX
+  quantidadeUnidades?: number; // UN avulsas
+  quantidadeEmb1?: number; // compatibilidade com doc do promotor
+  quantidadeEmb9?: number; // compatibilidade com doc do promotor
+  quantidadeTexto?: string; // ex: "4 CX + 1 UN"
+  tipoEmbalagem?: string; // "CAIXA_UNIDADE", "PESAVEL", "UNIDADE"
+
+  // Preço e contexto comercial
+  precoNormal?: number | null; // Preço normal (DE:) informado ou do cadastro
+
+  // Status de consistência e duplicidade
+  inconsistencias?: string[]; // Motivos de inconsistência para bloqueio de aprovação
+  isDuplicada?: boolean; // Se identificada solicitação duplicada pendente
+  duplicadaDeId?: string; // ID da solicitação correspondente
+
   setor?: string;
   setorTipo?: 'FRIOS' | 'LOJA' | string;
   promotorId: string;

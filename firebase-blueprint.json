@@ -116,6 +116,36 @@
         "dataHora": { "type": "string" }
       },
       "required": ["auditoriaId", "filialId", "tipoAcao", "dataHora"]
+    },
+    "SolicitacaoVencimentoPromotor": {
+      "title": "SolicitacaoVencimentoPromotor",
+      "description": "Solicitação de cadastro ou contagem de vencimento enviada pelo promotor para aprovação gerencial",
+      "type": "object",
+      "properties": {
+        "solicitacaoId": { "type": "string" },
+        "filialId": { "type": "string" },
+        "codigoInterno": { "type": "string" },
+        "digito": { "type": "string" },
+        "codigoCompleto": { "type": "string" },
+        "descricao": { "type": "string" },
+        "embalagem": { "type": "string" },
+        "fatorEmbalagem": { "type": "number" },
+        "unidadeMedida": { "type": "string" },
+        "dataValidade": { "type": "string", "description": "Formato canônico YYYY-MM-DD" },
+        "quantidadeTotalUnidades": { "type": "number", "description": "Total canônico em unidades" },
+        "quantidadeInformadaOriginal": { "type": "number" },
+        "quantidadeCaixas": { "type": "number" },
+        "quantidadeUnidades": { "type": "number" },
+        "quantidadeTexto": { "type": "string" },
+        "precoNormal": { "type": "number" },
+        "promotorId": { "type": "string" },
+        "promotorNome": { "type": "string" },
+        "agencia": { "type": "string" },
+        "setor": { "type": "string" },
+        "enviadoEm": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["PENDENTE_ANALISE", "APROVADO", "RECUSADO"] }
+      },
+      "required": ["filialId", "codigoInterno", "digito", "dataValidade", "quantidadeTotalUnidades", "promotorId", "status"]
     }
   },
   "firestore": {
