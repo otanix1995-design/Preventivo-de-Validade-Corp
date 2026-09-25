@@ -141,11 +141,13 @@ export const Saeou060View: React.FC<Saeou060ViewProps> = ({
       };
 
       const resultado = await processarSAEOU060(file, progressCb);
-      await productRepository.addSaeou060Registros(resultado.registros);
+      const snapshotRes = await productRepository.aplicarNovoSnapshotSaeou060(resultado.registros, file.name);
       await productRepository.addHistorico(resultado.resumo);
 
       setImportSummaryModal(resultado.resumo);
-      showToast(`Importação do SAEOU060 concluída: ${resultado.registros.length} registros processados.`);
+      showToast(
+        `Importação do SAEOU060 concluída: ${snapshotRes.snapshotReconciliado.length} registros no snapshot ativo (${snapshotRes.estatisticas.totalPreservadosFora} preservados do histórico).`
+      );
     } catch (err: any) {
       console.error('Erro ao processar SAEOU060:', err);
       showToast(`Erro na importação: ${err.message || 'Falha ao ler arquivo.'}`, 'error');

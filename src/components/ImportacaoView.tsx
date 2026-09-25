@@ -164,7 +164,7 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         setProgressPercent(percent);
         setProgressStatus(status);
       });
-      await productRepository.addSaeou060Registros(resultado.registros);
+      await productRepository.aplicarNovoSnapshotSaeou060(resultado.registros, file.name);
       await productRepository.addHistorico(resultado.resumo);
       setUltimoResumo(resultado.resumo);
       if (onImportComplete) onImportComplete();

@@ -760,6 +760,7 @@ class CloudSyncService {
       const totalChunks = Math.max(1, Math.ceil(registros.length / CHUNK_SIZE));
       const newVersion = Date.now();
 
+      // 1. Gravar os novos chunks
       for (let i = 0; i < totalChunks; i++) {
         const chunkItems = registros.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         const chunkDocRef = doc(db, 'saeou060_chunks', `chunk_${String(i).padStart(3, '0')}`);
@@ -771,8 +772,34 @@ class CloudSyncService {
         }));
       }
 
+      // 2. Regra 14: Remover com segurança chunks excedentes/obsoletos no Firestore
+      try {
+        const existingChunksSnap = await getDocs(collection(db, 'saeou060_chunks'));
+        const deletePromises: Promise<void>[] = [];
+
+        existingChunksSnap.forEach((docSnap) => {
+          const docId = docSnap.id;
+          const match = docId.match(/^chunk_(\d+)$/);
+          if (match) {
+            const idx = parseInt(match[1], 10);
+            if (idx >= totalChunks) {
+              deletePromises.push(deleteDoc(docSnap.ref));
+            }
+          }
+        });
+
+        if (deletePromises.length > 0) {
+          await Promise.all(deletePromises);
+          console.log(`[CloudSync] ${deletePromises.length} chunks obsoletos do SAEOU060 removidos com sucesso.`);
+        }
+      } catch (errClean) {
+        console.warn('[CloudSync] Aviso ao limpar chunks antigos excedentes:', errClean);
+      }
+
+      // 3. Atualizar metadados globais
       await setDoc(doc(db, 'metadados', 'geral'), cleanForFirestore({
         total_saeou060: registros.length,
+        total_saeou_chunks: totalChunks,
         saeou060_version: newVersion,
         updatedAt: new Date().toISOString(),
       }), { merge: true });

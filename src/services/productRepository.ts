@@ -18,6 +18,14 @@ import {
 } from '../types';
 import { cleanEanCode, extractGramagem, isProdutoPesavel, normalizeCodigoSMGO } from './codeParser';
 import {
+  buildSaeouDeterministicKey,
+  buildSaeouId,
+  isRegistroSaeouTrabalhado,
+  deduplicarRegistrosSaeouPlanilha,
+  reconciliarSaeou060Snapshot,
+  ResultadoReconciliacaoSaeou060,
+} from './saeou060Parser';
+import {
   findDuplicateVencimento,
   formatDateBr,
   normalizeDateToIso,
@@ -168,9 +176,24 @@ class ProductRepository {
             total_saeou060: saeou060.length,
           };
           this.rebuildIndices();
+
+          // Auto-sanitização de base legada se houver duplicatas de importações anteriores
+          const chavesSet = new Set<string>();
+          let hasDuplicates = false;
+          for (const s of saeou060) {
+            const k = buildSaeouDeterministicKey(s.codigo_interno, s.digito, s.data_vencimento);
+            if (chavesSet.has(k)) {
+              hasDuplicates = true;
+              break;
+            }
+            chavesSet.add(k);
+          }
+          if (hasDuplicates) {
+            this.sanearBaseLegadaSaeou060().catch((e) => console.warn('Aviso no saneamento inicial:', e));
+          }
         } else {
           // Check if localStorage has existing demo/legacy data to migrate
-          const legacyMetaRaw = localStorage.getItem('cv_metadados_v1');
+          const legacyMetaRaw = typeof localStorage !== 'undefined' ? localStorage.getItem('cv_metadados_v1') : null;
           if (!legacyMetaRaw) {
             // First run: load initial demo data so application is ready for immediate test
             await this.loadDemoData();
@@ -219,8 +242,10 @@ class ProductRepository {
             this.notify();
           },
           onRemoteSaeou060Received: async (remoteSaeou) => {
-            this._saeou060 = remoteSaeou;
-            await dbPutAll(STORES.SAEOU060, remoteSaeou, true);
+            const cleanSaeou = deduplicarRegistrosSaeouPlanilha(remoteSaeou);
+            this._saeou060 = cleanSaeou;
+            this.rebuildIndices();
+            await dbPutAll(STORES.SAEOU060, cleanSaeou, true);
             this.notify();
           },
           onRemoteVencimentosReceived: (remoteVencimentos) => {
@@ -1432,8 +1457,205 @@ class ProductRepository {
     return this._saeou060;
   }
 
+  /**
+   * Aplica um novo snapshot operacional da planilha SAEOU060 (Regras 1 a 15).
+   * - Substitui o comportamento acumulador antigo pelo reconciliador de snapshot.
+   * - Registros que sumiram e NÃO foram trabalhados são removidos da base ativa.
+   * - Registros que sumiram mas JÁ FORAM trabalhados são preservados.
+   * - Registros que reaparecem são reconciliados sem duplicar.
+   * - Preserva integralmente os vínculos com os vencimentos.
+   * - Atualiza IndexedDB, memória, metadados e sincroniza chunks na nuvem.
+   */
+  public async aplicarNovoSnapshotSaeou060(
+    novosRegistrosDaPlanilha: RegistroSaeou060[],
+    arquivoOrigem?: string
+  ): Promise<ResultadoReconciliacaoSaeou060> {
+    // 1. Processar e reconciliar os dados com a base existente
+    const resultado = reconciliarSaeou060Snapshot(
+      this._saeou060,
+      novosRegistrosDaPlanilha
+    );
+    const snapshotReconciliado = resultado.snapshotReconciliado;
+
+    // 2. Regra 11: Preservar e migrar vínculos entre SAEOU060 e vencimentos
+    const oldIdToNewIdMap = new Map<string, string>();
+    this._saeou060.forEach((item) => {
+      const newId = buildSaeouId(item.codigo_interno, item.digito, item.data_vencimento);
+      oldIdToNewIdMap.set(item.id, newId);
+    });
+
+    const keyToNewSaeouId = new Map<string, string>();
+    snapshotReconciliado.forEach((s) => {
+      if (s.data_vencimento) {
+        keyToNewSaeouId.set(`${s.codigo_interno}:${s.data_vencimento}`, s.id);
+      }
+    });
+
+    let vencimentosAlterados = false;
+    for (const lote of this._vencimentos) {
+      if (lote.origem === 'SAEOU060' || lote.saeou060_id) {
+        const mappedNewId = lote.saeou060_id ? oldIdToNewIdMap.get(lote.saeou060_id) : undefined;
+        const byKeyNewId = lote.codigo_interno && lote.data_validade
+          ? keyToNewSaeouId.get(`${lote.codigo_interno}:${lote.data_validade}`)
+          : undefined;
+        const targetId = mappedNewId || byKeyNewId;
+
+        if (targetId && lote.saeou060_id !== targetId) {
+          lote.saeou060_id = targetId;
+          vencimentosAlterados = true;
+        }
+      }
+    }
+
+    if (vencimentosAlterados) {
+      await dbPutAll(STORES.VENCIMENTOS, this._vencimentos, true);
+    }
+
+    // Também garantir que registros de SAEOU060 que possuem correspondência no controle tenham seus IDs vinculados
+    const lotesPorChave = new Map<string, string>();
+    this._vencimentos.forEach((v) => {
+      lotesPorChave.set(`${v.codigo_interno}:${v.data_validade}`, v.id);
+    });
+
+    for (const s of snapshotReconciliado) {
+      if (s.data_vencimento) {
+        const key = `${s.codigo_interno}:${s.data_vencimento}`;
+        if (lotesPorChave.has(key)) {
+          s.vencimento_id_vinculado = lotesPorChave.get(key);
+          s.status_saeou = 'JA_NO_CONTROLE';
+        }
+      }
+    }
+
+    // 3. Substituição segura do snapshot operacional ativo
+    this._saeou060 = snapshotReconciliado;
+    this.rebuildIndices();
+
+    // 4. Persistência local (IndexedDB)
+    await dbPutAll(STORES.SAEOU060, this._saeou060, true);
+
+    const now = new Date();
+    const dataHoraStr = `${now.toLocaleDateString('pt-BR')} ${now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`;
+    const newVersion = Date.now();
+
+    const meta = {
+      ...this._metadados,
+      total_saeou060: this._saeou060.length,
+      ultima_atualizacao_saeou060: dataHoraStr,
+      saeou060_version: newVersion,
+    };
+    this._metadados = meta;
+    await dbSetMeta('metadados_gerais', meta);
+
+    // 5. Sincronização limpa com o Firestore (remove chunks antigos excedentes)
+    cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
+      console.warn('Erro ao sincronizar SAEOU060 limpo na nuvem:', e);
+    });
+
+    this.notify();
+    return resultado;
+  }
+
+  /**
+   * Saneamento cirúrgico da base legada que acumulou duplicatas de importações anteriores.
+   * Consolida por chave determinística, preserva todas as versões trabalhadas,
+   * elimina redundâncias e sincroniza com a nuvem removendo chunks obsoletos.
+   */
+  public async sanearBaseLegadaSaeou060(): Promise<{
+    totalAntes: number;
+    totalDepois: number;
+    duplicidadesRemovidas: number;
+    trabalhadosPreservados: number;
+  }> {
+    const totalAntes = this._saeou060.length;
+    if (totalAntes === 0) {
+      return { totalAntes: 0, totalDepois: 0, duplicidadesRemovidas: 0, trabalhadosPreservados: 0 };
+    }
+
+    // Mapear por chave determinística
+    const keyMap = new Map<string, RegistroSaeou060[]>();
+    for (const r of this._saeou060) {
+      const key = buildSaeouDeterministicKey(r.codigo_interno, r.digito, r.data_vencimento);
+      if (!keyMap.has(key)) {
+        keyMap.set(key, []);
+      }
+      keyMap.get(key)!.push(r);
+    }
+
+    let trabalhadosPreservados = 0;
+    const registrosSaneados: RegistroSaeou060[] = [];
+
+    // Mapeamento de lotes existentes para garantia de vínculo
+    const lotesPorChave = new Map<string, string>();
+    this._vencimentos.forEach((v) => {
+      lotesPorChave.set(`${v.codigo_interno}:${v.data_validade}`, v.id);
+    });
+
+    for (const [key, lista] of keyMap.entries()) {
+      const trabalhados = lista.filter(isRegistroSaeouTrabalhado);
+      const idDeterministico = `saeou-${key}`;
+
+      let registroEscolhido: RegistroSaeou060;
+
+      if (trabalhados.length > 0) {
+        trabalhadosPreservados++;
+        // Priorizar registro com vínculo ativo ou mais recente
+        registroEscolhido = trabalhados.find((t) => t.vencimento_id_vinculado) || trabalhados[0];
+      } else {
+        // Sem trabalho: pegar a ocorrência mais recente (última da lista)
+        registroEscolhido = lista[lista.length - 1];
+      }
+
+      // Garantir que a quantidade reflete a ocorrência do snapshot e NÃO a soma
+      const itemFinal: RegistroSaeou060 = {
+        ...registroEscolhido,
+        id: idDeterministico,
+      };
+
+      // Reconciliar vínculo com vencimentos existentes se houver
+      if (itemFinal.data_vencimento) {
+        const vctoKey = `${itemFinal.codigo_interno}:${itemFinal.data_vencimento}`;
+        if (lotesPorChave.has(vctoKey)) {
+          itemFinal.vencimento_id_vinculado = lotesPorChave.get(vctoKey);
+          itemFinal.status_saeou = 'JA_NO_CONTROLE';
+        }
+      }
+
+      registrosSaneados.push(itemFinal);
+    }
+
+    const totalDepois = registrosSaneados.length;
+    const duplicidadesRemovidas = totalAntes - totalDepois;
+
+    this._saeou060 = registrosSaneados;
+    this.rebuildIndices();
+
+    await dbPutAll(STORES.SAEOU060, this._saeou060, true);
+
+    const newVersion = Date.now();
+    const meta = {
+      ...this._metadados,
+      total_saeou060: this._saeou060.length,
+      saeou060_version: newVersion,
+    };
+    this._metadados = meta;
+    await dbSetMeta('metadados_gerais', meta);
+
+    // Sincronizar na nuvem e remover chunks obsoletos
+    await cloudSyncService.pushSaeou060ToCloud(this._saeou060);
+
+    this.notify();
+    return {
+      totalAntes,
+      totalDepois,
+      duplicidadesRemovidas,
+      trabalhadosPreservados,
+    };
+  }
+
   public async saveSaeou060Registros(registros: RegistroSaeou060[]): Promise<void> {
-    this._saeou060 = registros;
+    const deduplicados = deduplicarRegistrosSaeouPlanilha(registros);
+    this._saeou060 = deduplicados;
     this.rebuildIndices();
     await dbPutAll(STORES.SAEOU060, this._saeou060, true);
 
@@ -1454,30 +1676,8 @@ class ProductRepository {
   }
 
   public async addSaeou060Registros(novos: RegistroSaeou060[]): Promise<void> {
-    const map = new Map<string, RegistroSaeou060>();
-    // Existing records
-    this._saeou060.forEach((r) => map.set(r.id, r));
-    // Merge or append incoming
-    novos.forEach((r) => map.set(r.id, r));
-
-    this._saeou060 = Array.from(map.values());
-    this.rebuildIndices();
-    await dbPutAll(STORES.SAEOU060, this._saeou060, true);
-
-    const meta = {
-      ...this._metadados,
-      total_saeou060: this._saeou060.length,
-      ultima_atualizacao_saeou060: new Date().toLocaleDateString('pt-BR') + ' ' + new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-      saeou060_version: Date.now(),
-    };
-    this._metadados = meta;
-    await dbSetMeta('metadados_gerais', meta);
-
-    cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
-      console.warn('Erro ao sincronizar SAEOU060 na nuvem:', e);
-    });
-
-    this.notify();
+    // Redireciona sempre para o reconciliador de snapshot para evitar acúmulo de duplicidades
+    await this.aplicarNovoSnapshotSaeou060(novos);
   }
 
   public async desconsiderarSaeou060(saeouId: string, motivo?: string): Promise<boolean> {

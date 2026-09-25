@@ -18,6 +18,290 @@ import { addDivergencia } from './storage';
 
 export type ProgressCallback = (percent: number, status: string) => void;
 
+/**
+ * Builds a deterministic, unique business key for a SAEOU060 entry:
+ * codigoInterno + digito + dataVencimentoIso
+ * Leading zeros on internal code are stripped, and digit/date are normalized.
+ */
+export function buildSaeouDeterministicKey(
+  codigoInterno: string,
+  digito?: string,
+  dataVencimentoIso?: string
+): string {
+  const c = String(codigoInterno || '').replace(/^0+/, '').trim();
+  const d = String(digito || '').trim();
+  const dt = String(dataVencimentoIso || '').trim() || 'sem_data';
+  return d ? `${c}_${d}_${dt}` : `${c}_${dt}`;
+}
+
+/**
+ * Generates the canonical deterministic ID for SAEOU060 records.
+ */
+export function buildSaeouId(
+  codigoInterno: string,
+  digito?: string,
+  dataVencimentoIso?: string
+): string {
+  return `saeou-${buildSaeouDeterministicKey(codigoInterno, digito, dataVencimentoIso)}`;
+}
+
+/**
+ * Verifies if a SAEOU060 record has legitimate work/interaction performed by user:
+ * - status_saeou === 'JA_NO_CONTROLE'
+ * - vencimento_id_vinculado is present
+ * - status_saeou === 'DESCONSIDERADO' or 'CONCLUIDO'
+ * - trabalhado_em is present
+ * - desconsiderado_em or motivo_desconsiderado is present
+ * - adicionado_ao_controle_em is present
+ * - preco_trabalhado / precoTrabalhado was worked (> 0)
+ * - manual user observation exists
+ */
+export function isRegistroSaeouTrabalhado(reg: Partial<RegistroSaeou060>): boolean {
+  if (!reg) return false;
+  if (
+    reg.status_saeou === 'JA_NO_CONTROLE' ||
+    reg.status_saeou === 'DESCONSIDERADO' ||
+    reg.status_saeou === 'CONCLUIDO'
+  ) {
+    return true;
+  }
+  if (reg.vencimento_id_vinculado && String(reg.vencimento_id_vinculado).trim() !== '') {
+    return true;
+  }
+  if (reg.trabalhado_em && String(reg.trabalhado_em).trim() !== '') {
+    return true;
+  }
+  if (reg.desconsiderado_em && String(reg.desconsiderado_em).trim() !== '') {
+    return true;
+  }
+  if (reg.motivo_desconsiderado && String(reg.motivo_desconsiderado).trim() !== '') {
+    return true;
+  }
+  if (reg.adicionado_ao_controle_em && String(reg.adicionado_ao_controle_em).trim() !== '') {
+    return true;
+  }
+  if (reg.observacao && String(reg.observacao).trim() !== '') {
+    const obs = String(reg.observacao).trim();
+    if (obs !== 'Importado via SAEOU060' && !obs.startsWith('Importado SAEOU060 - Promotor:')) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Internal deduplication of the spreadsheet before persistence (Regra 5 & Regra 8).
+ * Consolidates identical lines within the same spreadsheet without summing blindly.
+ * Never consolidates different dates.
+ */
+export function deduplicarRegistrosSaeouPlanilha(
+  registros: RegistroSaeou060[]
+): RegistroSaeou060[] {
+  const map = new Map<string, RegistroSaeou060[]>();
+
+  for (const reg of registros) {
+    const key = buildSaeouDeterministicKey(
+      reg.codigo_interno,
+      reg.digito,
+      reg.data_vencimento
+    );
+    if (!map.has(key)) {
+      map.set(key, []);
+    }
+    map.get(key)!.push(reg);
+  }
+
+  const resultado: RegistroSaeou060[] = [];
+
+  for (const [key, items] of map.entries()) {
+    if (items.length === 1) {
+      resultado.push({
+        ...items[0],
+        id: `saeou-${key}`,
+      });
+      continue;
+    }
+
+    // Se houver múltiplas linhas com a mesma chave dentro da MESMA planilha:
+    // Identificar a linha mais completa / mais recente
+    const primeiro = items[0];
+    const todasMesmaQtd = items.every((i) => i.quantidade === primeiro.quantidade);
+
+    if (todasMesmaQtd) {
+      // Duplicata idêntica gerada na emissão do relatório: manter uma única
+      resultado.push({
+        ...primeiro,
+        id: `saeou-${key}`,
+      });
+    } else {
+      // Quantidades diferentes ou frações dentro da mesma planilha:
+      // Conservar o registro com a quantidade mais representativa ou dados mais completos
+      const melhorRegistro = items.reduce((prev, curr) => {
+        return (curr.quantidade || 0) > (prev.quantidade || 0) ? curr : prev;
+      }, items[0]);
+
+      resultado.push({
+        ...melhorRegistro,
+        id: `saeou-${key}`,
+      });
+    }
+  }
+
+  return resultado;
+}
+
+export interface ResultadoReconciliacaoSaeou060 {
+  snapshotReconciliado: RegistroSaeou060[];
+  estatisticas: {
+    totalNovos: number;
+    totalAtualizados: number;
+    totalPreservadosFora: number;
+    totalRemovidosObsoletos: number;
+    totalFinal: number;
+  };
+}
+
+/**
+ * Reconciles the existing SAEOU060 operational base with a new spreadsheet snapshot:
+ * - Regra 1: A nova planilha é a fotografia operacional mais recente.
+ * - Regra 2: Itens antigos não trabalhados que desapareceram são removidos do snapshot ativo.
+ * - Regra 3: Itens antigos que foram trabalhados/solicitados permanecem PRESERVADOS.
+ * - Regra 4: Itens preservados que reaparecem são reconciliados, NUNCA duplicados.
+ * - Regra 10: Versão trabalhada tem precedência absoluta para dados do usuário.
+ * - Regra 12: NÃO soma quantidades entre snapshots diferentes.
+ */
+export function reconciliarSaeou060Snapshot(
+  registrosAtuais: RegistroSaeou060[],
+  novosRegistrosPlanilha: RegistroSaeou060[]
+): ResultadoReconciliacaoSaeou060 {
+  // 1. Deduplicar registros da nova planilha internamente
+  const novosDeduplicados = deduplicarRegistrosSaeouPlanilha(novosRegistrosPlanilha);
+
+  // 2. Mapear os registros atuais existentes por chave determinística
+  const mapExistentesPorChave = new Map<string, RegistroSaeou060[]>();
+  for (const reg of registrosAtuais) {
+    const key = buildSaeouDeterministicKey(
+      reg.codigo_interno,
+      reg.digito,
+      reg.data_vencimento
+    );
+    if (!mapExistentesPorChave.has(key)) {
+      mapExistentesPorChave.set(key, []);
+    }
+    mapExistentesPorChave.get(key)!.push(reg);
+  }
+
+  // Identificar a melhor versão existente para cada chave (versão trabalhada tem precedência absoluta)
+  const existentesMelhorVersao = new Map<string, RegistroSaeou060>();
+  for (const [key, lista] of mapExistentesPorChave.entries()) {
+    const trabalhados = lista.filter(isRegistroSaeouTrabalhado);
+    if (trabalhados.length > 0) {
+      // Priorizar registro com vencimento vinculado ou mais detalhado
+      const melhorTrabalhado = trabalhados.find((t) => t.vencimento_id_vinculado) || trabalhados[0];
+      existentesMelhorVersao.set(key, melhorTrabalhado);
+    } else {
+      existentesMelhorVersao.set(key, lista[0]);
+    }
+  }
+
+  const snapshotFinal: RegistroSaeou060[] = [];
+  const chavesProcessadasNaNova = new Set<string>();
+
+  let totalNovos = 0;
+  let totalAtualizados = 0;
+
+  // 3. Processar cada registro da nova planilha
+  for (const novo of novosDeduplicados) {
+    const key = buildSaeouDeterministicKey(
+      novo.codigo_interno,
+      novo.digito,
+      novo.data_vencimento
+    );
+    chavesProcessadasNaNova.add(key);
+    const idDeterministico = `saeou-${key}`;
+
+    const existente = existentesMelhorVersao.get(key);
+
+    if (existente) {
+      // Reconciliar sem duplicar
+      const foiTrabalhado = isRegistroSaeouTrabalhado(existente);
+
+      const itemReconciliado: RegistroSaeou060 = {
+        ...novo,
+        id: idDeterministico,
+        // Preservar dados operacionais do trabalho se existirem
+        status_saeou: foiTrabalhado ? existente.status_saeou : novo.status_saeou,
+        vencimento_id_vinculado: existente.vencimento_id_vinculado || novo.vencimento_id_vinculado,
+        trabalhado_em: existente.trabalhado_em || novo.trabalhado_em,
+        desconsiderado_em: existente.desconsiderado_em || novo.desconsiderado_em,
+        motivo_desconsiderado: existente.motivo_desconsiderado || novo.motivo_desconsiderado,
+        adicionado_ao_controle_em: existente.adicionado_ao_controle_em || novo.adicionado_ao_controle_em,
+        observacao: existente.observacao || novo.observacao,
+        preco_normal: existente.preco_normal ?? (existente as any).precoNormal ?? novo.preco_normal ?? (novo as any).precoNormal,
+        precoNormal: existente.precoNormal ?? existente.preco_normal ?? novo.precoNormal ?? novo.preco_normal,
+        preco_trabalhado: existente.preco_trabalhado ?? (existente as any).precoTrabalhado ?? novo.preco_trabalhado ?? (novo as any).precoTrabalhado,
+        precoTrabalhado: existente.precoTrabalhado ?? existente.preco_trabalhado ?? novo.precoTrabalhado ?? novo.preco_trabalhado,
+        data_preco: existente.data_preco || novo.data_preco,
+        data_primeira_aparicao: existente.data_primeira_aparicao || existente.data_importacao || novo.data_importacao,
+        // Atualizar da nova planilha (Regra 12: NÃO somar quantidade de importações diferentes)
+        quantidade: novo.quantidade,
+        estoque_loja: novo.estoque_loja ?? existente.estoque_loja,
+        data_movimento: novo.data_movimento || existente.data_movimento,
+        data_cadastro: novo.data_cadastro || existente.data_cadastro,
+        arquivo_origem: novo.arquivo_origem || existente.arquivo_origem,
+        data_importacao: novo.data_importacao,
+        hora_importacao: novo.hora_importacao,
+        periodo_vencimento: novo.periodo_vencimento || existente.periodo_vencimento,
+        promotor: novo.promotor || existente.promotor,
+        loja: novo.loja || existente.loja,
+      };
+
+      snapshotFinal.push(itemReconciliado);
+      totalAtualizados++;
+    } else {
+      snapshotFinal.push({
+        ...novo,
+        id: idDeterministico,
+        data_primeira_aparicao: novo.data_importacao,
+      });
+      totalNovos++;
+    }
+  }
+
+  // 4. Tratar registros que existiam antes mas não vieram na nova planilha
+  let totalPreservadosFora = 0;
+  let totalRemovidosObsoletos = 0;
+
+  for (const [key, existente] of existentesMelhorVersao.entries()) {
+    if (chavesProcessadasNaNova.has(key)) {
+      continue;
+    }
+
+    if (isRegistroSaeouTrabalhado(existente)) {
+      // Regra 3 & 6: Item trabalhado fora da nova planilha permanece PRESERVADO!
+      snapshotFinal.push({
+        ...existente,
+        id: `saeou-${key}`,
+      });
+      totalPreservadosFora++;
+    } else {
+      // Regra 2 & 5: Item não trabalhado que sumiu da planilha é descartado do snapshot ativo
+      totalRemovidosObsoletos++;
+    }
+  }
+
+  return {
+    snapshotReconciliado: snapshotFinal,
+    estatisticas: {
+      totalNovos,
+      totalAtualizados,
+      totalPreservadosFora,
+      totalRemovidosObsoletos,
+      totalFinal: snapshotFinal.length,
+    },
+  };
+}
+
 function normalizeHeader(str: string): string {
   if (!str) return '';
   return str
@@ -736,14 +1020,15 @@ export async function processarSAEOU060(
       }
     }
 
-    const regId = `saeou-${file.name.replace(/[^a-zA-Z0-9]/g, '_')}-${idx + 1}-${codigoInterno}-${parsedVcto?.iso || 'sdata'}`;
+    const regDigito = norm.digito || prod?.digito || '';
+    const regId = buildSaeouId(codigoInterno, regDigito, parsedVcto?.iso);
 
     registrosExtraidos.push({
       id: regId,
       codigo_original: String(rawCodigo).trim(),
       codigo_interno: codigoInterno,
-      digito: norm.digito || prod?.digito || '',
-      codigo_exibicao: norm.codigoExibicao || `${codigoInterno}${prod?.digito ? '-' + prod.digito : ''}`,
+      digito: regDigito,
+      codigo_exibicao: norm.codigoExibicao || `${codigoInterno}${regDigito ? '-' + regDigito : ''}`,
       chave_normalizada: norm.chaveNormalizada,
       descricao: (rawDescricao && String(rawDescricao).trim()) || prod?.descricao || '',
       embalagem: (rawEmbalagem && String(rawEmbalagem).trim()) || prod?.embalagem || '',
@@ -768,8 +1053,11 @@ export async function processarSAEOU060(
     });
   }
 
-  onProgress?.(95, 'Salvando dados e atualizando estatísticas...');
-  await new Promise((r) => setTimeout(r, 80));
+  onProgress?.(95, 'Deduplicando e validando dados da planilha...');
+  await new Promise((r) => setTimeout(r, 60));
+
+  // Deduplicação interna da própria planilha antes da reconciliação (Regra 5 e Regra 8)
+  const registrosDeduplicados = deduplicarRegistrosSaeouPlanilha(registrosExtraidos);
 
   const resumo: ResumoImportacao = {
     id: `imp-saeou-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -791,7 +1079,7 @@ export async function processarSAEOU060(
   onProgress?.(100, 'Importação SAEOU060 concluída com sucesso!');
   await new Promise((r) => setTimeout(r, 150));
 
-  return { registros: registrosExtraidos, resumo };
+  return { registros: registrosDeduplicados, resumo };
 }
 
 /**
