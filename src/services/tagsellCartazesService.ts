@@ -113,7 +113,7 @@ export function extrairCodigoRaizTagsell(codigo: string | number | undefined | n
 }
 
 /**
- * Formata a data de vencimento para o formato obrigatório do Tagsell na coluna UNIDADE DE VENDA:
+ * Formata a data de vencimento para o formato obrigatório do Tagsell na coluna DESCRIÇÃO SECUNDÁRIA 2:
  * "VENCIMENTO: DD/MM/AAAA"
  */
 export function formatarValidadeTagsell(data: string | undefined | null): string {
@@ -301,17 +301,17 @@ export function validarItemParaCartaz(
 /**
  * Constrói a linha com EXATAMENTE 19 elementos correspondentes às 19 colunas do Tagsell.
  *
- * MAPEAMENTO OFICIAL:
+ * MAPEAMENTO OFICIAL (NOVO PADRÃO):
  * 1. DINÂMICA COMERCIAL = "DE POR"
  * 2. FORMATO = "A6 - Paisagem"
  * 3. LAYOUT COORDENADA = "sas46.A9"
  * 4. CAMPANHA = "OFERTA"
  * 5. MÉDIA VAREJO = "" (célula vazia)
- * 6. CÓDIGO DO PRODUTO = Raiz do código interno
- * 7. UNIDADE DE VENDA = "VENCIMENTO: DD/MM/AAAA"
- * 8. DESCRIÇÃO SECUNDÁRIA 2 = Embalagem/gramagem ex: "(400G)" ou "(KG)"
- * 9. DESCRIÇÃO PRINCIPAL = Descrição do produto
- * 10. DESCRIÇÃO SECUNDÁRIA = "" (célula vazia)
+ * 6. CÓDIGO DO PRODUTO = Raiz do código interno (ex: "11285")
+ * 7. UNIDADE DE VENDA = "" (célula vazia)
+ * 8. DESCRIÇÃO SECUNDÁRIA 2 = "VENCIMENTO: DD/MM/AAAA"
+ * 9. DESCRIÇÃO PRINCIPAL = Descrição do produto tratada (sem duplicar a marca)
+ * 10. DESCRIÇÃO SECUNDÁRIA = Embalagem/gramagem ex: "(1200G)" ou "(KG)"
  * 11. VÁLIDO ATÉ = "" (célula vazia)
  * 12. VÁLIDO DE = "" (célula vazia)
  * 13. CÓDIGO DE BARRAS = EAN se disponível, senão "" (célula vazia)
@@ -319,7 +319,7 @@ export function validarItemParaCartaz(
  * 15. PREÇO PROMOCIONAL = "" (célula vazia)
  * 16. TRIBUTAÇÃO VAREJO = "" (célula vazia)
  * 17. PREÇO = Preço Normal (DE) em número
- * 18. QRCODE = "" (célula vazia)
+ * 18. QRCODE = Raiz do código interno (ex: "11285")
  * 19. PREÇO VAREJO = Preço de Rebaixe (POR) em número
  */
 export function gerarLinhaTagsell(item: ItemCartazValidacao): (string | number)[] {
@@ -333,10 +333,10 @@ export function gerarLinhaTagsell(item: ItemCartazValidacao): (string | number)[
     'OFERTA', // 4. CAMPANHA
     '', // 5. MÉDIA VAREJO (célula vazia)
     item.codigoRaiz, // 6. CÓDIGO DO PRODUTO (raiz)
-    item.validadeFormatada, // 7. UNIDADE DE VENDA (VENCIMENTO: DD/MM/AAAA)
-    item.gramagem, // 8. DESCRIÇÃO SECUNDÁRIA 2 ((400G), (KG), etc)
+    '', // 7. UNIDADE DE VENDA (célula vazia)
+    item.validadeFormatada, // 8. DESCRIÇÃO SECUNDÁRIA 2 (VENCIMENTO: DD/MM/AAAA)
     descricaoParaTagsell, // 9. DESCRIÇÃO PRINCIPAL (sem duplicar a marca)
-    '', // 10. DESCRIÇÃO SECUNDÁRIA (célula vazia)
+    item.gramagem, // 10. DESCRIÇÃO SECUNDÁRIA ((1200G), (KG), etc)
     '', // 11. VÁLIDO ATÉ (célula vazia)
     '', // 12. VÁLIDO DE (célula vazia)
     item.ean, // 13. CÓDIGO DE BARRAS
@@ -344,7 +344,7 @@ export function gerarLinhaTagsell(item: ItemCartazValidacao): (string | number)[
     '', // 15. PREÇO PROMOCIONAL (célula vazia)
     '', // 16. TRIBUTAÇÃO VAREJO (célula vazia)
     item.precoNormal !== null ? Number(item.precoNormal.toFixed(2)) : '', // 17. PREÇO (DE - número)
-    '', // 18. QRCODE (célula vazia)
+    item.codigoRaiz, // 18. QRCODE (código interno do produto)
     item.precoRebaixe !== null ? Number(item.precoRebaixe.toFixed(2)) : '', // 19. PREÇO VAREJO (POR - número)
   ];
 
@@ -431,10 +431,10 @@ export function exportarCartazesTagsellXLSX(
     { wch: 14 }, // 4. CAMPANHA
     { wch: 16 }, // 5. MÉDIA VAREJO
     { wch: 20 }, // 6. CÓDIGO DO PRODUTO
-    { wch: 26 }, // 7. UNIDADE DE VENDA
-    { wch: 24 }, // 8. DESCRIÇÃO SECUNDÁRIA 2
+    { wch: 16 }, // 7. UNIDADE DE VENDA
+    { wch: 26 }, // 8. DESCRIÇÃO SECUNDÁRIA 2
     { wch: 36 }, // 9. DESCRIÇÃO PRINCIPAL
-    { wch: 24 }, // 10. DESCRIÇÃO SECUNDÁRIA
+    { wch: 22 }, // 10. DESCRIÇÃO SECUNDÁRIA
     { wch: 14 }, // 11. VÁLIDO ATÉ
     { wch: 14 }, // 12. VÁLIDO DE
     { wch: 18 }, // 13. CÓDIGO DE BARRAS
@@ -442,7 +442,7 @@ export function exportarCartazesTagsellXLSX(
     { wch: 22 }, // 15. PREÇO PROMOCIONAL
     { wch: 20 }, // 16. TRIBUTAÇÃO VAREJO
     { wch: 12 }, // 17. PREÇO
-    { wch: 12 }, // 18. QRCODE
+    { wch: 14 }, // 18. QRCODE
     { wch: 15 }, // 19. PREÇO VAREJO
   ];
 
