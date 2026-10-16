@@ -2,6 +2,7 @@ import {
   Activity,
   AlertCircle,
   ArrowLeft,
+  Building2,
   CheckCircle,
   Clock,
   Filter,
@@ -31,6 +32,7 @@ import { AuditoriaPromotoresView } from './promotores/AuditoriaPromotoresView';
 import { CadastrarPromotorModal } from './promotores/CadastrarPromotorModal';
 import { DetalhePromotorModal } from './promotores/DetalhePromotorModal';
 import { GerarVinculoModal } from './promotores/GerarVinculoModal';
+import { VincularPromotorIndustriaTab } from './promotores/VincularPromotorIndustriaTab';
 
 interface PromotoresViewProps {
   onBack: () => void;
@@ -45,7 +47,7 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
     acoesHoje: 0,
   });
 
-  const [activeTab, setActiveTab] = useState<'lista' | 'auditoria'>('lista');
+  const [activeTab, setActiveTab] = useState<'lista' | 'vinculo_industrias' | 'auditoria'>('lista');
   const [searchQuery, setSearchQuery] = useState('');
   const [filtroStatus, setFiltroStatus] = useState<string>('TODOS');
   const [filtroSetor, setFiltroSetor] = useState<string>('TODOS');
@@ -285,6 +287,20 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
           >
             <Users className="w-4 h-4 stroke-[2.5]" />
             <span>Promotores Cadastrados ({promotores.length})</span>
+          </button>
+
+          <button
+            type="button"
+            id="tab-promotores-vincular-industrias"
+            onClick={() => setActiveTab('vinculo_industrias')}
+            className={`pb-3 px-3 text-xs font-black uppercase tracking-wider border-b-2 flex items-center gap-2 transition-colors cursor-pointer ${
+              activeTab === 'vinculo_industrias'
+                ? 'border-blue-700 text-blue-700'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <Building2 className="w-4 h-4 stroke-[2.5]" />
+            <span>Vincular Indústrias</span>
           </button>
 
           <button
@@ -585,6 +601,11 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
             </div>
           )}
         </div>
+      )}
+
+      {/* Tab: VINCULAR INDÚSTRIAS */}
+      {activeTab === 'vinculo_industrias' && (
+        <VincularPromotorIndustriaTab promotores={promotores} />
       )}
 
       {/* Tab: AUDITORIA DE OPERAÇÕES */}

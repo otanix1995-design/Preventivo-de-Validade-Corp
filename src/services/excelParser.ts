@@ -250,7 +250,7 @@ export async function processarSMGOI013(
   const smgKeywords = [
     'CODIGO', 'COD', 'MERCADORIA', 'DESCRICAO', 'DESC', 'EMBALAGEM', 'EMB',
     'ESTOQUE', 'SALDO', 'VENDAS', 'PRECO', 'ENTRADA', 'IDADE', 'COMPRADOR', 'SETOR',
-    'SEMVENDA', 'DIASSEMVENDA'
+    'SEMVENDA', 'DIASSEMVENDA', 'CUSTO', 'CUSTOMEDIO', 'CMEDIO'
   ];
 
   const headerRowIdx = findHeaderRowIndex(best2DRows, smgKeywords);
@@ -339,10 +339,21 @@ export async function processarSMGOI013(
     ) {
       if (!headerMap['vendas_qtde']) headerMap['vendas_qtde'] = key;
     }
-    // 9. Match Vendas Preço (MUST NOT BE SEMVENDA)
+    // 8.1 Match Custo Médio (SMGOI013 CUSTO MEDIO / CUSTO UNITARIO)
+    else if (
+      /^(CUSTOMEDIO|CUSTOMED|CUSTO|CUSTOUNITARIO|CMEDIO|CUSTO_MEDIO|PRECOCUSTO|PRCUSTO|VLRMEDIO|VALORMEDIO)$/.test(norm) ||
+      norm.includes('CUSTOMED') ||
+      norm.includes('CUSTO_MED') ||
+      (norm.includes('CUSTO') && norm.includes('MEDIO')) ||
+      (norm.includes('PR') && norm.includes('CUSTO'))
+    ) {
+      if (!headerMap['custo_medio']) headerMap['custo_medio'] = key;
+    }
+    // 9. Match Vendas Preço (MUST NOT BE SEMVENDA OR CUSTO)
     else if (
       !norm.includes('SEMVENDA') &&
       !norm.includes('SEMGIRO') &&
+      !norm.includes('CUSTO') &&
       (
         /^(VENDASPRECO|PRECO|PRECOVENDA|VALOR|PRVENDA|VALORVENDA|PRUNITARIO|VENDASVALOR)$/.test(norm) ||
         (norm.includes('VENDA') && (norm.includes('PRECO') || norm.includes('PR') || norm.includes('VALOR'))) ||
@@ -523,6 +534,13 @@ export async function processarSMGOI013(
     const estTotal = posEstoque.estoqueTotal;
     const vendasQtde = headerMap['vendas_qtde'] ? parseNumberSafe(row[headerMap['vendas_qtde']]) : 0;
     const vendasPreco = headerMap['vendas_preco'] ? parseNumberSafe(row[headerMap['vendas_preco']]) : undefined;
+    const custoMedioRaw = headerMap['custo_medio'] ? row[headerMap['custo_medio']] : undefined;
+    const custoMedioParsed = (custoMedioRaw !== undefined && custoMedioRaw !== null && String(custoMedioRaw).trim() !== '')
+      ? parseNumberSafe(custoMedioRaw)
+      : undefined;
+    const custoMedioFinal = (custoMedioParsed !== undefined && !isNaN(custoMedioParsed) && custoMedioParsed > 0)
+      ? custoMedioParsed
+      : undefined;
 
     const dataEntrada = headerMap['data_ultima_entrada'] ? parseDateSafe(row[headerMap['data_ultima_entrada']]) : undefined;
     const qtdeEntrada = headerMap['qtde_ultima_entrada'] ? parseNumberSafe(row[headerMap['qtde_ultima_entrada']]) : undefined;
@@ -569,6 +587,7 @@ export async function processarSMGOI013(
       estoque_total: estTotal,
       vendas_qtde_30d: Math.max(0, vendasQtde),
       vendas_preco: vendasPreco,
+      custo_medio: custoMedioFinal !== undefined ? custoMedioFinal : existingProd?.custo_medio,
       data_ultima_entrada: dataEntrada,
       qtde_ultima_entrada: qtdeEntrada,
       dias_sem_venda: diasSemVenda,

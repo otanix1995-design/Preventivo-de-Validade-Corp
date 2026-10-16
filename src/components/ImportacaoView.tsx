@@ -21,10 +21,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { processarSMGOI013, processarVinculosEAN } from '../services/excelParser';
 import { gerarExemploPlanilhaSAEOU060, processarSAEOU060 } from '../services/saeou060Parser';
+import { gerarExemploPlanilhaSPCOI007, processarArquivoSPCOI007 } from '../services/spcoi007Parser';
+import { isvService } from '../services/isvService';
 import { cloudSyncService, SyncStatusInfo } from '../services/cloudSyncService';
 import { productRepository } from '../services/productRepository';
-import { clearAllData, getHistoricoImportacoes, loadDemoData, reprocessarBases } from '../services/storage';
-import { MetadadosBase, ResumoImportacao } from '../types';
+import { clearAllData, getHistoricoImportacoes, getProdutos, loadDemoData, reprocessarBases } from '../services/storage';
+import { MetadadosBase, ResumoImportacao, ResumoImportacaoSPCOI007 } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 
 interface ImportacaoViewProps {
@@ -38,16 +40,18 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
   onImportComplete,
   onNavigateToSaeou060,
 }) => {
-  const [activeTab, setActiveTab] = useState<'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060' | 'HISTORICO'>('SMGOI013');
+  const [activeTab, setActiveTab] = useState<'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007' | 'HISTORICO'>('SMGOI013');
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [progressStatus, setProgressStatus] = useState<string>('Iniciando processamento...');
-  const [processingFileType, setProcessingFileType] = useState<'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060'>('SMGOI013');
+  const [processingFileType, setProcessingFileType] = useState<'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007'>('SMGOI013');
   const [ultimoResumo, setUltimoResumo] = useState<ResumoImportacao | null>(null);
+  const [ultimoResumoSpcoi, setUltimoResumoSpcoi] = useState<ResumoImportacaoSPCOI007 | null>(null);
   const [erroGlobal, setErroGlobal] = useState<string | null>(null);
   const [isDraggingSmg, setIsDraggingSmg] = useState(false);
   const [isDraggingEan, setIsDraggingEan] = useState(false);
   const [isDraggingSaeou, setIsDraggingSaeou] = useState(false);
+  const [isDraggingSpcoi, setIsDraggingSpcoi] = useState(false);
   const [isLimparModalOpen, setIsLimparModalOpen] = useState(false);
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
@@ -77,6 +81,7 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
   const fileInputSmgRef = useRef<HTMLInputElement>(null);
   const fileInputEanRef = useRef<HTMLInputElement>(null);
   const fileInputSaeouRef = useRef<HTMLInputElement>(null);
+  const fileInputSpcoiRef = useRef<HTMLInputElement>(null);
 
   const historico = getHistoricoImportacoes();
   const diagnostico = productRepository.getDiagnosticoBase();
@@ -201,6 +206,57 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
     }
   };
 
+  const handleProcessFileSpcoi = async (file: File) => {
+    if (!file) return;
+
+    setIsProcessing(true);
+    setProcessingFileType('SPCOI007');
+    setProgressPercent(0);
+    setProgressStatus('Lendo e analisando arquivo SPCOI007...');
+    setErroGlobal(null);
+    setUltimoResumo(null);
+    setUltimoResumoSpcoi(null);
+
+    try {
+      const produtosAtuais = getProdutos();
+      const industriasAtuais = isvService.getIndustrias();
+      const resultado = await processarArquivoSPCOI007(
+        file,
+        produtosAtuais,
+        industriasAtuais,
+        (percent, status) => {
+          setProgressPercent(percent);
+          setProgressStatus(status);
+        }
+      );
+
+      await isvService.salvarImportacaoSpcoi(
+        resultado.fornecedores,
+        resultado.industrias,
+        resultado.resumo
+      );
+
+      setUltimoResumoSpcoi(resultado.resumo);
+      if (onImportComplete) onImportComplete();
+    } catch (err: any) {
+      console.error('Erro ao importar SPCOI007:', err);
+      setErroGlobal(
+        err.message ||
+          'Erro ao processar a planilha SPCOI007. Verifique se o arquivo possui colunas válidas de CNPJ, Razão Social e Código do Produto.'
+      );
+    } finally {
+      setIsProcessing(false);
+      if (fileInputSpcoiRef.current) fileInputSpcoiRef.current.value = '';
+    }
+  };
+
+  const handleFileSpcoiChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      handleProcessFileSpcoi(files[0]);
+    }
+  };
+
   // Drag and drop handlers
   const handleDropSmg = (e: React.DragEvent) => {
     e.preventDefault();
@@ -223,6 +279,14 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
     setIsDraggingSaeou(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
       handleProcessFileSaeou(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleDropSpcoi = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingSpcoi(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleProcessFileSpcoi(e.dataTransfer.files[0]);
     }
   };
 
@@ -430,7 +494,7 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         </div>
 
         {/* Tab switcher */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 bg-gray-100 p-1 rounded-xl">
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 bg-gray-100 p-1 rounded-xl">
           <button
             onClick={() => setActiveTab('SMGOI013')}
             className={`py-2 px-3 rounded-lg text-xs font-black uppercase tracking-wider transition-all select-none ${
@@ -460,6 +524,17 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
             }`}
           >
             SAEOU060
+          </button>
+          <button
+            id="tab-importacao-spcoi007"
+            onClick={() => setActiveTab('SPCOI007')}
+            className={`py-2 px-3 rounded-lg text-xs font-black uppercase tracking-wider transition-all select-none ${
+              activeTab === 'SPCOI007'
+                ? 'bg-white text-amber-700 shadow-xs'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            SPCOI007 (Fornec.)
           </button>
           <button
             onClick={() => setActiveTab('HISTORICO')}
@@ -978,7 +1053,160 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         </div>
       )}
 
-      {/* TAB 4: HISTÓRICO */}
+      {/* TAB 4: SPCOI007 */}
+      {activeTab === 'SPCOI007' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="space-y-1">
+                <h3 className="text-sm font-black text-gray-900 uppercase tracking-wide">
+                  Importar Planilha SPCOI007 — Fornecedores & Indústrias
+                </h3>
+                <p className="text-xs text-gray-500 font-medium">
+                  Relacionamento entre Produtos, CNPJs de Fornecedores e Indústrias com cruzamento seguro na SMGOI013.
+                </p>
+              </div>
+            </div>
+
+            {/* Rules Callout Box */}
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-xs text-amber-900 space-y-1.5">
+              <div className="flex items-center gap-1.5 font-black uppercase text-amber-900 tracking-wide">
+                <Info className="w-4 h-4 text-amber-700 shrink-0 stroke-[2.5]" />
+                <span>Regras Fundamentais da Base SPCOI007:</span>
+              </div>
+              <ul className="list-disc list-inside space-y-1 text-[11px] text-amber-950 font-medium">
+                <li>
+                  <strong>Soberania da SMGOI013:</strong> A SPCOI007 é uma base auxiliar. A importação <strong>NUNCA cadastra novos produtos operacionais</strong> na filial 172.
+                </li>
+                <li>
+                  <strong>Relação Produto → CNPJ → Indústria:</strong> Cada produto é vinculado ao CNPJ normalizado com 14 dígitos (preservando zeros à esquerda).
+                </li>
+                <li>
+                  <strong>Múltiplos CNPJs:</strong> Produtos com mais de um fornecedor mantêm todos os vínculos transparentemente, sem escolha arbitrária.
+                </li>
+                <li>
+                  <strong>Preservação de Dados:</strong> Reimportações preservam cadastros de indústrias e vínculos com promotores previamente configurados.
+                </li>
+              </ul>
+            </div>
+
+            {/* Upload Area with Drag and Drop */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDraggingSpcoi(true);
+              }}
+              onDragLeave={() => setIsDraggingSpcoi(false)}
+              onDrop={handleDropSpcoi}
+              className={`border-2 border-dashed rounded-xl p-6 text-center space-y-3 transition-colors ${
+                isDraggingSpcoi
+                  ? 'border-amber-600 bg-amber-50/50'
+                  : 'border-gray-300 hover:border-amber-600 bg-gray-50'
+              }`}
+            >
+              <UploadCloud className="w-12 h-12 text-amber-700 mx-auto stroke-[2]" />
+              <div>
+                <p className="text-sm font-black uppercase tracking-wide text-gray-800">
+                  Arraste e solte o arquivo SPCOI007 aqui
+                </p>
+                <p className="text-xs text-gray-500 font-medium mt-0.5">
+                  Ou clique no botão abaixo • Formatos aceitos: .xlsx, .xls, .csv
+                </p>
+              </div>
+
+              <input
+                ref={fileInputSpcoiRef}
+                id="input-file-spcoi007"
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                onChange={handleFileSpcoiChange}
+                disabled={isProcessing}
+                className="hidden"
+              />
+
+              <button
+                type="button"
+                id="btn-selecionar-spcoi007"
+                onClick={() => fileInputSpcoiRef.current?.click()}
+                disabled={isProcessing}
+                className="px-5 py-3 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-black uppercase tracking-wider text-xs shadow-md inline-flex items-center gap-2 transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+              >
+                {isProcessing ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin stroke-[2.5]" />
+                    <span>PROCESSANDO SPCOI007 ({progressPercent}%)...</span>
+                  </>
+                ) : (
+                  <>
+                    <UploadCloud className="w-4 h-4 stroke-[2.5]" />
+                    <span>SELECIONAR PLANILHA SPCOI007</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={gerarExemploPlanilhaSPCOI007}
+                className="text-xs font-black uppercase tracking-wider text-amber-800 hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 stroke-[2.5]" />
+                Baixar Modelo Exemplo SPCOI007 (.xlsx)
+              </button>
+            </div>
+          </div>
+
+          {/* Resumo da Importação SPCOI007 caso executada */}
+          {ultimoResumoSpcoi && (
+            <div className="bg-white rounded-xl p-5 border border-emerald-300 shadow-sm space-y-3">
+              <div className="flex items-center gap-2 text-emerald-800 font-black text-sm uppercase">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                <span>Resumo da Importação SPCOI007:</span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+                <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
+                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Total Lidos</span>
+                  <span className="font-mono font-black text-slate-900 text-sm">
+                    {ultimoResumoSpcoi.total_lidos}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-emerald-50 rounded-lg border border-emerald-200">
+                  <span className="text-[10px] text-emerald-700 font-bold uppercase block">Na SMGOI013</span>
+                  <span className="font-mono font-black text-emerald-950 text-sm">
+                    {ultimoResumoSpcoi.total_encontrados_smg}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
+                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Sem Correspondência</span>
+                  <span className="font-mono font-black text-slate-700 text-sm">
+                    {ultimoResumoSpcoi.total_sem_correspondencia}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200">
+                  <span className="text-[10px] text-amber-800 font-bold uppercase block">Múltiplos CNPJs</span>
+                  <span className="font-mono font-black text-amber-950 text-sm">
+                    {ultimoResumoSpcoi.total_multiplos_cnpjs}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-blue-50 rounded-lg border border-blue-200">
+                  <span className="text-[10px] text-blue-700 font-bold uppercase block">Indústrias</span>
+                  <span className="font-mono font-black text-blue-950 text-sm">
+                    {ultimoResumoSpcoi.total_industrias}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 5: HISTÓRICO */}
       {activeTab === 'HISTORICO' && (
         <div className="space-y-3">
           {historico.length === 0 ? (

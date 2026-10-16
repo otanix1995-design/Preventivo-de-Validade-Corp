@@ -39,6 +39,7 @@ export interface ProdutoSMG {
   // Vendas
   vendas_qtde_30d: number;
   vendas_preco?: number;
+  custo_medio?: number; // Custo médio unitário oficial da SMGOI013 para cálculo financeiro do ISV
   
   // Histórico e Operacional
   data_ultima_entrada?: string;
@@ -507,5 +508,113 @@ export interface ResumoHistoricoPromotor {
   pendentes: number;
   novosVencimentos: number;
   atualizacoesQuantidade: number;
+}
+
+// ==========================================
+// MÓDULO SPCOI007, INDÚSTRIAS E ISV (ITENS SEM VENDA)
+// ==========================================
+
+export interface FornecedorSPCOI007 {
+  id: string; // Chave única: `${cnpj}_${codigo_interno}`
+  cnpj: string; // 14 dígitos normalizados com zeros à esquerda
+  cnpj_formatado: string; // XX.XXX.XXX/XXXX-XX
+  razao_social: string;
+  codigo_interno: string;
+  digito: string;
+  codigo_exibicao: string;
+  descricao_spcoi: string;
+  criado_em: string;
+  atualizado_em?: string;
+}
+
+export interface Industria {
+  cnpj: string; // 14 dígitos normalizados (chave única)
+  cnpj_formatado: string; // XX.XXX.XXX/XXXX-XX
+  razao_social: string;
+  nome_exibicao: string; // Nome comercial configurável
+  ativo: boolean;
+  total_produtos_loja?: number;
+  promotores_responsaveis?: string[];
+  criado_em: string;
+  atualizado_em: string;
+}
+
+export interface VinculoPromotorIndustria {
+  id: string; // Chave estável: `${promotorId}_${cnpj}_${filialId}`
+  promotorId: string;
+  promotorNome: string;
+  agenciaNome: string;
+  cnpj: string;
+  filialId: string;
+  criado_em: string;
+}
+
+export interface SolicitacaoAjusteIsv {
+  id: string;
+  codigo_interno: string;
+  digito: string;
+  codigo_exibicao: string;
+  descricao: string;
+  estoque_registrado: number;
+  estoque_texto?: string;
+  observacao: string;
+  responsavel: string;
+  status: 'PENDENTE' | 'ANALISADO' | 'CONCLUIDO';
+  data_registro: string;
+  historico?: Array<{ data: string; acao: string; usuario: string }>;
+}
+
+export interface ResumoImportacaoSPCOI007 {
+  id?: string;
+  data_hora: string;
+  total_lidos: number;
+  total_encontrados_smg: number;
+  total_sem_correspondencia: number;
+  total_multiplos_cnpjs: number;
+  total_industrias: number;
+  nome_arquivo: string;
+  erros?: string[];
+}
+
+export interface ItemIsv {
+  produto: ProdutoSMG;
+  codigo_interno: string;
+  digito: string;
+  codigo_exibicao: string;
+  descricao: string;
+  embalagem: string;
+  estoque_total: number;
+  estoque_formatado: string;
+  dias_sem_venda: number;
+  idade: number;
+  custo_medio: number | null;
+  valor_estoque: number | null;
+  valor_estoque_formatado: string;
+  cnpjs: string[];
+  industrias_nomes: string[];
+  promotores_nomes: string[];
+  agencias_nomes: string[];
+  tem_promotor: boolean;
+  multiplos_cnpjs: boolean;
+  elegivel_ajuste: boolean;
+}
+
+export interface FiltrosIsv {
+  agencia: string;
+  industriaCnpj: string;
+  promotorId: string;
+  termoBusca: string;
+  setorFisico: string;
+  setorBalanco: string;
+  diasSemVenda: number | null;
+  modoDiasSemVenda: 'MINIMO' | 'EXATO';
+  idade: number | null;
+  modoIdade: 'MINIMO' | 'EXATO';
+  filtroEstoque: 'TODOS' | 'COM_ESTOQUE' | 'SEM_ESTOQUE';
+  filtroValor: 'TODOS' | 'ATE_250' | 'ACIMA_250' | 'CUSTOM';
+  valorMin?: number;
+  valorMax?: number;
+  situacaoVinculo: 'TODOS' | 'COM_PROMOTOR' | 'SEM_PROMOTOR' | 'MULTIPLOS_CNPJS';
+  ordenacao: 'MAIOR_VALOR' | 'MENOR_VALOR' | 'MAIS_DIAS_SEM_VENDA' | 'MAIOR_IDADE' | 'CODIGO';
 }
 

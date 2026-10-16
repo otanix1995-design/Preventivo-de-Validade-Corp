@@ -4,7 +4,7 @@
  */
 
 const DB_NAME = 'ControleVencimentosDB_v2';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export const STORES = {
   PRODUTOS: 'produtos',
@@ -18,6 +18,11 @@ export const STORES = {
   VINCULOS_PROMOTORES: 'vinculos_promotores',
   AUDITORIA_PROMOTORES: 'auditoria_promotores',
   OPERACOES_PROMOTORES: 'operacoes_promotores',
+  SPCOI007_FORNECEDORES: 'spcoi007_fornecedores',
+  INDUSTRIAS: 'industrias',
+  VINCULOS_PROMOTOR_INDUSTRIA: 'vinculos_promotor_industria',
+  ISV_SOLICITACOES_AJUSTE: 'isv_solicitacoes_ajuste',
+  HISTORICO_IMPORTACOES_SPCOI007: 'historico_importacoes_spcoi007',
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -69,6 +74,21 @@ export function getDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(STORES.OPERACOES_PROMOTORES)) {
         db.createObjectStore(STORES.OPERACOES_PROMOTORES, { keyPath: 'operationId' });
       }
+      if (!db.objectStoreNames.contains(STORES.SPCOI007_FORNECEDORES)) {
+        db.createObjectStore(STORES.SPCOI007_FORNECEDORES, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORES.INDUSTRIAS)) {
+        db.createObjectStore(STORES.INDUSTRIAS, { keyPath: 'cnpj' });
+      }
+      if (!db.objectStoreNames.contains(STORES.VINCULOS_PROMOTOR_INDUSTRIA)) {
+        db.createObjectStore(STORES.VINCULOS_PROMOTOR_INDUSTRIA, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORES.ISV_SOLICITACOES_AJUSTE)) {
+        db.createObjectStore(STORES.ISV_SOLICITACOES_AJUSTE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORES.HISTORICO_IMPORTACOES_SPCOI007)) {
+        db.createObjectStore(STORES.HISTORICO_IMPORTACOES_SPCOI007, { keyPath: 'id' });
+      }
     };
 
     request.onsuccess = () => {
@@ -106,7 +126,13 @@ export async function dbGetAll<T>(storeName: string): Promise<T[]> {
 }
 
 export async function dbPutAll<T>(storeName: string, items: T[], clearFirst = true): Promise<void> {
-  const db = await getDB();
+  let db: IDBDatabase;
+  try {
+    db = await getDB();
+  } catch {
+    return; // Fallback seguro para ambientes sem IndexedDB (Node / SSR / Testes)
+  }
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
@@ -139,6 +165,8 @@ export async function dbPutAll<T>(storeName: string, items: T[], clearFirst = tr
             (item as any).auditoriaId = `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
           } else if (keyPath === 'operationId') {
             (item as any).operationId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+          } else if (keyPath === 'cnpj') {
+            (item as any).cnpj = (item as any).cnpj || `00000000000000`;
           }
         }
       }
@@ -157,7 +185,13 @@ export async function dbPutAll<T>(storeName: string, items: T[], clearFirst = tr
 }
 
 export async function dbPut<T>(storeName: string, item: T): Promise<void> {
-  const db = await getDB();
+  let db: IDBDatabase;
+  try {
+    db = await getDB();
+  } catch {
+    return; // Fallback seguro para ambientes sem IndexedDB (Node / SSR / Testes)
+  }
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
@@ -180,14 +214,21 @@ export async function dbPut<T>(storeName: string, item: T): Promise<void> {
           (item as any).auditoriaId = `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         } else if (keyPath === 'operationId') {
           (item as any).operationId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        } else if (keyPath === 'cnpj') {
+          (item as any).cnpj = (item as any).cnpj || `00000000000000`;
         }
       }
     }
 
     store.put(item);
 
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.oncomplete = () => {
+      resolve();
+    };
+    tx.onerror = () => {
+      console.error(`Erro ao salvar registro em ${storeName}:`, tx.error);
+      reject(tx.error);
+    };
   });
 }
 

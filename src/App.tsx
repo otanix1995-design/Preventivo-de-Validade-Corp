@@ -8,6 +8,7 @@ import { DivergenciasView } from './components/DivergenciasView';
 import { EansVinculadosView } from './components/EansVinculadosView';
 import { Header } from './components/Header';
 import { ImportacaoView } from './components/ImportacaoView';
+import { IsvView } from './components/IsvView';
 import { MaisMenuView } from './components/MaisMenuView';
 import { PromotoresView } from './components/PromotoresView';
 import { RelatoriosView } from './components/RelatoriosView';
@@ -311,6 +312,27 @@ export default function App() {
                   onSelectProdutoByCodigo={handleSelectProdutoByCodigo}
                   onNavigateToImport={() => setSubView('importacao')}
                   onOpenVincularModal={handleOpenVincularModal}
+                />
+              </div>
+            )}
+
+            {subView === 'isv' && (
+              <div className="space-y-3">
+                <button
+                  onClick={() => setSubView(null)}
+                  className="text-xs font-bold text-blue-700 hover:underline flex items-center gap-1 cursor-pointer"
+                >
+                  ← Voltar para Menu Mais
+                </button>
+                <IsvView
+                  produtos={produtos}
+                  onSelectProduto={(prod) => {
+                    setSelectedProduto(prod);
+                    setActiveTab('consulta');
+                    setSubView(null);
+                  }}
+                  onOpenCadastrarModal={handleOpenCadastrarForProduto}
+                  onBack={() => setSubView(null)}
                 />
               </div>
             )}
