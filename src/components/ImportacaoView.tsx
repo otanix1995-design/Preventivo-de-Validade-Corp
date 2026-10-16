@@ -1159,48 +1159,109 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
           {/* Resumo da Importação SPCOI007 caso executada */}
           {ultimoResumoSpcoi && (
-            <div className="bg-white rounded-xl p-5 border border-emerald-300 shadow-sm space-y-3">
-              <div className="flex items-center gap-2 text-emerald-800 font-black text-sm uppercase">
-                <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                <span>Resumo da Importação SPCOI007:</span>
+            <div className="bg-white rounded-xl p-5 border border-emerald-300 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-3">
+                <div className="flex items-center gap-2 text-emerald-800 font-black text-sm uppercase">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                  <span>Resumo da Importação SPCOI007 ({ultimoResumoSpcoi.nome_arquivo}):</span>
+                </div>
+                <span className="text-xs font-mono font-bold text-gray-500">
+                  {ultimoResumoSpcoi.data_hora}
+                </span>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+              {/* Colunas Reconhecidas */}
+              {ultimoResumoSpcoi.colunas_identificadas && ultimoResumoSpcoi.colunas_identificadas.length > 0 && (
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-1">
+                  <span className="text-[10px] text-slate-600 font-black uppercase tracking-wider block">
+                    8 Colunas Reconhecidas na Planilha:
+                  </span>
+                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                    {ultimoResumoSpcoi.colunas_identificadas.map((col, i) => (
+                      <span
+                        key={i}
+                        className="px-2 py-0.5 bg-white border border-slate-300 rounded text-[11px] font-mono font-semibold text-slate-800"
+                      >
+                        ✓ {col}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Cards de Métricas */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 text-xs">
                 <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
                   <span className="text-[10px] text-slate-500 font-bold uppercase block">Total Lidos</span>
                   <span className="font-mono font-black text-slate-900 text-sm">
-                    {ultimoResumoSpcoi.total_lidos}
+                    {ultimoResumoSpcoi.total_lidos.toLocaleString('pt-BR')}
                   </span>
                 </div>
 
                 <div className="p-2.5 bg-emerald-50 rounded-lg border border-emerald-200">
-                  <span className="text-[10px] text-emerald-700 font-bold uppercase block">Na SMGOI013</span>
+                  <span className="text-[10px] text-emerald-700 font-bold uppercase block">Válidos</span>
                   <span className="font-mono font-black text-emerald-950 text-sm">
-                    {ultimoResumoSpcoi.total_encontrados_smg}
+                    {(ultimoResumoSpcoi.total_validos ?? ultimoResumoSpcoi.total_lidos).toLocaleString('pt-BR')}
+                  </span>
+                </div>
+
+                <div className={`p-2.5 rounded-lg border ${
+                  (ultimoResumoSpcoi.total_invalidos || 0) > 0
+                    ? 'bg-amber-50 border-amber-300 text-amber-900'
+                    : 'bg-slate-50 border-slate-200 text-slate-700'
+                }`}>
+                  <span className="text-[10px] font-bold uppercase block">Inválidos</span>
+                  <span className="font-mono font-black text-sm">
+                    {(ultimoResumoSpcoi.total_invalidos || 0).toLocaleString('pt-BR')}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-blue-50 rounded-lg border border-blue-200">
+                  <span className="text-[10px] text-blue-700 font-bold uppercase block">Na SMGOI013</span>
+                  <span className="font-mono font-black text-blue-950 text-sm">
+                    {ultimoResumoSpcoi.total_encontrados_smg.toLocaleString('pt-BR')}
                   </span>
                 </div>
 
                 <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
-                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Sem Correspondência</span>
+                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Sem Correspond.</span>
                   <span className="font-mono font-black text-slate-700 text-sm">
-                    {ultimoResumoSpcoi.total_sem_correspondencia}
+                    {ultimoResumoSpcoi.total_sem_correspondencia.toLocaleString('pt-BR')}
                   </span>
                 </div>
 
                 <div className="p-2.5 bg-amber-50 rounded-lg border border-amber-200">
                   <span className="text-[10px] text-amber-800 font-bold uppercase block">Múltiplos CNPJs</span>
                   <span className="font-mono font-black text-amber-950 text-sm">
-                    {ultimoResumoSpcoi.total_multiplos_cnpjs}
+                    {ultimoResumoSpcoi.total_multiplos_cnpjs.toLocaleString('pt-BR')}
                   </span>
                 </div>
 
-                <div className="p-2.5 bg-blue-50 rounded-lg border border-blue-200">
-                  <span className="text-[10px] text-blue-700 font-bold uppercase block">Indústrias</span>
-                  <span className="font-mono font-black text-blue-950 text-sm">
-                    {ultimoResumoSpcoi.total_industrias}
+                <div className="p-2.5 bg-purple-50 rounded-lg border border-purple-200">
+                  <span className="text-[10px] text-purple-700 font-bold uppercase block">Indústrias (CNPJs)</span>
+                  <span className="font-mono font-black text-purple-950 text-sm">
+                    {ultimoResumoSpcoi.total_industrias.toLocaleString('pt-BR')}
                   </span>
                 </div>
               </div>
+
+              {/* Detalhes de registros inválidos se houver */}
+              {ultimoResumoSpcoi.detalhes_invalidos && ultimoResumoSpcoi.detalhes_invalidos.length > 0 && (
+                <div className="bg-amber-50/70 border border-amber-200 rounded-lg p-3 text-xs space-y-2">
+                  <span className="text-[11px] text-amber-900 font-black uppercase tracking-wide block">
+                    Avisos de Linhas Ignoradas ({ultimoResumoSpcoi.detalhes_invalidos.length} amostras):
+                  </span>
+                  <div className="max-h-32 overflow-y-auto space-y-1 font-mono text-[11px] text-amber-950">
+                    {ultimoResumoSpcoi.detalhes_invalidos.slice(0, 20).map((inv, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <span className="font-bold text-amber-700">Linha {inv.linha}:</span>
+                        <span>{inv.motivo}</span>
+                        {inv.dado && <span className="text-gray-500">({inv.dado})</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

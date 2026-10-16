@@ -525,6 +525,12 @@ export interface FornecedorSPCOI007 {
   descricao_spcoi: string;
   criado_em: string;
   atualizado_em?: string;
+  cnpj_original?: string;
+  codigo_original?: string;
+  divisao?: string;
+  status_sta?: string;
+  embalagem?: string;
+  comprador?: string;
 }
 
 export interface Industria {
@@ -568,12 +574,16 @@ export interface ResumoImportacaoSPCOI007 {
   id?: string;
   data_hora: string;
   total_lidos: number;
+  total_validos?: number;
+  total_invalidos?: number;
   total_encontrados_smg: number;
   total_sem_correspondencia: number;
   total_multiplos_cnpjs: number;
   total_industrias: number;
   nome_arquivo: string;
+  colunas_identificadas?: string[];
   erros?: string[];
+  detalhes_invalidos?: Array<{ linha: number; motivo: string; dado?: string }>;
 }
 
 export interface ItemIsv {

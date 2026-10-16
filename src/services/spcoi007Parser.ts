@@ -32,21 +32,41 @@ export function formatarCnpj(cnpj: string): string {
 
 /**
  * Gera um arquivo modelo .XLSX da planilha SPCOI007 para testes ou conferência operacional.
+ * Contempla a estrutura real com 8 colunas (Page1).
  */
 export function gerarExemploPlanilhaSPCOI007(): void {
-  const cabecalhos = ['CNPJ', 'RAZÃO SOCIAL', 'CÓDIGO', 'DESCRIÇÃO'];
+  const cabecalhos = [
+    'Fornecedor',
+    'Razão Social',
+    'Divisão',
+    'Código',
+    'Descrição',
+    'Sta.',
+    'Embalagem',
+    'Comprador',
+  ];
   const linhasExemplo = [
-    ['00.000.000/0001-91', 'AMBEV S/A', '11285-151', 'RF.CERV.BRAHMA CHOPP 350ML'],
-    ['01.123.456/0001-88', 'DANONE LTDA', '11285-151', 'RF.IOG.DANONE 5X ZERO MORANGO'],
-    ['01.123.456/0001-88', 'DANONE LTDA', '46135-156', 'RF.MARG.QUALY C/SAL 500G'],
-    ['02.987.654/0001-22', 'NESTLE BRASIL LTDA', '76916-185', 'CHOCOLATE NESTLE CLASSIC 90G'],
-    ['03.555.444/0001-33', 'BRF S.A.', '88901-001', 'FRANGO INTEIRO CONGELADO SADIA'],
+    ['00.003.607/0001-25', 'COFRUTAGEM ARARAQUARA COM DE FRUTAS LTDA', 'FLV', '00002488-110', 'HF.LARANJA PERA', 'AT', 'CX', 'COMPRADOR 01'],
+    ['00.000.000/0001-91', 'AMBEV S/A', 'BEBIDAS', '00011285-151', 'RF.CERV.BRAHMA CHOPP 350ML', 'AT', 'UN', 'COMPRADOR 02'],
+    ['01.123.456/0001-88', 'DANONE LTDA', 'LATICINIOS', '00011285-151', 'RF.IOG.DANONE 5X ZERO MORANGO', 'AT', 'UN', 'COMPRADOR 02'],
+    ['01.123.456/0001-88', 'DANONE LTDA', 'LATICINIOS', '00046135-156', 'RF.MARG.QUALY C/SAL 500G', 'AT', 'UN', 'COMPRADOR 02'],
+    ['02.987.654/0001-22', 'NESTLE BRASIL LTDA', 'MERCEARIA', '00076916-185', 'CHOCOLATE NESTLE CLASSIC 90G', 'AT', 'UN', 'COMPRADOR 03'],
+    ['03.555.444/0001-33', 'BRF S.A.', 'CARNES', '00088901-001', 'FRANGO INTEIRO CONGELADO SADIA', 'AT', 'KG', 'COMPRADOR 04'],
   ];
 
   const ws = XLSX.utils.aoa_to_sheet([cabecalhos, ...linhasExemplo]);
-  ws['!cols'] = [{ wch: 22 }, { wch: 34 }, { wch: 16 }, { wch: 38 }];
+  ws['!cols'] = [
+    { wch: 22 }, // Fornecedor
+    { wch: 38 }, // Razão Social
+    { wch: 12 }, // Divisão
+    { wch: 18 }, // Código
+    { wch: 38 }, // Descrição
+    { wch: 8 },  // Sta.
+    { wch: 12 }, // Embalagem
+    { wch: 18 }, // Comprador
+  ];
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'SPCOI007');
+  XLSX.utils.book_append_sheet(wb, ws, 'Page1');
   XLSX.writeFile(wb, 'MODELO_SPCOI007_FORNECEDORES.xlsx');
 }
 
@@ -104,7 +124,6 @@ export async function processarArquivoSPCOI007(
 
   // Encontrar linha de cabeçalho
   let headerRowIdx = -1;
-  const keywords = ['CNPJ', 'FORNECEDOR', 'RAZAO', 'CODIGO', 'DESCRICAO'];
 
   for (let r = 0; r < Math.min(raw2D.length, 25); r++) {
     const row = raw2D[r];
@@ -112,10 +131,37 @@ export async function processarArquivoSPCOI007(
     let score = 0;
     for (const cell of row) {
       const norm = normalizeHeader(cell);
-      if (norm.includes('CNPJ') || norm.includes('CGC')) score += 3;
-      if (norm.includes('RAZAO') || norm.includes('FORNECEDOR')) score += 2;
-      if (norm.includes('CODIGO') || norm.includes('COD')) score += 2;
-      if (norm.includes('DESCRICAO') || norm.includes('DESC')) score += 2;
+      if (
+        norm === 'FORNECEDOR' ||
+        norm === 'CNPJ' ||
+        norm === 'CNPJFORNECEDOR' ||
+        norm === 'FORNECEDORCNPJ' ||
+        norm.includes('CNPJ') ||
+        norm.includes('CGC')
+      ) {
+        score += 3;
+      }
+      if (
+        norm === 'RAZAOSOCIAL' ||
+        norm === 'RAZAO' ||
+        norm.includes('RAZAO') ||
+        norm === 'DIVISAO' ||
+        norm === 'COMPRADOR'
+      ) {
+        score += 2;
+      }
+      if (
+        norm === 'CODIGO' ||
+        norm === 'CODIGODOPRODUTO' ||
+        norm === 'CODIGOINTERNO' ||
+        norm === 'CODMERCADORIA' ||
+        norm.startsWith('COD')
+      ) {
+        score += 2;
+      }
+      if (norm.includes('DESCRICAO') || norm.includes('DESC')) {
+        score += 2;
+      }
     }
     if (score >= 4) {
       headerRowIdx = r;
@@ -124,7 +170,7 @@ export async function processarArquivoSPCOI007(
   }
 
   if (headerRowIdx === -1) {
-    headerRowIdx = 0; // Fallback
+    headerRowIdx = 0; // Fallback para a primeira linha
   }
 
   const headers = raw2D[headerRowIdx].map((h, i) => String(h || '').trim() || `COL_${i + 1}`);
@@ -132,33 +178,96 @@ export async function processarArquivoSPCOI007(
 
   headers.forEach((h, idx) => {
     const norm = normalizeHeader(h);
-    if (/^(CNPJ|CGC|CPFCNPJ|CNPJFORNECEDOR|DOCFORNECEDOR)$/.test(norm) || norm.includes('CNPJ') || norm.includes('CGC')) {
-      if (headerMap['cnpj'] === undefined) headerMap['cnpj'] = idx;
-    } else if (
-      /^(RAZAOSOCIAL|RAZAO|FORNECEDOR|NOMEFORNECEDOR|NOMERAZAO|EMPRESA)$/.test(norm) ||
-      norm.includes('RAZAO') ||
-      norm.includes('FORNECEDOR')
+
+    // 1. CNPJ / Fornecedor (Obrigatório)
+    // Cabeçalhos reconhecidos: Fornecedor, CNPJ, CNPJ Fornecedor, CGC, CPF/CNPJ, Doc Fornecedor
+    if (
+      norm === 'FORNECEDOR' ||
+      norm === 'CNPJ' ||
+      norm === 'CNPJFORNECEDOR' ||
+      norm === 'FORNECEDORCNPJ' ||
+      norm === 'CGC' ||
+      norm === 'CPFCNPJ' ||
+      norm === 'DOCFORNECEDOR' ||
+      norm.includes('CNPJ') ||
+      norm.includes('CGC')
     ) {
-      if (headerMap['razao_social'] === undefined) headerMap['razao_social'] = idx;
-    } else if (
-      /^(CODIGO|COD|CODMERCADORIA|CODPRODUTO|ITEM|CODINTERNO|MERCADORIA)$/.test(norm) ||
+      if (headerMap['cnpj'] === undefined) headerMap['cnpj'] = idx;
+    }
+    // 2. Código do Produto (Obrigatório)
+    // Cabeçalhos reconhecidos: Código, Codigo, Código do Produto, Código Interno, Cod. Mercadoria, Cod Produto, Item, Mercadoria
+    else if (
+      norm === 'CODIGO' ||
+      norm === 'CODIGODOPRODUTO' ||
+      norm === 'CODIGOINTERNO' ||
+      norm === 'CODMERCADORIA' ||
+      norm === 'CODPRODUTO' ||
+      norm === 'COD' ||
+      norm === 'ITEM' ||
+      norm === 'MERCADORIA' ||
       norm.startsWith('COD')
     ) {
       if (headerMap['codigo'] === undefined) headerMap['codigo'] = idx;
-    } else if (
-      /^(DESCRICAO|DESC|PRODUTO|NOMEMERCADORIA|DESCRICAOPRODUTO)$/.test(norm) ||
-      norm.includes('DESCRICAO') ||
-      norm.includes('MERCADORIA')
+    }
+    // 3. Razão Social (Razão Social, Razao, Nome Fornecedor, Nome Razao, Empresa, Nome Fantasia)
+    // ATENÇÃO: 'FORNECEDOR' isolado é o CNPJ, portanto não deve ser associado à Razão Social
+    else if (
+      norm === 'RAZAOSOCIAL' ||
+      norm === 'RAZAO' ||
+      norm === 'NOMEFORNECEDOR' ||
+      norm === 'NOMERAZAO' ||
+      norm === 'EMPRESA' ||
+      norm === 'NOMEFANTASIA' ||
+      norm.includes('RAZAO')
+    ) {
+      if (headerMap['razao_social'] === undefined) headerMap['razao_social'] = idx;
+    }
+    // 4. Descrição (Descrição, Descricao, Descrição do Produto, Desc, Produto)
+    else if (
+      norm === 'DESCRICAO' ||
+      norm === 'DESCRICAODOPRODUTO' ||
+      norm === 'DESCRICAOMERCADORIA' ||
+      norm === 'DESC' ||
+      norm === 'PRODUTO' ||
+      norm.includes('DESCRICAO')
     ) {
       if (headerMap['descricao'] === undefined) headerMap['descricao'] = idx;
     }
+    // 5. Divisão
+    else if (norm === 'DIVISAO' || norm === 'DIV') {
+      if (headerMap['divisao'] === undefined) headerMap['divisao'] = idx;
+    }
+    // 6. Sta. (Status)
+    else if (norm === 'STA' || norm === 'STATUS' || norm === 'SITUACAO') {
+      if (headerMap['status_sta'] === undefined) headerMap['status_sta'] = idx;
+    }
+    // 7. Embalagem
+    else if (norm === 'EMBALAGEM' || norm === 'EMB') {
+      if (headerMap['embalagem'] === undefined) headerMap['embalagem'] = idx;
+    }
+    // 8. Comprador
+    else if (norm === 'COMPRADOR') {
+      if (headerMap['comprador'] === undefined) headerMap['comprador'] = idx;
+    }
   });
 
+  // Validação estrita das colunas obrigatórias
   if (headerMap['cnpj'] === undefined || headerMap['codigo'] === undefined) {
     throw new Error(
-      'Estrutura incompatível: Não foi possível identificar as colunas obrigatórias de CNPJ e Código do Produto na SPCOI007.'
+      'Estrutura incompatível! Não foi possível identificar as colunas obrigatórias de CNPJ e Código do Produto na SPCOI007.'
     );
   }
+
+  // Lista amigável de colunas identificadas
+  const colunasIdentificadas: string[] = [];
+  if (headerMap['cnpj'] !== undefined) colunasIdentificadas.push(`CNPJ / Fornecedor ("${headers[headerMap['cnpj']]}")`);
+  if (headerMap['razao_social'] !== undefined) colunasIdentificadas.push(`Razão Social ("${headers[headerMap['razao_social']]}")`);
+  if (headerMap['divisao'] !== undefined) colunasIdentificadas.push(`Divisão ("${headers[headerMap['divisao']]}")`);
+  if (headerMap['codigo'] !== undefined) colunasIdentificadas.push(`Código ("${headers[headerMap['codigo']]}")`);
+  if (headerMap['descricao'] !== undefined) colunasIdentificadas.push(`Descrição ("${headers[headerMap['descricao']]}")`);
+  if (headerMap['status_sta'] !== undefined) colunasIdentificadas.push(`Sta. ("${headers[headerMap['status_sta']]}")`);
+  if (headerMap['embalagem'] !== undefined) colunasIdentificadas.push(`Embalagem ("${headers[headerMap['embalagem']]}")`);
+  if (headerMap['comprador'] !== undefined) colunasIdentificadas.push(`Comprador ("${headers[headerMap['comprador']]}")`);
 
   // Mapa de produtos existentes na filial (SMGOI013)
   const produtosMap = new Map<string, ProdutoSMG>();
@@ -183,18 +292,33 @@ export async function processarArquivoSPCOI007(
   const isoAtual = new Date().toISOString();
 
   let totalLidos = 0;
+  let totalValidos = 0;
+  let totalInvalidos = 0;
+  const detalhesInvalidos: Array<{ linha: number; motivo: string; dado?: string }> = [];
   const totalLinhas = raw2D.length - (headerRowIdx + 1);
 
   for (let r = headerRowIdx + 1; r < raw2D.length; r++) {
     const row = raw2D[r];
     if (!Array.isArray(row) || row.length === 0) continue;
 
-    const rawCnpj = row[headerMap['cnpj']];
-    const rawCodigo = row[headerMap['codigo']];
+    const rawCnpj = headerMap['cnpj'] !== undefined ? row[headerMap['cnpj']] : '';
+    const rawCodigo = headerMap['codigo'] !== undefined ? row[headerMap['codigo']] : '';
     const rawRazao = headerMap['razao_social'] !== undefined ? row[headerMap['razao_social']] : '';
     const rawDesc = headerMap['descricao'] !== undefined ? row[headerMap['descricao']] : '';
+    const rawDivisao = headerMap['divisao'] !== undefined ? row[headerMap['divisao']] : '';
+    const rawSta = headerMap['status_sta'] !== undefined ? row[headerMap['status_sta']] : '';
+    const rawEmbalagem = headerMap['embalagem'] !== undefined ? row[headerMap['embalagem']] : '';
+    const rawComprador = headerMap['comprador'] !== undefined ? row[headerMap['comprador']] : '';
 
-    if (!rawCnpj && !rawCodigo) continue;
+    // Ignora linha completamente vazia
+    if (
+      (rawCnpj === undefined || rawCnpj === null || String(rawCnpj).trim() === '') &&
+      (rawCodigo === undefined || rawCodigo === null || String(rawCodigo).trim() === '') &&
+      (rawRazao === undefined || rawRazao === null || String(rawRazao).trim() === '')
+    ) {
+      continue;
+    }
+
     totalLidos++;
 
     if (totalLidos % 200 === 0) {
@@ -205,14 +329,31 @@ export async function processarArquivoSPCOI007(
 
     const cnpjNorm = normalizarCnpj(rawCnpj);
     if (!cnpjNorm || cnpjNorm.length !== 14 || /^0{14}$/.test(cnpjNorm)) {
-      continue; // Ignora CNPJ totalmente inválido ou vazio
+      totalInvalidos++;
+      if (detalhesInvalidos.length < 50) {
+        detalhesInvalidos.push({
+          linha: r + 1,
+          motivo: 'CNPJ inválido ou ausente',
+          dado: String(rawCnpj || '').slice(0, 30),
+        });
+      }
+      continue;
     }
 
     const parsedCode = parseSMGCode(rawCodigo);
     if (!parsedCode.is_valid || !parsedCode.codigo_interno) {
-      continue; // Código inválido
+      totalInvalidos++;
+      if (detalhesInvalidos.length < 50) {
+        detalhesInvalidos.push({
+          linha: r + 1,
+          motivo: 'Código do produto inválido ou não reconhecido',
+          dado: String(rawCodigo || '').slice(0, 30),
+        });
+      }
+      continue;
     }
 
+    totalValidos++;
     const codigoInterno = parsedCode.codigo_interno;
     const chaveUnica = `${cnpjNorm}_${codigoInterno}`;
     if (chavesProcessadas.has(chaveUnica)) continue;
@@ -225,11 +366,17 @@ export async function processarArquivoSPCOI007(
       id: chaveUnica,
       cnpj: cnpjNorm,
       cnpj_formatado: formatarCnpj(cnpjNorm),
+      cnpj_original: String(rawCnpj ?? '').trim(),
       razao_social: razaoSocial,
       codigo_interno: codigoInterno,
       digito: parsedCode.digito,
       codigo_exibicao: parsedCode.codigo_exibicao,
+      codigo_original: parsedCode.codigo_original,
       descricao_spcoi: descricaoSpcoi,
+      divisao: rawDivisao ? String(rawDivisao).trim().toUpperCase() : undefined,
+      status_sta: rawSta ? String(rawSta).trim().toUpperCase() : undefined,
+      embalagem: rawEmbalagem ? String(rawEmbalagem).trim().toUpperCase() : undefined,
+      comprador: rawComprador ? String(rawComprador).trim().toUpperCase() : undefined,
       criado_em: dataHoraAtual,
     };
 
@@ -287,11 +434,15 @@ export async function processarArquivoSPCOI007(
     id: `spcoi-${Date.now()}`,
     data_hora: dataHoraAtual,
     total_lidos: totalLidos,
+    total_validos: totalValidos,
+    total_invalidos: totalInvalidos,
     total_encontrados_smg: totalEncontradosSmg,
     total_sem_correspondencia: produtosSemCorrespondencia.length,
     total_multiplos_cnpjs: produtosComMultiplosCnpjs.size,
     total_industrias: industriasMap.size,
     nome_arquivo: file.name,
+    colunas_identificadas: colunasIdentificadas,
+    detalhes_invalidos: detalhesInvalidos,
   };
 
   onProgress?.(100, 'Importação da SPCOI007 concluída!');
