@@ -9,7 +9,7 @@ import {
   SolicitacaoAjusteIsv,
   VinculoPromotorIndustria,
 } from '../types';
-import { isProdutoPesavel, parseEmbalagem } from './codeParser';
+import { calcularPosicaoEstoque, isProdutoPesavel, parseEmbalagem } from './codeParser';
 import { dbGetAll, dbPut, dbPutAll, STORES } from './db';
 import { formatarMoedaBR } from './deviceId';
 import { promotorService } from './promotorService';
@@ -361,16 +361,23 @@ class IsvService {
    * - KG/G: "12 KG + 500 G" ou "500 G"
    */
   public formatarEstoqueIsv(produto: ProdutoSMG): string {
-    const est = produto.estoque_total || 0;
-    if (est <= 0) return '0 UN';
-
     const isPeso =
       (produto.unidade_medida && produto.unidade_medida.toUpperCase() === 'KG') ||
       isProdutoPesavel(produto.embalagem);
 
+    const est = produto.estoque_total || 0;
+    if (est <= 0) return isPeso ? '0 KG' : '0 UN';
+
     if (isPeso) {
-      const kg = Math.floor(est);
-      const gramas = Math.round((est - kg) * 1000);
+      const kg =
+        produto.estoque_emb1 !== undefined && produto.estoque_emb1 > 0
+          ? Math.floor(produto.estoque_emb1)
+          : Math.floor(est);
+      const gramas =
+        produto.estoque_emb9 !== undefined && produto.estoque_emb9 > 0
+          ? Math.round(produto.estoque_emb9)
+          : Math.round((est - Math.floor(est)) * 1000);
+
       const parts: string[] = [];
       if (kg > 0) parts.push(`${kg} KG`);
       if (gramas > 0) parts.push(`${gramas} G`);
@@ -379,10 +386,23 @@ class IsvService {
     }
 
     const embData = parseEmbalagem(produto.embalagem || '');
-    if (embData.fator && embData.fator > 1) {
-      const rounded = Math.round(est);
-      const cx = Math.floor(rounded / embData.fator);
-      const un = rounded % embData.fator;
+    const fator =
+      produto.fator_embalagem && produto.fator_embalagem > 1
+        ? produto.fator_embalagem
+        : embData.fator && embData.fator > 1
+        ? embData.fator
+        : 1;
+
+    if (fator > 1) {
+      const cx =
+        produto.estoque_emb1 !== undefined && produto.estoque_emb1 > 0
+          ? produto.estoque_emb1
+          : Math.floor(est / fator);
+      const un =
+        produto.estoque_emb9 !== undefined && produto.estoque_emb9 > 0
+          ? produto.estoque_emb9
+          : est % fator;
+
       const parts: string[] = [];
       if (cx > 0) parts.push(`${cx} CX`);
       if (un > 0) parts.push(`${un} UN`);
@@ -399,16 +419,95 @@ class IsvService {
    * Respeita: Se custo médio ausente/inválido, retorna null (não inventa R$ 0,00).
    */
   public calcularValorEstoque(produto: ProdutoSMG): number | null {
-    if (produto.custo_medio === undefined || produto.custo_medio === null || isNaN(produto.custo_medio)) {
-      return null;
+    // 1. PRIORIDADE ABSOLUTA: Valor do estoque pré-calculado oficialmente pelo ERP SMG da filial
+    if (
+      produto.valor_estoque_planilha !== undefined &&
+      produto.valor_estoque_planilha !== null &&
+      !isNaN(produto.valor_estoque_planilha) &&
+      produto.valor_estoque_planilha > 0
+    ) {
+      return Number(produto.valor_estoque_planilha.toFixed(2));
     }
-    const custo = Number(produto.custo_medio);
-    if (custo <= 0) return null;
 
-    const est = produto.estoque_total || 0;
-    if (est <= 0) return 0;
+    // 2. Cálculo estrito a partir do Custo Médio e Estoque na Mesma Unidade
+    if (
+      produto.custo_medio !== undefined &&
+      produto.custo_medio !== null &&
+      !isNaN(produto.custo_medio)
+    ) {
+      const custo = Number(produto.custo_medio);
+      if (custo <= 0) return null;
 
-    return Number((est * custo).toFixed(2));
+      let est = produto.estoque_total ?? 0;
+      // Fallback de segurança: se estoque_total estiver zerado ou ausente mas houver emb1 ou emb9
+      if (est <= 0 && ((produto.estoque_emb1 || 0) > 0 || (produto.estoque_emb9 || 0) > 0)) {
+        const pos = calcularPosicaoEstoque(
+          produto.estoque_emb1,
+          produto.estoque_emb9,
+          produto.embalagem,
+          produto.fator_embalagem
+        );
+        est = pos.estoqueTotal;
+      }
+      if (est <= 0) return 0;
+
+      // REGRA FUNDAMENTAL (REQUISITO 3):
+      // VALOR FINANCEIRO = QUANTIDADE NA UNIDADE DO CUSTO × CUSTO MÉDIO NESSA MESMA UNIDADE
+      const emb = produto.embalagem || '';
+      const isPesavel = isProdutoPesavel(emb);
+
+      // A) PRODUTOS PESÁVEIS (KG): estoque_total já está em KG e custo médio é R$/KG
+      if (isPesavel) {
+        return Number((est * custo).toFixed(2));
+      }
+
+      const embData = parseEmbalagem(emb);
+      const fator =
+        produto.fator_embalagem && produto.fator_embalagem > 1
+          ? produto.fator_embalagem
+          : embData.fator && embData.fator > 1
+          ? embData.fator
+          : 1;
+
+      // B) PRODUTOS UNITÁRIOS COM FATOR = 1 (UN): estoque_total em UN e custo em R$/UN
+      if (fator <= 1) {
+        return Number((est * custo).toFixed(2));
+      }
+
+      // C) PRODUTOS CONTROLADOS POR EMBALAGEM MULTIPLA (CX, FD, PCT):
+      // Verificar se o custo médio refere-se à CAIXA ou à UNIDADE individual
+      const unidadeMedida = (produto.unidade_medida || embData.tipo || '').toUpperCase();
+      let isCustoPorCaixa = false;
+      if (produto.vendas_preco !== undefined && produto.vendas_preco > 0) {
+        // Se houver preço de venda unitário: custo da caixa é tipicamente muito superior ao preço unitário
+        if (custo > produto.vendas_preco * 1.5) {
+          isCustoPorCaixa = true;
+        } else {
+          isCustoPorCaixa = false;
+        }
+      } else {
+        // Sem preço de venda: baseia-se na unidade operacional do cadastro
+        const unidadeMedida = (produto.unidade_medida || embData.tipo || '').toUpperCase();
+        if (
+          unidadeMedida.includes('CX') ||
+          unidadeMedida.includes('FD') ||
+          unidadeMedida.includes('PCT')
+        ) {
+          isCustoPorCaixa = true;
+        }
+      }
+
+      if (isCustoPorCaixa) {
+        // Quantidade equivalente em Caixas:
+        const caixasEquivalentes = est / fator;
+        return Number((caixasEquivalentes * custo).toFixed(2));
+      }
+
+      // Custo já expresso por unidade individual:
+      return Number((est * custo).toFixed(2));
+    }
+
+    return null;
   }
 
   /**
@@ -494,7 +593,7 @@ class IsvService {
         custo_medio: p.custo_medio !== undefined ? p.custo_medio : null,
         valor_estoque: valorEstoque,
         valor_estoque_formatado:
-          valorEstoque !== null ? formatarMoedaBR(valorEstoque) : '-',
+          valorEstoque !== null ? formatarMoedaBR(valorEstoque) : 'VALOR INDISPONÍVEL',
         cnpjs,
         industrias_nomes: industriasNomes,
         promotores_nomes: promotoresNomes,
@@ -611,25 +710,77 @@ class IsvService {
       })
       .sort((a, b) => {
         // Ordenação padrão: MAIOR VALOR DO ESTOQUE
+        // Regra obrigatória:
+        // - Produtos sem valor calculável ficam no fim da classificação (nunca ocupam primeiras posições).
+        // - Classificação numérica decrescente.
+        // - Em caso de empate, utilizar código interno numérico e dígito como desempate estável.
         if (filtros.ordenacao === 'MAIOR_VALOR') {
-          const valA = a.valor_estoque !== null ? a.valor_estoque : -1;
-          const valB = b.valor_estoque !== null ? b.valor_estoque : -1;
-          return valB - valA;
+          const hasA = a.valor_estoque !== null && a.valor_estoque !== undefined;
+          const hasB = b.valor_estoque !== null && b.valor_estoque !== undefined;
+          if (hasA && !hasB) return -1;
+          if (!hasA && hasB) return 1;
+          if (hasA && hasB) {
+            const diff = (b.valor_estoque as number) - (a.valor_estoque as number);
+            if (Math.abs(diff) > 0.0001) return diff;
+          }
+          // Critério de desempate:
+          // 1. Mais dias sem venda
+          const diffDias = (b.dias_sem_venda || 0) - (a.dias_sem_venda || 0);
+          if (diffDias !== 0) return diffDias;
+          // 2. Maior idade
+          const diffIdade = (b.idade || 0) - (a.idade || 0);
+          if (diffIdade !== 0) return diffIdade;
+          // 3. Código interno numérico e depois dígito
+          const codA = parseInt(a.codigo_interno, 10) || 0;
+          const codB = parseInt(b.codigo_interno, 10) || 0;
+          if (codA !== codB) return codA - codB;
+          return (a.digito || '').localeCompare(b.digito || '');
         }
+
         if (filtros.ordenacao === 'MENOR_VALOR') {
-          const valA = a.valor_estoque !== null ? a.valor_estoque : 999999999;
-          const valB = b.valor_estoque !== null ? b.valor_estoque : 999999999;
-          return valA - valB;
+          const hasA = a.valor_estoque !== null && a.valor_estoque !== undefined;
+          const hasB = b.valor_estoque !== null && b.valor_estoque !== undefined;
+          if (hasA && !hasB) return -1;
+          if (!hasA && hasB) return 1;
+          if (hasA && hasB) {
+            const diff = (a.valor_estoque as number) - (b.valor_estoque as number);
+            if (Math.abs(diff) > 0.0001) return diff;
+          }
+          const codA = parseInt(a.codigo_interno, 10) || 0;
+          const codB = parseInt(b.codigo_interno, 10) || 0;
+          if (codA !== codB) return codA - codB;
+          return (a.digito || '').localeCompare(b.digito || '');
         }
+
         if (filtros.ordenacao === 'MAIS_DIAS_SEM_VENDA') {
-          return b.dias_sem_venda - a.dias_sem_venda;
+          const diff = b.dias_sem_venda - a.dias_sem_venda;
+          if (diff !== 0) return diff;
+          const valA = a.valor_estoque ?? -1;
+          const valB = b.valor_estoque ?? -1;
+          if (valB !== valA) return valB - valA;
+          const codA = parseInt(a.codigo_interno, 10) || 0;
+          const codB = parseInt(b.codigo_interno, 10) || 0;
+          return codA - codB;
         }
+
         if (filtros.ordenacao === 'MAIOR_IDADE') {
-          return b.idade - a.idade;
+          const diff = b.idade - a.idade;
+          if (diff !== 0) return diff;
+          const valA = a.valor_estoque ?? -1;
+          const valB = b.valor_estoque ?? -1;
+          if (valB !== valA) return valB - valA;
+          const codA = parseInt(a.codigo_interno, 10) || 0;
+          const codB = parseInt(b.codigo_interno, 10) || 0;
+          return codA - codB;
         }
+
         if (filtros.ordenacao === 'CODIGO') {
-          return a.codigo_interno.localeCompare(b.codigo_interno, undefined, { numeric: true });
+          const codA = parseInt(a.codigo_interno, 10) || 0;
+          const codB = parseInt(b.codigo_interno, 10) || 0;
+          if (codA !== codB) return codA - codB;
+          return (a.digito || '').localeCompare(b.digito || '');
         }
+
         return 0;
       });
   }

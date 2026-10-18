@@ -40,6 +40,7 @@ export interface ProdutoSMG {
   vendas_qtde_30d: number;
   vendas_preco?: number;
   custo_medio?: number; // Custo médio unitário oficial da SMGOI013 para cálculo financeiro do ISV
+  valor_estoque_planilha?: number | null; // Valor financeiro total do estoque diretamente informado na planilha (se presente)
   
   // Histórico e Operacional
   data_ultima_entrada?: string;

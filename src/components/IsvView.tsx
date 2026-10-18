@@ -28,8 +28,10 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { formatarMoedaBR } from '../services/deviceId';
+import { processarSMGOI013 } from '../services/excelParser';
 import { gerarRelatorioIsvA3Pdf } from '../services/isvPdfService';
 import { isvService } from '../services/isvService';
+import { productRepository } from '../services/productRepository';
 import { promotorService } from '../services/promotorService';
 import {
   FiltrosIsv,
@@ -68,6 +70,67 @@ export const IsvView: React.FC<IsvViewProps> = ({
   const [pdfExibirValor, setPdfExibirValor] = useState(true);
   const [pdfTipoAgrupamento, setPdfTipoAgrupamento] = useState<'GERAL' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA'>('GERAL');
   const [pdfEntidadeSelecionada, setPdfEntidadeSelecionada] = useState<string>('');
+  const [pdfLimiteExportacao, setPdfLimiteExportacao] = useState<number | 'TODOS'>(30);
+
+  // Modal de Auditoria do Catálogo / Custo Médio
+  const [isModalAuditoriaOpen, setIsModalAuditoriaOpen] = useState(false);
+  const [codAuditoriaCustom, setCodAuditoriaCustom] = useState('');
+  const [isProcessandoArquivo, setIsProcessandoArquivo] = useState(false);
+  const [mensagemProgresso, setMensagemProgresso] = useState('');
+
+  const handleImportarSmgoi013Direto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsProcessandoArquivo(true);
+    setMensagemProgresso('Iniciando processamento da SMGOI013...');
+
+    try {
+      const res = await processarSMGOI013(file, (pct, msg) => {
+        setMensagemProgresso(`${pct}% - ${msg}`);
+      });
+      alert(
+        `Importação da SMGOI013 concluída com sucesso!\n\n` +
+        `Total de produtos: ${res.total_lidos}\n` +
+        `Atualizados: ${res.total_atualizados}\n` +
+        `Novos: ${res.total_novos}\n\n` +
+        `O Custo Médio e Estoque Convertido foram recalculados e persistidos no IndexedDB.`
+      );
+    } catch (err: any) {
+      console.error('Erro na importação direta da SMGOI013:', err);
+      alert(`Falha ao importar planilha: ${err.message || 'Formato inválido ou corrompido'}`);
+    } finally {
+      setIsProcessandoArquivo(false);
+      setMensagemProgresso('');
+      e.target.value = '';
+    }
+  };
+
+  const handleRestaurarBaseReferencia = async () => {
+    const confirmar = window.confirm(
+      'Deseja carregar a base de referência oficial com os 5 produtos de teste?\n\n' +
+      '• 68059-164: R$ 26.287,99\n' +
+      '• 60662-158: R$ 16.471,28\n' +
+      '• 85327-177: R$ 16.168,49\n' +
+      '• 8911-191: R$ 9.575,49\n' +
+      '• 56176-127: R$ 8.977,79\n\n' +
+      'Isso permitirá validar imediatamente a ordenação por maior valor, o Top 30 e a exportação PDF.'
+    );
+    if (!confirmar) return;
+
+    setIsProcessandoArquivo(true);
+    setMensagemProgresso('Restaurando base oficial de referência...');
+    try {
+      await productRepository.loadDemoData();
+      alert('Base oficial de referência restaurada com sucesso!');
+    } catch (err: any) {
+      console.error('Erro ao restaurar base de referência:', err);
+      alert(`Erro: ${err.message}`);
+    } finally {
+      setIsProcessandoArquivo(false);
+      setMensagemProgresso('');
+    }
+  };
 
   // Filtros combináveis do ISV
   const [filtros, setFiltros] = useState<FiltrosIsv>({
@@ -159,6 +222,21 @@ export const IsvView: React.FC<IsvViewProps> = ({
     return isvService.getIndicadoresIsv(itensFiltrados);
   }, [itensFiltrados]);
 
+  // Resumo financeiro estrito da lista filtrada
+  const valorTotalFiltrado = useMemo(() => {
+    return itensFiltrados.reduce((acc, item) => {
+      return acc + (item.valor_estoque !== null ? item.valor_estoque : 0);
+    }, 0);
+  }, [itensFiltrados]);
+
+  const qtdComValor = useMemo(() => {
+    return itensFiltrados.filter((i) => i.valor_estoque !== null).length;
+  }, [itensFiltrados]);
+
+  const qtdSemValor = useMemo(() => {
+    return itensFiltrados.filter((i) => i.valor_estoque === null).length;
+  }, [itensFiltrados]);
+
   // Itens da página atual
   const totalPaginas = Math.ceil(itensFiltrados.length / ITENS_POR_PAGINA) || 1;
   const itensPaginados = useMemo(() => {
@@ -208,9 +286,20 @@ export const IsvView: React.FC<IsvViewProps> = ({
       subtituloEntidade,
       exibirValorEstoque: pdfExibirValor,
       filialNome: 'FILIAL 172 - CASCAVEL',
+      limiteQuantidade: pdfLimiteExportacao,
     });
 
     setIsModalPdfOpen(false);
+  };
+
+  const handleQuickPrintTop30 = () => {
+    gerarRelatorioIsvA3Pdf(itensFiltrados, {
+      tituloFiltro: 'Geral da Loja (Top 30 Maiores)',
+      tipoAgrupamento: 'GERAL',
+      exibirValorEstoque: true,
+      filialNome: 'FILIAL 172 - CASCAVEL',
+      limiteQuantidade: 30,
+    });
   };
 
   return (
@@ -246,16 +335,29 @@ export const IsvView: React.FC<IsvViewProps> = ({
             </div>
           </div>
 
-          {/* Botão de Exportação A3 em PDF */}
-          <button
-            id="btn-abrir-modal-pdf-isv"
-            type="button"
-            onClick={() => setIsModalPdfOpen(true)}
-            className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-wider transition-all flex items-center gap-2 shadow-md active:scale-95"
-          >
-            <Download className="w-4 h-4 stroke-[2.5]" />
-            <span>Gerar Relatório A3 (PDF)</span>
-          </button>
+          {/* Botões de Ação: Imprimir Top 30 e Gerar Relatório A3 */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              id="btn-quick-print-top30"
+              type="button"
+              onClick={handleQuickPrintTop30}
+              className="px-3.5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-amber-400"
+              title="Exporta imediatamente os 30 maiores produtos por valor em PDF A3"
+            >
+              <FileText className="w-4 h-4 stroke-[2.5]" />
+              <span>Imprimir Top 30</span>
+            </button>
+
+            <button
+              id="btn-abrir-modal-pdf-isv"
+              type="button"
+              onClick={() => setIsModalPdfOpen(true)}
+              className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-wider transition-all flex items-center gap-2 shadow-md active:scale-95"
+            >
+              <Download className="w-4 h-4 stroke-[2.5]" />
+              <span>Opções A3 (PDF)</span>
+            </button>
+          </div>
         </div>
 
         {/* Abas Sub-Navegação: Geral / Possíveis Ajustes / Ocorrências */}
@@ -594,6 +696,120 @@ export const IsvView: React.FC<IsvViewProps> = ({
             </div>
           </div>
 
+          {/* Banner Resumo Financeiro Oficial do Conjunto Filtrado */}
+          <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 text-white rounded-xl p-4 border border-blue-900/60 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-black uppercase tracking-wider text-blue-300 bg-blue-900/60 px-2 py-0.5 rounded border border-blue-700/50">
+                  Classificação Financeira SMGOI013
+                </span>
+                <span className="text-xs text-slate-400 font-mono">
+                  {itensFiltrados.length} {itensFiltrados.length === 1 ? 'produto filtrado' : 'produtos filtrados'}
+                </span>
+              </div>
+              <div className="text-lg sm:text-xl font-black font-mono tracking-tight text-white flex items-baseline gap-2 flex-wrap">
+                <span className="text-slate-200">VALOR TOTAL DO ESTOQUE FILTRADO:</span>
+                <span className="text-emerald-400 text-xl sm:text-2xl font-black">
+                  {formatarMoedaBR(valorTotalFiltrado)}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+              <div className="bg-white/10 px-3 py-1.5 rounded-lg border border-white/10 text-xs">
+                <span className="text-slate-400 text-[10px] block uppercase font-bold">Com Custo Médio</span>
+                <span className="text-white font-mono font-black">{qtdComValor}</span>
+                <span className="text-slate-400 text-[10px] ml-1">itens</span>
+              </div>
+              {qtdSemValor > 0 && (
+                <div className="bg-amber-500/15 px-3 py-1.5 rounded-lg border border-amber-500/30 text-xs text-amber-200">
+                  <span className="text-amber-300 text-[10px] block uppercase font-bold">Sem Custo</span>
+                  <span className="text-white font-mono font-black">{qtdSemValor}</span>
+                  <span className="text-amber-300 text-[10px] ml-1">indisponíveis</span>
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={() => setIsModalAuditoriaOpen(true)}
+                className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-black text-xs flex items-center gap-1.5 transition-colors shadow-xs"
+                title="Auditar integridade de custo, estoque e cálculo financeiro do catálogo"
+              >
+                <Search className="w-3.5 h-3.5" />
+                Auditar Códigos
+              </button>
+            </div>
+          </div>
+
+          {/* Alerta de Carregamento / Processamento de Planilha */}
+          {isProcessandoArquivo && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center gap-3 text-blue-900 animate-pulse">
+              <RefreshCw className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
+              <div>
+                <span className="font-black text-xs uppercase tracking-wide block">Processando Catálogo SMGOI013...</span>
+                <span className="text-[11px] text-blue-700">{mensagemProgresso || 'Aguarde um momento...'}</span>
+              </div>
+            </div>
+          )}
+
+          {/* Notificação Explicativa: Por que os produtos estão com VALOR INDISPONÍVEL? */}
+          {qtdSemValor > 0 && qtdComValor === 0 && (
+            <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-amber-900 text-xs flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-xs">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <p className="font-black text-amber-950 text-xs uppercase tracking-wider">
+                    Por que todos os {itensFiltrados.length} produtos exibem "VALOR INDISPONÍVEL"?
+                  </p>
+                  <p className="text-amber-900/90 text-[11px] leading-relaxed max-w-2xl">
+                    Os produtos atualmente carregados no navegador foram importados anteriormente, momento em que a coluna <strong>Custo Médio</strong> ainda não era persistida no banco local IndexedDB. Conforme a regra de proteção contra números fictícios, valores ausentes <strong>não</strong> são substituídos por estimativas.
+                  </p>
+                  <p className="text-amber-800 text-[11px] font-semibold">
+                    Para calcular o valor financeiro real (Estoque × Custo Médio), escolha uma das opções:
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0 flex-wrap w-full md:w-auto">
+                <label className="cursor-pointer px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs rounded-xl uppercase tracking-wider shadow-xs flex items-center gap-1.5 active:scale-95 transition-all">
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <span>Atualizar Planilha SMGOI013</span>
+                  <input
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    className="hidden"
+                    onChange={handleImportarSmgoi013Direto}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={handleRestaurarBaseReferencia}
+                  className="px-3.5 py-2 bg-blue-700 hover:bg-blue-600 text-white font-black text-xs rounded-xl uppercase tracking-wider shadow-xs flex items-center gap-1.5 active:scale-95 transition-all"
+                  title="Carregar a base de referência oficial com os 5 produtos de teste"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  <span>Carregar Base Referência</span>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {qtdComValor > 0 && qtdSemValor > 0 && (
+            <div className="bg-slate-100 border border-slate-200 rounded-xl px-3 py-2 text-[11px] text-slate-600 flex items-center justify-between gap-2">
+              <span>
+                <strong>{qtdComValor}</strong> produtos com valor financeiro calculado. <strong>{qtdSemValor}</strong> produtos sem custo cadastrado na SMGOI013 exibem <em>VALOR INDISPONÍVEL</em> e ficam posicionados ao final da classificação.
+              </span>
+              <label className="cursor-pointer text-blue-700 hover:underline font-bold text-[10px] uppercase shrink-0">
+                Atualizar SMGOI013
+                <input
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={handleImportarSmgoi013Direto}
+                />
+              </label>
+            </div>
+          )}
+
           {/* 4. Tabela de Itens ISV com as 11 Colunas Oficiais */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">
             <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between text-xs font-bold text-slate-700">
@@ -641,7 +857,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                     <th className="py-2.5 px-3 font-black">INDÚSTRIA</th>
                     <th className="py-2.5 px-3 font-black">PROMOTOR</th>
                     <th className="py-2.5 px-3 font-black">AGÊNCIA</th>
-                    <th className="py-2.5 px-3 font-black text-right">VALOR ESTOQUE</th>
+                    <th className="py-2.5 px-3 font-black text-right min-w-[140px]">VALOR ESTOQUE</th>
                     <th className="py-2.5 px-2 font-black text-center">AÇÕES</th>
                   </tr>
                 </thead>
@@ -754,8 +970,19 @@ export const IsvView: React.FC<IsvViewProps> = ({
                           </td>
 
                           {/* 11. VALOR DO ESTOQUE */}
-                          <td className="py-2 px-3 text-right font-mono font-black text-slate-900 whitespace-nowrap">
-                            {item.valor_estoque_formatado}
+                          <td className="py-2.5 px-3 text-right font-mono font-black whitespace-nowrap min-w-[140px]">
+                            {item.valor_estoque !== null ? (
+                              <span className="text-emerald-950 font-black text-xs">
+                                {item.valor_estoque_formatado}
+                              </span>
+                            ) : (
+                              <span
+                                className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 inline-block"
+                                title="Custo médio não informado na planilha SMGOI013 para este item"
+                              >
+                                VALOR INDISPONÍVEL
+                              </span>
+                            )}
                           </td>
 
                           {/* 12. AÇÕES */}
@@ -899,6 +1126,68 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 </label>
               </div>
 
+              {/* Opção Obrigatória: Quantidade de Produtos a Imprimir (Top 30 / 50 / 100 / Todos) */}
+              <div className="bg-blue-50/70 border border-blue-200 rounded-xl p-3.5 space-y-2">
+                <label className="block text-xs font-black uppercase text-blue-950">
+                  Quantidade de Produtos a Imprimir / Exportar:
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPdfLimiteExportacao(30)}
+                    className={`p-2.5 rounded-xl border text-left transition-all ${
+                      pdfLimiteExportacao === 30
+                        ? 'bg-blue-700 text-white border-blue-800 shadow-xs'
+                        : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="block font-black text-xs">⭐ 30 Maiores (Top 30)</span>
+                    <span className="text-[10px] opacity-80 block mt-0.5">Recomendado para rotina</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setPdfLimiteExportacao(50)}
+                    className={`p-2.5 rounded-xl border text-left transition-all ${
+                      pdfLimiteExportacao === 50
+                        ? 'bg-blue-700 text-white border-blue-800 shadow-xs'
+                        : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="block font-black text-xs">Top 50 Maiores</span>
+                    <span className="text-[10px] opacity-80 block mt-0.5">50 primeiros ordenados</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setPdfLimiteExportacao(100)}
+                    className={`p-2.5 rounded-xl border text-left transition-all ${
+                      pdfLimiteExportacao === 100
+                        ? 'bg-blue-700 text-white border-blue-800 shadow-xs'
+                        : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="block font-black text-xs">Top 100 Maiores</span>
+                    <span className="text-[10px] opacity-80 block mt-0.5">100 primeiros ordenados</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setPdfLimiteExportacao('TODOS')}
+                    className={`p-2.5 rounded-xl border text-left transition-all ${
+                      pdfLimiteExportacao === 'TODOS'
+                        ? 'bg-blue-700 text-white border-blue-800 shadow-xs'
+                        : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span className="block font-black text-xs">Todos da Seleção</span>
+                    <span className="text-[10px] opacity-80 block mt-0.5">
+                      {itensFiltrados.length} {itensFiltrados.length === 1 ? 'produto' : 'produtos'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+
               {/* Tipo de Cabeçalho / Relatório */}
               <div className="space-y-1">
                 <label className="block text-xs font-black uppercase text-slate-700">
@@ -995,9 +1284,247 @@ export const IsvView: React.FC<IsvViewProps> = ({
                   className="px-5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-black uppercase text-xs flex items-center gap-1.5 shadow-md active:scale-95"
                 >
                   <Download className="w-4 h-4 stroke-[2.5]" />
-                  <span>Baixar PDF A3 ({itensFiltrados.length} Itens)</span>
+                  <span>
+                    Baixar PDF A3 ({pdfLimiteExportacao === 'TODOS' ? itensFiltrados.length : Math.min(Number(pdfLimiteExportacao), itensFiltrados.length)} Itens)
+                  </span>
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* 7. Modal de Auditoria do Catálogo & Custo Médio */}
+      {isModalAuditoriaOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-4xl w-full max-h-[92vh] flex flex-col overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-150">
+            {/* Cabeçalho */}
+            <div className="p-4 bg-slate-900 text-white flex items-center justify-between border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <Search className="w-5 h-5 text-blue-400" />
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-wide">
+                    Auditoria de Classificação Financeira & Custo Médio
+                  </h3>
+                  <p className="text-[11px] text-slate-300">
+                    Inspeção em tempo de execução dos 5 códigos oficiais de referência e do catálogo SMGOI013
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsModalAuditoriaOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Conteúdo com rolagem */}
+            <div className="p-4 space-y-4 overflow-y-auto flex-1 font-sans text-xs">
+              {/* Campo para busca de qualquer outro código */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center gap-2">
+                <div className="flex-1">
+                  <label className="block text-[10px] font-black uppercase text-slate-600 mb-1">
+                    Auditar Código Adicional:
+                  </label>
+                  <input
+                    type="text"
+                    value={codAuditoriaCustom}
+                    onChange={(e) => setCodAuditoriaCustom(e.target.value)}
+                    placeholder="Digite o código (ex: 68059 ou 68059-164)..."
+                    className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-mono font-bold text-slate-900 focus:outline-hidden focus:border-blue-600"
+                  />
+                </div>
+                <div className="flex items-center gap-2 self-end sm:self-center">
+                  <label className="cursor-pointer px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs rounded-lg uppercase tracking-wider flex items-center gap-1 shadow-2xs">
+                    <FileSpreadsheet className="w-3.5 h-3.5" />
+                    <span>Upload SMGOI013</span>
+                    <input
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      className="hidden"
+                      onChange={handleImportarSmgoi013Direto}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleRestaurarBaseReferencia}
+                    className="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white font-black text-xs rounded-lg uppercase tracking-wider flex items-center gap-1 shadow-2xs"
+                    title="Carregar base de teste com os 5 produtos de referência"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Carregar Demo</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Tabela de Auditoria dos Códigos */}
+              <div className="space-y-3">
+                <div className="text-xs font-black uppercase text-slate-800 flex items-center justify-between">
+                  <span>Códigos Auditados Obrigatoriamente:</span>
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    Total no catálogo: {produtos.length} produtos
+                  </span>
+                </div>
+
+                {(() => {
+                  const codigosReferencia = [
+                    { cod: '68059', dig: '164', ref: 'R$ 26.287,99', label: '68059-164' },
+                    { cod: '60662', dig: '158', ref: 'R$ 16.471,28', label: '60662-158' },
+                    { cod: '85327', dig: '177', ref: 'R$ 16.168,49', label: '85327-177' },
+                    { cod: '8911', dig: '191', ref: 'R$ 9.575,49', label: '8911-191' },
+                    { cod: '56176', dig: '127', ref: 'R$ 8.977,79', label: '56176-127' },
+                  ];
+
+                  const customCodLimpo = codAuditoriaCustom.trim().replace('-', '').split(/[^\d]/)[0];
+                  const listaAudit = [...codigosReferencia];
+                  if (customCodLimpo && !codigosReferencia.some((c) => c.cod === customCodLimpo)) {
+                    listaAudit.push({
+                      cod: customCodLimpo,
+                      dig: '',
+                      ref: 'Consulta direta',
+                      label: codAuditoriaCustom.trim(),
+                    });
+                  }
+
+                  // Obter ranking global ordenado por maior valor
+                  const rankingGlobal = isvService
+                    .filtrarItensIsv(itensIsvBrutos, {
+                      ...filtros,
+                      filtroEstoque: 'COM_ESTOQUE',
+                      filtroValor: 'TODOS',
+                      situacaoVinculo: 'TODOS',
+                      ordenacao: 'MAIOR_VALOR',
+                    });
+
+                  return listaAudit.map((refItem) => {
+                    const prod = produtos.find(
+                      (p) =>
+                        p.codigo_interno === refItem.cod ||
+                        p.codigo_exibicao === refItem.label ||
+                        (p.codigo_interno === refItem.cod && (!refItem.dig || p.digito === refItem.dig))
+                    );
+
+                    const itemIsv = itensIsvBrutos.find(
+                      (i) => i.codigo_interno === refItem.cod || i.codigo_exibicao === refItem.label
+                    );
+
+                    const posRanking = itemIsv
+                      ? rankingGlobal.findIndex((r) => r.codigo_interno === itemIsv.codigo_interno) + 1
+                      : 0;
+
+                    const atendeFiltros = itemIsv
+                      ? itensFiltrados.some((f) => f.codigo_interno === itemIsv.codigo_interno)
+                      : false;
+
+                    const custoMedioNum = prod?.custo_medio ?? null;
+                    const valorEstoqueNum = itemIsv?.valor_estoque ?? null;
+
+                    return (
+                      <div
+                        key={refItem.label}
+                        className="p-3 rounded-xl border border-slate-200 bg-white hover:border-blue-300 transition-colors shadow-2xs space-y-2"
+                      >
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 border-b border-slate-100 pb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-black text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200 text-xs">
+                              {refItem.label}
+                            </span>
+                            <span className="font-bold text-slate-800 uppercase">
+                              {prod?.descricao || <span className="text-red-500 italic">Produto não localizado na base atual</span>}
+                            </span>
+                          </div>
+                          <div className="text-[11px] font-mono text-slate-500">
+                            Referência anterior: <strong>{refItem.ref}</strong>
+                          </div>
+                        </div>
+
+                        {prod ? (
+                          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2 text-[11px]">
+                            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+                              <span className="text-slate-400 block text-[9px] uppercase font-bold">Existe na Base</span>
+                              <span className="text-emerald-700 font-bold flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600 inline" /> Sim
+                              </span>
+                            </div>
+
+                            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+                              <span className="text-slate-400 block text-[9px] uppercase font-bold">Estoque Convertido</span>
+                              <span className="font-mono font-bold text-slate-800">
+                                {itemIsv?.estoque_formatado || `${prod.estoque_total} UN`}
+                              </span>
+                            </div>
+
+                            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+                              <span className="text-slate-400 block text-[9px] uppercase font-bold">Custo Médio</span>
+                              {custoMedioNum !== null && custoMedioNum > 0 ? (
+                                <span className="font-mono font-bold text-slate-900">
+                                  {formatarMoedaBR(custoMedioNum)}
+                                </span>
+                              ) : (
+                                <span className="font-bold text-amber-700 text-[10px] bg-amber-50 px-1 py-0.2 rounded">
+                                  VALOR INDISPONÍVEL
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+                              <span className="text-slate-400 block text-[9px] uppercase font-bold">Valor Estoque</span>
+                              {valorEstoqueNum !== null ? (
+                                <span className="font-mono font-black text-emerald-700">
+                                  {formatarMoedaBR(valorEstoqueNum)}
+                                </span>
+                              ) : (
+                                <span className="font-bold text-slate-400 text-[10px]">
+                                  VALOR INDISPONÍVEL
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+                              <span className="text-slate-400 block text-[9px] uppercase font-bold">Dias Sem Venda</span>
+                              <span className="font-mono font-bold text-slate-800">
+                                {prod.dias_sem_venda || 0} dias
+                              </span>
+                            </div>
+
+                            <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
+                              <span className="text-slate-400 block text-[9px] uppercase font-bold">Posição Ranking</span>
+                              <span className="font-mono font-black text-blue-700">
+                                {posRanking > 0 ? `#${posRanking}` : '-'}
+                              </span>
+                              <span className="text-[9px] text-slate-400 ml-1">
+                                {atendeFiltros ? '(filtrado)' : '(fora do filtro)'}
+                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-red-700 text-[11px] flex items-center gap-2">
+                            <AlertTriangle className="w-4 h-4 shrink-0" />
+                            <span>
+                              Este produto não consta no arquivo <strong>SMGOI013</strong> importado atualmente no navegador. O sistema não fabrica dados fictícios para produtos ausentes.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+
+            {/* Rodapé */}
+            <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+              <span className="text-[11px] text-slate-500">
+                Auditoria de integridade realizada em tempo real contra IndexedDB e memória.
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsModalAuditoriaOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs"
+              >
+                Fechar Auditoria
+              </button>
             </div>
           </div>
         </div>

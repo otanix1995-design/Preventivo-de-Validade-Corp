@@ -54,6 +54,10 @@ export interface ProdutoCentralDoc {
   fator_embalagem?: number;
   unidade_medida?: string;
   vendas_preco?: number;
+  custo_medio?: number | null;
+  estoque_total?: number;
+  dias_sem_venda?: number;
+  idade?: number;
   eans?: string[];
 }
 
@@ -308,6 +312,10 @@ export class CentralFirestoreService {
             fator_embalagem: p.fator_embalagem,
             unidade_medida: p.unidade_medida,
             vendas_preco: p.vendas_preco,
+            custo_medio: p.custo_medio ?? null,
+            estoque_total: p.estoque_total ?? 0,
+            dias_sem_venda: p.dias_sem_venda ?? 0,
+            idade: p.idade ?? 0,
             eans: p.eans || [],
           };
 

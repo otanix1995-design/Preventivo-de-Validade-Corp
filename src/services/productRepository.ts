@@ -223,15 +223,33 @@ class ProductRepository {
         // Configure real-time Cloud Synchronization (Firebase Firestore)
         cloudSyncService.registerCallbacks({
           onRemoteCatalogoReceived: async (remoteProdutos, meta) => {
-            this._produtos = remoteProdutos;
+            const localMap = new Map(this._produtos.map((p) => [p.codigo_interno, p]));
+            const mergedProdutos = remoteProdutos.map((rp) => {
+              const lp = localMap.get(rp.codigo_interno);
+              return {
+                ...rp,
+                custo_medio:
+                  rp.custo_medio !== undefined && rp.custo_medio !== null
+                    ? rp.custo_medio
+                    : lp?.custo_medio,
+                valor_estoque_planilha:
+                  rp.valor_estoque_planilha !== undefined && rp.valor_estoque_planilha !== null
+                    ? rp.valor_estoque_planilha
+                    : lp?.valor_estoque_planilha,
+                fator_embalagem: rp.fator_embalagem || lp?.fator_embalagem,
+                unidade_medida: rp.unidade_medida || lp?.unidade_medida,
+              };
+            });
+
+            this._produtos = mergedProdutos;
             this._metadados = {
               ...this._metadados,
               ...meta,
               status_base: 'SMGOI013',
-              total_produtos: remoteProdutos.length,
+              total_produtos: mergedProdutos.length,
             };
             this.rebuildIndices();
-            await dbPutAll(STORES.PRODUTOS, remoteProdutos, true);
+            await dbPutAll(STORES.PRODUTOS, mergedProdutos, true);
             await dbSetMeta('metadados_gerais', this._metadados);
             this.notify();
           },

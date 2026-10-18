@@ -10,6 +10,7 @@ export interface IsvPdfOptions {
   subtituloEntidade?: string; // ex: "CNPJ: 01.123.456/0001-88 - DANONE LTDA" ou "Agência: SPEED PROMO"
   exibirValorEstoque: boolean; // Padrão: true. Quando false, remove a coluna 11 e todos os totais em R$
   filialNome?: string;
+  limiteQuantidade?: number | 'TODOS'; // Novo: Top 30, Top 50, Top 100 ou 'TODOS'
 }
 
 /**
@@ -20,6 +21,12 @@ export function gerarRelatorioIsvA3Pdf(
   itens: ItemIsv[],
   options: IsvPdfOptions
 ): void {
+  // Aplicar seleção de limite de itens (ex: 30 maiores produtos)
+  const itensProcessados =
+    options.limiteQuantidade && options.limiteQuantidade !== 'TODOS'
+      ? itens.slice(0, Number(options.limiteQuantidade))
+      : itens;
+
   // Inicializa documento em A3 Horizontal (420mm x 297mm)
   const doc = new jsPDF({
     orientation: 'landscape',
@@ -36,15 +43,33 @@ export function gerarRelatorioIsvA3Pdf(
   const filial = options.filialNome || 'FILIAL 172 - CASCAVEL';
   const exibirValor = options.exibirValorEstoque;
 
-  // Totalizadores garantindo unicidade de produtos
-  const totalProdutos = itens.length;
-  let valorTotal = 0;
-  let temValorValido = false;
+  // Totalizadores garantindo distinção obrigatória entre exibidos e conjunto total filtrado
+  const totalProdutosExibidos = itensProcessados.length;
+  const totalProdutosFiltrados = itens.length;
+
+  let valorTotalExibidos = 0;
+  let qtdComValorExibidos = 0;
+  let qtdSemValorExibidos = 0;
+
+  itensProcessados.forEach((it) => {
+    if (it.valor_estoque !== null && it.valor_estoque !== undefined) {
+      valorTotalExibidos += it.valor_estoque;
+      qtdComValorExibidos++;
+    } else {
+      qtdSemValorExibidos++;
+    }
+  });
+
+  let valorTotalFiltrados = 0;
+  let qtdComValorFiltrados = 0;
+  let qtdSemValorFiltrados = 0;
 
   itens.forEach((it) => {
-    if (it.valor_estoque !== null) {
-      valorTotal += it.valor_estoque;
-      temValorValido = true;
+    if (it.valor_estoque !== null && it.valor_estoque !== undefined) {
+      valorTotalFiltrados += it.valor_estoque;
+      qtdComValorFiltrados++;
+    } else {
+      qtdSemValorFiltrados++;
     }
   });
 
@@ -99,25 +124,51 @@ export function gerarRelatorioIsvA3Pdf(
   doc.text('FORMATO OFICIAL A3 HORIZONTAL', pageWidth - marginX, 16, { align: 'right' });
 
   // 2. Barra de Resumo da Seleção / Filtros (Abaixo do cabeçalho)
+  const isTopRanking = options.limiteQuantidade && options.limiteQuantidade !== 'TODOS';
+  const barraAltura = isTopRanking ? 13 : 11;
   doc.setFillColor(248, 250, 252); // slate-50
   doc.setDrawColor(226, 232, 240); // slate-200
   doc.setLineWidth(0.3);
-  doc.rect(marginX, 33, pageWidth - marginX * 2, 11, 'FD');
+  doc.rect(marginX, 33, pageWidth - marginX * 2, barraAltura, 'FD');
 
-  doc.setFontSize(9);
+  doc.setFontSize(8.5);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(15, 23, 42);
-  const textoFiltro = options.tituloFiltro ? `FILTRO ATIVO: ${options.tituloFiltro.toUpperCase()}` : 'FILTRO ATIVO: GERAL DA LOJA';
-  doc.text(textoFiltro, marginX + 4, 40);
+  let textoFiltro = options.tituloFiltro ? `FILTRO: ${options.tituloFiltro.toUpperCase()}` : 'FILTRO: GERAL DA LOJA';
+  if (isTopRanking) {
+    textoFiltro += ` • [TOP ${options.limiteQuantidade} MAIORES PRODUTOS]`;
+  }
+  doc.text(textoFiltro, marginX + 4, 38.5);
 
   // Totais na barra
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(30, 41, 59);
-  let textoTotais = `TOTAL DE PRODUTOS: ${totalProdutos}`;
-  if (exibirValor) {
-    textoTotais += `   |   VALOR TOTAL DO ESTOQUE PARADO: ${temValorValido ? formatarMoedaBR(valorTotal) : '-'}`;
+
+  if (isTopRanking) {
+    const textoTop = `VALOR DOS ${totalProdutosExibidos} PRODUTOS EXIBIDOS: ${formatarMoedaBR(valorTotalExibidos)}`;
+    doc.setFontSize(9);
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(15, 23, 42);
+    doc.text(textoTop, pageWidth - marginX - 4, 38.5, { align: 'right' });
+
+    let textoConjunto = `VALOR TOTAL DE TODOS OS ${totalProdutosFiltrados} PRODUTOS FILTRADOS: ${formatarMoedaBR(valorTotalFiltrados)}`;
+    if (qtdSemValorFiltrados > 0) {
+      textoConjunto += `  *(Total parcial: ${qtdSemValorFiltrados} ${qtdSemValorFiltrados === 1 ? 'item sem custo' : 'itens sem custo'})`;
+    }
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(71, 85, 105);
+    doc.text(textoConjunto, pageWidth - marginX - 4, 43.5, { align: 'right' });
+  } else {
+    let textoTotais = `TOTAL DE PRODUTOS: ${totalProdutosExibidos}`;
+    if (exibirValor) {
+      textoTotais += `   |   VALOR TOTAL DO ESTOQUE FILTRADO: ${formatarMoedaBR(valorTotalFiltrados)}`;
+      if (qtdSemValorFiltrados > 0) {
+        textoTotais += `  *(Parcial: ${qtdSemValorFiltrados} sem custo)`;
+      }
+    }
+    doc.text(textoTotais, pageWidth - marginX - 4, 40, { align: 'right' });
   }
-  doc.text(textoTotais, pageWidth - marginX - 4, 40, { align: 'right' });
 
   // 3. Montagem da Tabela com as 11 ou 10 Colunas Oficiais
   // ORDEM EXATA DAS COLUNAS:
@@ -150,7 +201,7 @@ export function gerarRelatorioIsvA3Pdf(
   const cabecalhosSemValor = cabecalhosCompletos.slice(0, 10);
   const cabecalhosFinais = exibirValor ? cabecalhosCompletos : cabecalhosSemValor;
 
-  const linhasDados = itens.map((item) => {
+  const linhasDados = itensProcessados.map((item) => {
     const industriaTexto = item.industrias_nomes.length > 0 ? item.industrias_nomes.join(' • ') : '-';
     const promotorTexto = item.promotores_nomes.length > 0 ? item.promotores_nomes.join(' • ') : '-';
     const agenciaTexto = item.agencias_nomes.length > 0 ? item.agencias_nomes.join(' • ') : '-';
@@ -259,8 +310,9 @@ export function gerarRelatorioIsvA3Pdf(
   const hora = String(agora.getHours()).padStart(2, '0');
   const min = String(agora.getMinutes()).padStart(2, '0');
 
+  const sufixoLimite = options.limiteQuantidade && options.limiteQuantidade !== 'TODOS' ? `TOP${options.limiteQuantidade}_` : '';
   const sufixoValor = exibirValor ? 'COM_VALOR' : 'SEM_VALOR';
-  const nomeArquivo = `RELATORIO_ISV_A3_${dia}-${mes}-${ano}_${hora}${min}_${sufixoValor}.pdf`;
+  const nomeArquivo = `RELATORIO_ISV_A3_${sufixoLimite}${dia}-${mes}-${ano}_${hora}${min}_${sufixoValor}.pdf`;
 
   // Download do PDF
   doc.save(nomeArquivo);
