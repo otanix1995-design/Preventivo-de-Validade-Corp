@@ -13,6 +13,7 @@ export type StatusVencimento =
 export interface ProdutoSMG {
   id: string; // Unique internal key, usually codigo_interno
   codigo_original: string; // e.g. "00046135-156"
+  codigo_completo?: string; // e.g. "00046135-156"
   codigo_interno: string; // e.g. "46135" (leading zeros stripped)
   digito: string; // e.g. "156" or "009" (zeros preserved)
   codigo_exibicao: string; // e.g. "46135-156"
@@ -60,6 +61,36 @@ export interface ProdutoSMG {
   
   // Vínculos EAN
   eans: string[];
+  
+  // Dados operacionais da Nova Planilha Operacional Oficial (quando importada)
+  dados_operacionais?: RegistroPlanilhaIsv;
+  estoque_disponivel_texto?: string; // Ex: '285 CAIXAS + 14 UNIDADES'
+  estoque_original_erp?: string; // Ex: '285 CXA (24) + 14'
+  valor_indisponivel?: number | null;
+  bloqueio?: string;
+  transito_entrada?: number | string;
+  estoque_indisponivel?: number | string;
+  ultima_venda_formatada?: string;
+  ultima_compra_formatada?: string;
+  classe_produto?: string;
+  classe_produto_raiz?: string;
+  setor_save?: string;
+  cadeia?: string;
+  setor_planilha?: string;
+  setor_herdado?: string;
+  fornecedor_planilha?: string;
+  gerenciado?: string;
+  ativo?: string;
+  residuo?: string;
+  peso_variavel?: string;
+  alteracao_preco_formatada?: string;
+  verificador?: string;
+  autonomia?: string;
+  autonomia_pedido?: string;
+
+  // Campos preparados para homologação futura da Última Entrada Física
+  data_ultima_entrada_fisica?: string;
+  qtde_ultima_entrada_fisica?: number | string;
   
   // Metadados
   atualizado_em: string;
@@ -587,6 +618,20 @@ export interface ResumoImportacaoSPCOI007 {
   detalhes_invalidos?: Array<{ linha: number; motivo: string; dado?: string }>;
 }
 
+export interface PromotorVinculadoItem {
+  promotorId?: string;
+  promotorNome: string;
+  agenciaNome?: string;
+}
+
+export interface VinculoIndustriaItemIsv {
+  cnpj: string;
+  cnpj_formatado: string;
+  nome_industria: string;
+  razao_social?: string;
+  promotores: PromotorVinculadoItem[];
+}
+
 export interface ItemIsv {
   produto: ProdutoSMG;
   codigo_interno: string;
@@ -608,6 +653,7 @@ export interface ItemIsv {
   tem_promotor: boolean;
   multiplos_cnpjs: boolean;
   elegivel_ajuste: boolean;
+  vinculos_detalhados?: VinculoIndustriaItemIsv[];
 }
 
 export interface FiltrosIsv {
@@ -627,5 +673,99 @@ export interface FiltrosIsv {
   valorMax?: number;
   situacaoVinculo: 'TODOS' | 'COM_PROMOTOR' | 'SEM_PROMOTOR' | 'MULTIPLOS_CNPJS';
   ordenacao: 'MAIOR_VALOR' | 'MENOR_VALOR' | 'MAIS_DIAS_SEM_VENDA' | 'MAIOR_IDADE' | 'CODIGO';
+}
+
+/**
+ * Registro oficial importado da nova Planilha Operacional (36 colunas).
+ * O campo valor_disponivel é a autoridade máxima e inalterada do módulo.
+ */
+export interface RegistroPlanilhaIsv {
+  id: string; // codigo_interno ou `${codigo_interno}-${digito}`
+  codigo_original: string; // Col A original (ex: '85327' ou '00085327-177')
+  codigo_interno: string; // Col A raiz sem zeros à esquerda (ex: '85327')
+  digito: string; // Col B dígito preservado (ex: '177')
+  codigo_exibicao: string; // Formato de exibição (ex: '85327-177')
+  chave_normalizada?: string; // Formato normalizado (ex: '85327-177')
+  filial: string; // Filial 172
+  
+  // Col C & D
+  nome: string; // Nome oficial (Col C)
+  complemento: string; // Complemento (Col D)
+  
+  // Col E, F, G (Financeiro & Estoque)
+  valor_disponivel: number | null; // Col E (R$)
+  valor_disponivel_status: 'VALIDO' | 'ZERO' | 'AUSENTE' | 'INVALIDO';
+  estoque: number; // Quantidade de estoque numérica (Col F)
+  estoque_original_texto: string; // Texto original do ERP (Col F, ex: '285 CXA (24) + 14')
+  estoque_formatado_extenso: string; // Ex: '285 CAIXAS + 14 UNIDADES'
+  valor_indisponivel: number | null; // Col G (R$)
+  
+  // Col H, I, J (Situação de Estoque)
+  bloqueio: string; // Col H
+  transito_entrada: number | string; // Col I
+  estoque_indisponivel: number | string; // Col J
+  
+  // Col K, L, M, N, O (Giro, Vendas e Compras)
+  dias_sem_venda: number; // Col K
+  dias_sem_venda_original?: string;
+  ultima_venda_data: string; // Col L
+  ultima_venda_hora: string; // Col M
+  ultima_venda_formatada: string; // 'DD/MM/AAAA às HH:mm'
+  ultima_compra_data: string; // Col N
+  ultima_compra_hora: string; // Col O
+  ultima_compra_formatada: string; // 'DD/MM/AAAA às HH:mm'
+  
+  // Col P, Q, R, S, T, U (Classificação & Comercial)
+  classe_produto: string; // Col P
+  classe_produto_raiz: string; // Col Q
+  idade: number; // Col R
+  pedidos_pendentes: string; // Col S
+  venda_30_dias: number; // Col T
+  setor_save: string; // Col U
+  
+  // Col V, W, X, Y, Z (Validade & Setores)
+  validade_1: string; // Col V
+  validade_2: string; // Col W
+  cadeia: string; // Col X
+  setor: string; // Col Y
+  setor_herdado: string; // Col Z
+  
+  // Col AA, AB, AC, AD, AE, AF, AG, AH, AI, AJ (Cadastro & Operação)
+  fornecedor_planilha: string; // Col AA
+  gerenciado: string; // Col AB
+  ativo: string; // Col AC
+  residuo: string; // Col AD
+  peso_variavel: string; // Col AE
+  alteracao_preco_data: string; // Col AF
+  alteracao_preco_hora: string; // Col AG
+  alteracao_preco_formatada: string; // 'DD/MM/AAAA às HH:mm'
+  verificador: string; // Col AH
+  autonomia: string; // Col AI
+  autonomia_pedido: string; // Col AJ
+
+  linha_arquivo?: number;
+}
+
+export interface ResponsaveisMercadoria {
+  cnpjs: string[];
+  industrias: Array<{ cnpj: string; cnpj_formatado: string; nome: string }>;
+  promotores: string[];
+  agencias: string[];
+  tem_promotor: boolean;
+  multiplos_cnpjs: boolean;
+}
+
+export interface ResumoImportacaoIsv {
+  id: string;
+  data_hora: string;
+  nome_arquivo: string;
+  total_lidos: number;
+  total_processados: number;
+  total_com_valor: number;
+  total_sem_valor: number;
+  valor_total_disponivel: number;
+  total_cruzados_smgoi013: number;
+  total_cruzados_spcoi007: number;
+  avisos: string[];
 }
 

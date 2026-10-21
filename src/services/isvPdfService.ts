@@ -11,6 +11,7 @@ export interface IsvPdfOptions {
   exibirValorEstoque: boolean; // Padrão: true. Quando false, remove a coluna 11 e todos os totais em R$
   filialNome?: string;
   limiteQuantidade?: number | 'TODOS'; // Novo: Top 30, Top 50, Top 100 ou 'TODOS'
+  fonteOficial?: string; // Ex: "PLANILHA OPERACIONAL OFICIAL ISV"
 }
 
 /**
@@ -135,6 +136,9 @@ export function gerarRelatorioIsvA3Pdf(
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(15, 23, 42);
   let textoFiltro = options.tituloFiltro ? `FILTRO: ${options.tituloFiltro.toUpperCase()}` : 'FILTRO: GERAL DA LOJA';
+  if (options.fonteOficial) {
+    textoFiltro += ` • [FONTE: ${options.fonteOficial.toUpperCase()}]`;
+  }
   if (isTopRanking) {
     textoFiltro += ` • [TOP ${options.limiteQuantidade} MAIORES PRODUTOS]`;
   }
@@ -202,9 +206,29 @@ export function gerarRelatorioIsvA3Pdf(
   const cabecalhosFinais = exibirValor ? cabecalhosCompletos : cabecalhosSemValor;
 
   const linhasDados = itensProcessados.map((item) => {
-    const industriaTexto = item.industrias_nomes.length > 0 ? item.industrias_nomes.join(' • ') : '-';
-    const promotorTexto = item.promotores_nomes.length > 0 ? item.promotores_nomes.join(' • ') : '-';
-    const agenciaTexto = item.agencias_nomes.length > 0 ? item.agencias_nomes.join(' • ') : '-';
+    // 8. INDÚSTRIA: Formatação compacta no PDF A3 para evitar linhas gigantes
+    let industriaTexto = 'Indústria não vinculada';
+    if (item.industrias_nomes.length === 1) {
+      industriaTexto = item.industrias_nomes[0];
+    } else if (item.industrias_nomes.length > 1) {
+      industriaTexto = `Múltiplas indústrias (${item.industrias_nomes.length})`;
+    }
+
+    // 9. PROMOTOR: Formatação compacta
+    let promotorTexto = 'Sem promotor';
+    if (item.promotores_nomes.length === 1) {
+      promotorTexto = item.promotores_nomes[0];
+    } else if (item.promotores_nomes.length > 1) {
+      promotorTexto = `Múltiplos (${item.promotores_nomes.length})`;
+    }
+
+    // 10. AGÊNCIA: Formatação compacta
+    let agenciaTexto = '-';
+    if (item.agencias_nomes.length === 1) {
+      agenciaTexto = item.agencias_nomes[0];
+    } else if (item.agencias_nomes.length > 1) {
+      agenciaTexto = `Múltiplas (${item.agencias_nomes.length})`;
+    }
 
     const linhaBase = [
       item.codigo_interno,

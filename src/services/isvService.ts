@@ -5,18 +5,232 @@ import {
   ItemIsv,
   ProdutoSMG,
   Promotor,
+  PromotorVinculadoItem,
+  RegistroPlanilhaIsv,
+  ResponsaveisMercadoria,
+  ResumoImportacaoIsv,
   ResumoImportacaoSPCOI007,
   SolicitacaoAjusteIsv,
+  VinculoIndustriaItemIsv,
   VinculoPromotorIndustria,
 } from '../types';
 import { calcularPosicaoEstoque, isProdutoPesavel, parseEmbalagem } from './codeParser';
-import { dbGetAll, dbPut, dbPutAll, STORES } from './db';
+import { dbClear, dbGetAll, dbPut, dbPutAll, STORES } from './db';
 import { formatarMoedaBR } from './deviceId';
+import { productRepository } from './productRepository';
 import { promotorService } from './promotorService';
 import { formatarCnpj, normalizarCnpj } from './spcoi007Parser';
 import { getProdutos } from './storage';
 
 type IsvChangeListener = () => void;
+
+export interface ParametrosCalculoFinanceiro {
+  estoqueEmb1?: number | null;
+  estoqueEmb9?: number | null;
+  embalagem?: string | null;
+  fatorEmbalagem?: number | null;
+  tipoUnidade?: string | null;
+  custoMedio?: number | null;
+  unidadeReferenciaCusto?: 'CAIXA' | 'UNIDADE' | 'KG' | 'DESCONHECIDA' | string | null;
+  estoqueConvertido?: number | null;
+  valorEstoquePlanilha?: number | null;
+  vendasPreco?: number | null;
+}
+
+export interface ResultadoCalculoFinanceiro {
+  quantidadeFinanceira: number;
+  unidadeFinanceira: string;
+  custoUnitarioEquivalente: number | null;
+  valorTotalEstoque: number | null;
+  situacaoCalculo: 'CALCULADO' | 'OFICIAL_PLANILHA' | 'INDISPONIVEL' | 'ESTOQUE_ZERO';
+  motivoIndisponibilidade?: string;
+  isCustoPorCaixa: boolean;
+  fatorUtilizado: number;
+}
+
+/**
+ * FUNÇÃO CENTRALIZADA E OFICIAL DE CÁLCULO FINANCEIRO DO ISV:
+ * Reutilizada rigorosamente pela interface, ordenação global e relatórios PDF A3.
+ *
+ * REGRA FUNDAMENTAL (REQUISITO 3 e 8):
+ * - Se Custo Médio corresponder à embalagem completa (Caixa/Fardo):
+ *     CUSTO UNITÁRIO = CUSTO MÉDIO DA EMBALAGEM ÷ QUANTIDADE DE UNIDADES DA EMBALAGEM
+ *     VALOR DO ESTOQUE = ESTOQUE TOTAL EM UNIDADES × CUSTO UNITÁRIO
+ *     (Não arredondar o custo unitário antes da multiplicação final)
+ * - Se Custo Médio já for unitário:
+ *     VALOR DO ESTOQUE = ESTOQUE TOTAL EM UNIDADES × CUSTO MÉDIO UNITÁRIO
+ * - Se Produto for Pesável (KG e G):
+ *     VALOR DO ESTOQUE = ESTOQUE EM KG × CUSTO MÉDIO POR KG
+ * - Se Valor do Estoque já veio pré-calculado pelo ERP da filial (coluna oficial da planilha):
+ *     Utiliza com prioridade absoluta o valor oficial do ERP.
+ */
+export function calcularValorEstoqueCentralizado(params: ParametrosCalculoFinanceiro): ResultadoCalculoFinanceiro {
+  const emb = params.embalagem || '';
+  const isPesavel = isProdutoPesavel(emb);
+  const embData = parseEmbalagem(emb);
+  const fator = params.fatorEmbalagem && params.fatorEmbalagem > 1
+    ? params.fatorEmbalagem
+    : (embData.fator && embData.fator > 1 ? embData.fator : 1);
+
+  // 1. PRIORIDADE ABSOLUTA: Valor do estoque pré-calculado oficialmente pelo ERP SMG da filial
+  if (
+    params.valorEstoquePlanilha !== undefined &&
+    params.valorEstoquePlanilha !== null &&
+    !isNaN(params.valorEstoquePlanilha) &&
+    params.valorEstoquePlanilha > 0
+  ) {
+    const valOficial = Number(params.valorEstoquePlanilha.toFixed(2));
+    const qtdTotal = isPesavel
+      ? (params.estoqueConvertido ?? (Number(params.estoqueEmb1 || 0) + Number(params.estoqueEmb9 || 0) / 1000))
+      : (params.estoqueConvertido ?? (Number(params.estoqueEmb1 || 0) * fator + Number(params.estoqueEmb9 || 0)));
+
+    return {
+      quantidadeFinanceira: qtdTotal,
+      unidadeFinanceira: isPesavel ? 'KG' : 'UN',
+      custoUnitarioEquivalente: qtdTotal > 0 ? valOficial / qtdTotal : (params.custoMedio ?? null),
+      valorTotalEstoque: valOficial,
+      situacaoCalculo: 'OFICIAL_PLANILHA',
+      isCustoPorCaixa: false,
+      fatorUtilizado: fator,
+    };
+  }
+
+  // 2. Custo Médio obrigatório: se ausente ou <= 0, retorna INDISPONÍVEL
+  if (
+    params.custoMedio === undefined ||
+    params.custoMedio === null ||
+    isNaN(params.custoMedio) ||
+    params.custoMedio <= 0
+  ) {
+    return {
+      quantidadeFinanceira: 0,
+      unidadeFinanceira: isPesavel ? 'KG' : 'UN',
+      custoUnitarioEquivalente: null,
+      valorTotalEstoque: null,
+      situacaoCalculo: 'INDISPONIVEL',
+      motivoIndisponibilidade: 'Custo Médio ausente ou zerado na SMGOI013',
+      isCustoPorCaixa: false,
+      fatorUtilizado: fator,
+    };
+  }
+
+  const custo = Number(params.custoMedio);
+
+  // 3. PRODUTOS PESÁVEIS (KG e G)
+  if (isPesavel) {
+    const qtdKg = params.estoqueConvertido !== undefined && params.estoqueConvertido !== null && !isNaN(params.estoqueConvertido)
+      ? Number(params.estoqueConvertido)
+      : Number(params.estoqueEmb1 || 0) + (Number(params.estoqueEmb9 || 0) / 1000);
+
+    if (qtdKg <= 0) {
+      return {
+        quantidadeFinanceira: 0,
+        unidadeFinanceira: 'KG',
+        custoUnitarioEquivalente: custo,
+        valorTotalEstoque: 0,
+        situacaoCalculo: 'ESTOQUE_ZERO',
+        isCustoPorCaixa: false,
+        fatorUtilizado: 1,
+      };
+    }
+
+    const valorTotal = Number((qtdKg * custo).toFixed(2));
+    return {
+      quantidadeFinanceira: qtdKg,
+      unidadeFinanceira: 'KG',
+      custoUnitarioEquivalente: custo,
+      valorTotalEstoque: valorTotal,
+      situacaoCalculo: 'CALCULADO',
+      isCustoPorCaixa: false,
+      fatorUtilizado: 1,
+    };
+  }
+
+  // 4. PRODUTOS CONTROLADOS POR CAIXA / UNIDADE
+  let estTotal = params.estoqueConvertido !== undefined && params.estoqueConvertido !== null && !isNaN(params.estoqueConvertido)
+    ? Number(params.estoqueConvertido)
+    : (Number(params.estoqueEmb1 || 0) * fator) + Number(params.estoqueEmb9 || 0);
+
+  if (estTotal <= 0 && ((params.estoqueEmb1 || 0) > 0 || (params.estoqueEmb9 || 0) > 0)) {
+    const pos = calcularPosicaoEstoque(
+      params.estoqueEmb1,
+      params.estoqueEmb9,
+      params.embalagem,
+      fator
+    );
+    estTotal = pos.estoqueTotal;
+  }
+
+  if (estTotal <= 0) {
+    return {
+      quantidadeFinanceira: 0,
+      unidadeFinanceira: 'UN',
+      custoUnitarioEquivalente: custo,
+      valorTotalEstoque: 0,
+      situacaoCalculo: 'ESTOQUE_ZERO',
+      isCustoPorCaixa: false,
+      fatorUtilizado: fator,
+    };
+  }
+
+  // Determinar com precisão cirúrgica se o custo médio refere-se à CAIXA ou à UNIDADE individual
+  let isCustoPorCaixa = false;
+
+  const refCusto = (params.unidadeReferenciaCusto || '').toUpperCase();
+  if (refCusto === 'CAIXA' || refCusto === 'CX' || refCusto === 'EMBALAGEM') {
+    isCustoPorCaixa = fator > 1;
+  } else if (refCusto === 'UNIDADE' || refCusto === 'UN') {
+    isCustoPorCaixa = false;
+  } else if (fator > 1) {
+    if (params.vendasPreco !== undefined && params.vendasPreco !== null && params.vendasPreco > 0) {
+      if (custo > params.vendasPreco * 1.5) {
+        isCustoPorCaixa = true;
+      } else {
+        isCustoPorCaixa = false;
+      }
+    } else {
+      const unidadeCadastral = (params.tipoUnidade || embData.tipo || '').toUpperCase();
+      if (
+        unidadeCadastral.includes('CX') ||
+        unidadeCadastral.includes('FD') ||
+        unidadeCadastral.includes('PCT')
+      ) {
+        isCustoPorCaixa = true;
+      }
+    }
+  }
+
+  if (isCustoPorCaixa && fator > 1) {
+    // REGRA OFICIAL (REQUISITO 3):
+    // CUSTO UNITÁRIO = CUSTO MÉDIO DA EMBALAGEM ÷ QUANTIDADE DE UNIDADES DA EMBALAGEM
+    // VALOR DO ESTOQUE = ESTOQUE TOTAL EM UNIDADES × CUSTO UNITÁRIO
+    // (Não arredondar o custo unitário antes da multiplicação final)
+    const custoUnitario = custo / fator;
+    const valorCalculado = Number((estTotal * custoUnitario).toFixed(2));
+
+    return {
+      quantidadeFinanceira: estTotal,
+      unidadeFinanceira: 'UN',
+      custoUnitarioEquivalente: custoUnitario,
+      valorTotalEstoque: valorCalculado,
+      situacaoCalculo: 'CALCULADO',
+      isCustoPorCaixa: true,
+      fatorUtilizado: fator,
+    };
+  }
+
+  // Custo já expresso por unidade individual:
+  const valorCalculado = Number((estTotal * custo).toFixed(2));
+  return {
+    quantidadeFinanceira: estTotal,
+    unidadeFinanceira: 'UN',
+    custoUnitarioEquivalente: custo,
+    valorTotalEstoque: valorCalculado,
+    situacaoCalculo: 'CALCULADO',
+    isCustoPorCaixa: false,
+    fatorUtilizado: fator,
+  };
+}
 
 class IsvService {
   private _fornecedores: FornecedorSPCOI007[] = [];
@@ -24,6 +238,8 @@ class IsvService {
   private _vinculos: VinculoPromotorIndustria[] = [];
   private _solicitacoesAjuste: SolicitacaoAjusteIsv[] = [];
   private _historicoSpcoi: ResumoImportacaoSPCOI007[] = [];
+  private _registrosIsvOperacional: RegistroPlanilhaIsv[] = [];
+  private _historicoIsv: ResumoImportacaoIsv[] = [];
   private _listeners = new Set<IsvChangeListener>();
   private _isInitialized = false;
 
@@ -31,12 +247,14 @@ class IsvService {
     if (this._isInitialized) return;
 
     try {
-      const [fornec, indus, vincs, ajus, hist] = await Promise.all([
+      const [fornec, indus, vincs, ajus, hist, regIsv, histIsv] = await Promise.all([
         dbGetAll<FornecedorSPCOI007>(STORES.SPCOI007_FORNECEDORES),
         dbGetAll<Industria>(STORES.INDUSTRIAS),
         dbGetAll<VinculoPromotorIndustria>(STORES.VINCULOS_PROMOTOR_INDUSTRIA),
         dbGetAll<SolicitacaoAjusteIsv>(STORES.ISV_SOLICITACOES_AJUSTE),
         dbGetAll<ResumoImportacaoSPCOI007>(STORES.HISTORICO_IMPORTACOES_SPCOI007),
+        dbGetAll<RegistroPlanilhaIsv>(STORES.ISV_REGISTROS_OPERACIONAIS),
+        dbGetAll<ResumoImportacaoIsv>(STORES.HISTORICO_IMPORTACOES_ISV),
       ]);
 
       this._fornecedores = fornec || [];
@@ -44,6 +262,8 @@ class IsvService {
       this._vinculos = vincs || [];
       this._solicitacoesAjuste = ajus || [];
       this._historicoSpcoi = hist || [];
+      this._registrosIsvOperacional = regIsv || [];
+      this._historicoIsv = histIsv || [];
 
       // Se a base de indústrias estiver vazia, inicializar com semente de teste operacional
       if (this._industrias.length === 0 && this._fornecedores.length === 0) {
@@ -229,6 +449,127 @@ class IsvService {
     ]);
 
     this._notify();
+  }
+
+  // ==========================================
+  // NOVA PLANILHA OPERACIONAL DO ISV (FONTE OFICIAL)
+  // ==========================================
+
+  public async salvarImportacaoPlanilhaIsv(
+    registros: RegistroPlanilhaIsv[],
+    resumo: ResumoImportacaoIsv
+  ): Promise<void> {
+    this._registrosIsvOperacional = registros;
+    this._historicoIsv = [resumo, ...this._historicoIsv.slice(0, 19)];
+
+    await Promise.all([
+      dbPutAll(STORES.ISV_REGISTROS_OPERACIONAIS, registros),
+      dbPutAll(STORES.HISTORICO_IMPORTACOES_ISV, this._historicoIsv),
+    ]);
+
+    this._notify();
+  }
+
+  public async limparPlanilhaIsv(): Promise<void> {
+    this._registrosIsvOperacional = [];
+    await dbClear(STORES.ISV_REGISTROS_OPERACIONAIS);
+    this._notify();
+  }
+
+  public getRegistrosIsvOperacional(): RegistroPlanilhaIsv[] {
+    return [...this._registrosIsvOperacional];
+  }
+
+  public getHistoricoIsv(): ResumoImportacaoIsv[] {
+    return [...this._historicoIsv];
+  }
+
+  public getResumoIsvAtual(): ResumoImportacaoIsv | null {
+    return this._historicoIsv.length > 0 ? this._historicoIsv[0] : null;
+  }
+
+  public temPlanilhaIsv(): boolean {
+    return this._registrosIsvOperacional.length > 0;
+  }
+
+  /**
+   * Obtém o registro operacional completo (36 colunas) correspondente a um código interno / dígito.
+   */
+  public getRegistroOperacional(codigoInterno: string, digito?: string): RegistroPlanilhaIsv | undefined {
+    if (!codigoInterno) return undefined;
+    const codClean = codigoInterno.toString().trim().replace(/^0+/, '');
+    const digClean = digito !== undefined ? digito.toString().trim().replace(/^0+/, '') : undefined;
+
+    // 1. Busca exata por código interno raiz e dígito
+    if (digClean !== undefined && digClean !== '') {
+      const match = this._registrosIsvOperacional.find((r) => {
+        const rCod = (r.codigo_interno || '').toString().trim().replace(/^0+/, '');
+        const rDig = (r.digito || '').toString().trim().replace(/^0+/, '');
+        return rCod === codClean && rDig === digClean;
+      });
+      if (match) return match;
+    }
+
+    // 2. Busca por chave_normalizada
+    const chave = digClean ? `${codClean}-${digClean}` : codClean;
+    const byKey = this._registrosIsvOperacional.find((r) => {
+      const rKey = (r.chave_normalizada || `${r.codigo_interno}-${r.digito}`).replace(/^0+/, '');
+      return rKey === chave || (r.codigo_interno && r.codigo_interno.replace(/^0+/, '') === codClean);
+    });
+    if (byKey) return byKey;
+
+    // 3. Fallback: código raiz
+    return this._registrosIsvOperacional.find((r) => {
+      const rCod = (r.codigo_interno || '').toString().trim().replace(/^0+/, '');
+      return rCod === codClean;
+    });
+  }
+
+  /**
+   * Obtém os responsáveis (indústrias, CNPJs, promotores e agências) vinculados via SPCOI007.
+   */
+  public getResponsaveisPorCodigoInterno(codigoInterno: string): ResponsaveisMercadoria {
+    if (!codigoInterno) {
+      return {
+        cnpjs: [],
+        industrias: [],
+        promotores: [],
+        agencias: [],
+        tem_promotor: false,
+        multiplos_cnpjs: false,
+      };
+    }
+
+    const codNorm = codigoInterno.toString().trim().replace(/^0+/, '');
+
+    const fornecedores = this._fornecedores.filter((f) => {
+      const fCod = (f.codigo_interno || '').toString().trim().replace(/^0+/, '');
+      return fCod === codNorm;
+    });
+
+    const cnpjs = Array.from(new Set(fornecedores.map((f) => f.cnpj)));
+    const industrias = cnpjs.map((cnpj) => {
+      const ind = this._industrias.find((i) => i.cnpj === cnpj);
+      const nome = ind ? (ind.nome_exibicao || ind.razao_social) : cnpj;
+      return {
+        cnpj,
+        cnpj_formatado: formatarCnpj(cnpj),
+        nome,
+      };
+    });
+
+    const vincs = this._vinculos.filter((v) => cnpjs.includes(v.cnpj));
+    const promotores = Array.from(new Set(vincs.map((v) => v.promotorNome)));
+    const agencias = Array.from(new Set(vincs.map((v) => v.agenciaNome).filter(Boolean)));
+
+    return {
+      cnpjs,
+      industrias,
+      promotores,
+      agencias,
+      tem_promotor: promotores.length > 0,
+      multiplos_cnpjs: cnpjs.length > 1,
+    };
   }
 
   // ==========================================
@@ -419,95 +760,86 @@ class IsvService {
    * Respeita: Se custo médio ausente/inválido, retorna null (não inventa R$ 0,00).
    */
   public calcularValorEstoque(produto: ProdutoSMG): number | null {
-    // 1. PRIORIDADE ABSOLUTA: Valor do estoque pré-calculado oficialmente pelo ERP SMG da filial
-    if (
-      produto.valor_estoque_planilha !== undefined &&
-      produto.valor_estoque_planilha !== null &&
-      !isNaN(produto.valor_estoque_planilha) &&
-      produto.valor_estoque_planilha > 0
-    ) {
-      return Number(produto.valor_estoque_planilha.toFixed(2));
+    const res = calcularValorEstoqueCentralizado({
+      estoqueEmb1: produto.estoque_emb1,
+      estoqueEmb9: produto.estoque_emb9,
+      embalagem: produto.embalagem,
+      fatorEmbalagem: produto.fator_embalagem,
+      tipoUnidade: produto.unidade_medida,
+      custoMedio: produto.custo_medio,
+      estoqueConvertido: produto.estoque_total,
+      valorEstoquePlanilha: produto.valor_estoque_planilha,
+      vendasPreco: produto.vendas_preco,
+    });
+    return res.valorTotalEstoque;
+  }
+
+  public calcularPosicaoFinanceira(produto: ProdutoSMG): ResultadoCalculoFinanceiro {
+    return calcularValorEstoqueCentralizado({
+      estoqueEmb1: produto.estoque_emb1,
+      estoqueEmb9: produto.estoque_emb9,
+      embalagem: produto.embalagem,
+      fatorEmbalagem: produto.fator_embalagem,
+      tipoUnidade: produto.unidade_medida,
+      custoMedio: produto.custo_medio,
+      estoqueConvertido: produto.estoque_total,
+      valorEstoquePlanilha: produto.valor_estoque_planilha,
+      vendasPreco: produto.vendas_preco,
+    });
+  }
+
+  /**
+   * Monta a estrutura detalhada de vínculos (Indústria ↔ CNPJ ↔ Promotor ↔ Agência),
+   * preservando a correspondência exata de cada vínculo sem misturar promotores entre indústrias.
+   */
+  private _montarVinculosDetalhados(
+    cnpjs: string[],
+    forns: FornecedorSPCOI007[],
+    industriasMap: Map<string, Industria>,
+    vinculosPorCnpj: Map<string, VinculoPromotorIndustria[]>,
+    fornecedorPlanilha?: string
+  ): VinculoIndustriaItemIsv[] {
+    const list: VinculoIndustriaItemIsv[] = [];
+
+    cnpjs.forEach((cnpj) => {
+      const ind = industriasMap.get(cnpj);
+      const fornec = forns.find((f) => f.cnpj === cnpj);
+      const nome = ind?.nome_exibicao || ind?.razao_social || fornec?.razao_social || cnpj;
+      const vincs = vinculosPorCnpj.get(cnpj) || [];
+
+      const promotoresUnicos: PromotorVinculadoItem[] = [];
+      const chavesPromotores = new Set<string>();
+      vincs.forEach((v) => {
+        const chave = `${v.promotorNome}__${v.agenciaNome || ''}`;
+        if (!chavesPromotores.has(chave)) {
+          chavesPromotores.add(chave);
+          promotoresUnicos.push({
+            promotorId: v.promotorId,
+            promotorNome: v.promotorNome,
+            agenciaNome: v.agenciaNome,
+          });
+        }
+      });
+
+      list.push({
+        cnpj,
+        cnpj_formatado: formatarCnpj(cnpj),
+        nome_industria: nome,
+        razao_social: ind?.razao_social || fornec?.razao_social,
+        promotores: promotoresUnicos,
+      });
+    });
+
+    if (list.length === 0 && fornecedorPlanilha && fornecedorPlanilha.trim()) {
+      list.push({
+        cnpj: '',
+        cnpj_formatado: 'Não informado',
+        nome_industria: fornecedorPlanilha.trim(),
+        promotores: [],
+      });
     }
 
-    // 2. Cálculo estrito a partir do Custo Médio e Estoque na Mesma Unidade
-    if (
-      produto.custo_medio !== undefined &&
-      produto.custo_medio !== null &&
-      !isNaN(produto.custo_medio)
-    ) {
-      const custo = Number(produto.custo_medio);
-      if (custo <= 0) return null;
-
-      let est = produto.estoque_total ?? 0;
-      // Fallback de segurança: se estoque_total estiver zerado ou ausente mas houver emb1 ou emb9
-      if (est <= 0 && ((produto.estoque_emb1 || 0) > 0 || (produto.estoque_emb9 || 0) > 0)) {
-        const pos = calcularPosicaoEstoque(
-          produto.estoque_emb1,
-          produto.estoque_emb9,
-          produto.embalagem,
-          produto.fator_embalagem
-        );
-        est = pos.estoqueTotal;
-      }
-      if (est <= 0) return 0;
-
-      // REGRA FUNDAMENTAL (REQUISITO 3):
-      // VALOR FINANCEIRO = QUANTIDADE NA UNIDADE DO CUSTO × CUSTO MÉDIO NESSA MESMA UNIDADE
-      const emb = produto.embalagem || '';
-      const isPesavel = isProdutoPesavel(emb);
-
-      // A) PRODUTOS PESÁVEIS (KG): estoque_total já está em KG e custo médio é R$/KG
-      if (isPesavel) {
-        return Number((est * custo).toFixed(2));
-      }
-
-      const embData = parseEmbalagem(emb);
-      const fator =
-        produto.fator_embalagem && produto.fator_embalagem > 1
-          ? produto.fator_embalagem
-          : embData.fator && embData.fator > 1
-          ? embData.fator
-          : 1;
-
-      // B) PRODUTOS UNITÁRIOS COM FATOR = 1 (UN): estoque_total em UN e custo em R$/UN
-      if (fator <= 1) {
-        return Number((est * custo).toFixed(2));
-      }
-
-      // C) PRODUTOS CONTROLADOS POR EMBALAGEM MULTIPLA (CX, FD, PCT):
-      // Verificar se o custo médio refere-se à CAIXA ou à UNIDADE individual
-      const unidadeMedida = (produto.unidade_medida || embData.tipo || '').toUpperCase();
-      let isCustoPorCaixa = false;
-      if (produto.vendas_preco !== undefined && produto.vendas_preco > 0) {
-        // Se houver preço de venda unitário: custo da caixa é tipicamente muito superior ao preço unitário
-        if (custo > produto.vendas_preco * 1.5) {
-          isCustoPorCaixa = true;
-        } else {
-          isCustoPorCaixa = false;
-        }
-      } else {
-        // Sem preço de venda: baseia-se na unidade operacional do cadastro
-        const unidadeMedida = (produto.unidade_medida || embData.tipo || '').toUpperCase();
-        if (
-          unidadeMedida.includes('CX') ||
-          unidadeMedida.includes('FD') ||
-          unidadeMedida.includes('PCT')
-        ) {
-          isCustoPorCaixa = true;
-        }
-      }
-
-      if (isCustoPorCaixa) {
-        // Quantidade equivalente em Caixas:
-        const caixasEquivalentes = est / fator;
-        return Number((caixasEquivalentes * custo).toFixed(2));
-      }
-
-      // Custo já expresso por unidade individual:
-      return Number((est * custo).toFixed(2));
-    }
-
-    return null;
+    return list;
   }
 
   /**
@@ -540,6 +872,126 @@ class IsvService {
       vinculosPorCnpj.get(v.cnpj)!.push(v);
     });
 
+    // Mapa rápido de produtos da SMGOI013
+    const smgPorCodigo = new Map<string, ProdutoSMG>();
+    prods.forEach((p) => {
+      smgPorCodigo.set(p.codigo_interno, p);
+    });
+
+    // =========================================================================
+    // CASO 1: NOVA PLANILHA OPERACIONAL DO ISV IMPORTADA (FONTE OFICIAL MÁXIMA)
+    // =========================================================================
+    if (this._registrosIsvOperacional.length > 0) {
+      return this._registrosIsvOperacional.map((reg) => {
+        const p = smgPorCodigo.get(reg.codigo_interno);
+
+        const forns = fornecedoresPorCodigo.get(reg.codigo_interno) || [];
+        const cnpjs = Array.from(new Set(forns.map((f) => f.cnpj)));
+
+        const industriasNomes = cnpjs.map((cnpj) => {
+          const ind = industriasMap.get(cnpj);
+          return ind?.nome_exibicao || ind?.razao_social || cnpj;
+        });
+
+        const promotoresNomesSet = new Set<string>();
+        const agenciasNomesSet = new Set<string>();
+
+        cnpjs.forEach((cnpj) => {
+          const vincs = vinculosPorCnpj.get(cnpj) || [];
+          vincs.forEach((v) => {
+            promotoresNomesSet.add(v.promotorNome);
+            if (v.agenciaNome) agenciasNomesSet.add(v.agenciaNome);
+          });
+        });
+
+        const promotoresNomes = Array.from(promotoresNomesSet);
+        const agenciasNomes = Array.from(agenciasNomesSet);
+
+        // Vínculos detalhados preservando qual promotor/agência pertence a qual CNPJ/indústria
+        const vinculosDetalhados = this._montarVinculosDetalhados(
+          cnpjs,
+          forns,
+          industriasMap,
+          vinculosPorCnpj,
+          reg.fornecedor_planilha
+        );
+
+        // Enriquecer produto preservando dados completos da SMGOI013
+        const prodItem: ProdutoSMG = p
+          ? {
+              ...p,
+              estoque_total: reg.estoque,
+              dias_sem_venda: reg.dias_sem_venda,
+              idade: reg.idade,
+              valor_estoque_planilha: reg.valor_disponivel !== null ? reg.valor_disponivel : undefined,
+            }
+          : {
+              id: reg.codigo_interno,
+              codigo_original: reg.codigo_original,
+              codigo_interno: reg.codigo_interno,
+              digito: reg.digito,
+              codigo_exibicao: reg.codigo_exibicao,
+              descricao: reg.nome,
+              embalagem: reg.complemento || 'UN',
+              fator_embalagem: 1,
+              unidade_medida: 'UN',
+              estoque_emb1: reg.estoque,
+              estoque_emb9: 0,
+              estoque_total: reg.estoque,
+              vendas_qtde_30d: 0,
+              dias_sem_venda: reg.dias_sem_venda,
+              idade: reg.idade,
+              valor_estoque_planilha: reg.valor_disponivel !== null ? reg.valor_disponivel : undefined,
+              eans: [],
+              atualizado_em: new Date().toISOString(),
+            };
+
+        const estoqueFormatado = this.formatarEstoqueIsv(prodItem);
+
+        // REGRA FINANCEIRA OFICIAL:
+        // O valor do estoque no ISV provém estritamente de reg.valor_disponivel da nova planilha.
+        // Não é multiplicado pelo estoque, não é dividido pelo fator e não é recalculado com custo médio.
+        const valorEstoque = reg.valor_disponivel;
+        const valorEstoqueFormatado =
+          valorEstoque !== null ? formatarMoedaBR(valorEstoque) : 'VALOR INDISPONÍVEL';
+
+        const multiplosCnpjs = cnpjs.length > 1;
+        const temPromotor = promotoresNomes.length > 0;
+
+        const elegivelAjuste =
+          reg.dias_sem_venda > 10 &&
+          reg.estoque > 0 &&
+          (valorEstoque === null || valorEstoque < 250);
+
+        return {
+          produto: prodItem,
+          codigo_interno: reg.codigo_interno,
+          digito: reg.digito,
+          codigo_exibicao: reg.codigo_exibicao,
+          descricao: reg.nome,
+          embalagem: prodItem.embalagem || reg.complemento || 'UN',
+          estoque_total: reg.estoque,
+          estoque_formatado: estoqueFormatado,
+          dias_sem_venda: reg.dias_sem_venda,
+          idade: reg.idade,
+          custo_medio: p?.custo_medio !== undefined ? p.custo_medio : null,
+          valor_estoque: valorEstoque,
+          valor_estoque_formatado: valorEstoqueFormatado,
+          cnpjs,
+          industrias_nomes: industriasNomes,
+          promotores_nomes: promotoresNomes,
+          agencias_nomes: agenciasNomes,
+          tem_promotor: temPromotor,
+          multiplos_cnpjs: multiplosCnpjs,
+          elegivel_ajuste: elegivelAjuste,
+          vinculos_detalhados: vinculosDetalhados,
+        };
+      });
+    }
+
+    // =========================================================================
+    // CASO 2: SEM NOVA PLANILHA OPERACIONAL (FALLBACK PARA BASE SMGOI013)
+    // =========================================================================
     return prods.map((p) => {
       const forns = fornecedoresPorCodigo.get(p.codigo_interno) || [];
       const cnpjs = Array.from(new Set(forns.map((f) => f.cnpj)));
@@ -562,6 +1014,13 @@ class IsvService {
 
       const promotoresNomes = Array.from(promotoresNomesSet);
       const agenciasNomes = Array.from(agenciasNomesSet);
+
+      const vinculosDetalhados = this._montarVinculosDetalhados(
+        cnpjs,
+        forns,
+        industriasMap,
+        vinculosPorCnpj
+      );
 
       const valorEstoque = this.calcularValorEstoque(p);
       const estoqueFormatado = this.formatarEstoqueIsv(p);
@@ -601,6 +1060,7 @@ class IsvService {
         tem_promotor: temPromotor,
         multiplos_cnpjs: multiplosCnpjs,
         elegivel_ajuste: elegivelAjuste,
+        vinculos_detalhados: vinculosDetalhados,
       };
     });
   }

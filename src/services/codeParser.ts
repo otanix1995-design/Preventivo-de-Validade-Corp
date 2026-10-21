@@ -314,12 +314,43 @@ export function parseEmbalagem(rawEmbalagem: string | undefined | null): Embalag
   }
 
   // 2. PRODUTO EMBALADO (CAIXA / FARDO / PACOTE / UNIDADE)
-  // Pattern 1: "CXA 1 X 6 X 1KG" or "CX 1 X 12" or "FD 1 X 24 X 500G" or "1 X 6"
-  const match1X = clean.match(/(?:([A-Z]+)\s+)?1\s*X\s*(\d+)(?:\s*X\s*([0-9A-Z.,]+))?/i);
-  if (match1X) {
-    const tipo = match1X[1] || 'CX';
-    const fator = parseInt(match1X[2], 10);
-    const peso_ou_vol = match1X[3] || undefined;
+  // Extrair tipo de embalagem no início (CXA, CX, FD, PCT, PAC, FARDO, CAIXA, UND, UN, BD, LT, etc.)
+  const tipoMatch = clean.match(/^([A-Z]+)\b/);
+  const tipoPrefix = tipoMatch ? tipoMatch[1] : '';
+  const tipo = tipoPrefix || 'CX';
+  const resto = tipoPrefix ? clean.slice(tipoPrefix.length).trim() : clean;
+
+  // Analisar segmentos separados por 'X' (Ex: "24 X 12 X 30G", "1 X 6 X 2L", "1 X 12 X 500ML", "1 X 1 X 350ML")
+  if (resto.includes('X')) {
+    const partes = resto.split('X').map((p) => p.trim()).filter(Boolean);
+    const fatoresNumericos: number[] = [];
+    let peso_ou_vol: string | undefined = undefined;
+
+    for (const parte of partes) {
+      // Se contiver unidade de peso, volume ou apresentação comercial (NÃO multiplicar como quantidade de unidades)
+      // Exemplos: 30G, 500ML, 2L, 1KG, 350ML, 70G, etc.
+      const matchPesoVol = parte.match(/^(\d+(?:[.,]\d+)?)\s*(G|GR|GRAMAS?|KG|KGS|KILOS?|QUILOS?|ML|L|LT|LTS|LITROS?|CM|MM|M|OZ)$/i);
+      if (matchPesoVol) {
+        peso_ou_vol = parte;
+      } else if (/^\d+$/.test(parte)) {
+        const num = parseInt(parte, 10);
+        if (num > 0) {
+          fatoresNumericos.push(num);
+        }
+      } else {
+        peso_ou_vol = parte;
+      }
+    }
+
+    // Unidades por embalagem completa = produto dos fatores inteiros de quantidade
+    // Exemplo A: [24, 12] -> 24 * 12 = 288 (M&M TUBE)
+    // Exemplo B: [1, 6] -> 1 * 6 = 6 (SUKITA 2L)
+    // Exemplo C: [1, 12] -> 1 * 12 = 12 (AZEITE 500ML)
+    // Exemplo D: [1, 1] -> 1 * 1 = 1 (LATA 350ML)
+    let fator = 1;
+    if (fatoresNumericos.length > 0) {
+      fator = fatoresNumericos.reduce((acc, curr) => acc * curr, 1);
+    }
 
     if (fator > 1) {
       const tipoNome = tipo.includes('CX') || tipo.includes('CAIXA') ? 'caixa' :
@@ -360,8 +391,8 @@ export function parseEmbalagem(rawEmbalagem: string | undefined | null): Embalag
     }
   }
 
-  // Pattern 2: Direct multiplier like "6UN", "12 UN", "CX 24"
-  const matchDirect = clean.match(/(\d+)\s*(?:UN|UNIDADES|UNID)/i);
+  // Pattern 2: Multiplicador direto como "6UN", "12 UN", "CX 24", "FD 12"
+  const matchDirect = clean.match(/(\d+)\s*(?:UN|UNIDADES|UNID)/i) || clean.match(/(?:CXA|CX|FD|PCT)\s*(\d+)/i);
   if (matchDirect) {
     const fator = parseInt(matchDirect[1], 10);
     if (fator > 1) {

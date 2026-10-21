@@ -337,13 +337,14 @@ export async function processarSMGOI013(
   if (custoFinalKey) headerMap['custo_medio'] = custoFinalKey;
 
   // 3. Valor do Estoque a Custo direto da Planilha (se presente na SMGOI013)
-  // Coluna oficial pré-calculada pelo ERP (ex: VALOR CUSTO, VALOR ESTOQUE, VLR CUSTO EST)
+  // 3. Valor do Estoque a Custo direto da Planilha (se presente na SMGOI013)
+  // Coluna oficial pré-calculada pelo ERP (ex: VALOR CUSTO, VALOR ESTOQUE, VLR CUSTO EST, VALOR TOTAL)
   const valorEstoquePlanilhaKey = normalizedList.find((item) =>
     item.key !== custoFinalKey &&
     !item.norm.includes('VENDA') &&
     !item.norm.includes('ENTRADA') &&
     (
-      /^(VALORESTOQUE|VLRESTOQUE|VALORDOESTOQUE|VALORCUSTOESTOQUE|VLRCUSTOESTOQUE|VALORCUSTO|VLRCUSTO|VLCUSTO|CUSTOESTOQUE|CUSTOTOTAL|VALORTOTALESTOQUE)$/.test(item.norm) ||
+      /^(VALORESTOQUE|VLRESTOQUE|VALORDOESTOQUE|VALORCUSTOESTOQUE|VLRCUSTOESTOQUE|VALORCUSTO|VLRCUSTO|VLCUSTO|CUSTOESTOQUE|CUSTOTOTAL|VALORTOTALESTOQUE|TOTALCUSTO|VALORTOTAL|VLRTOTAL|VLRSALDO|VALORSALDO|CUSTOSALDO)$/.test(item.norm) ||
       (item.norm.includes('VALOR') && item.norm.includes('ESTOQUE')) ||
       (item.norm.includes('VLR') && item.norm.includes('ESTOQUE')) ||
       (item.norm.includes('VALOR') && item.norm.includes('CUSTO')) ||
@@ -376,7 +377,7 @@ export async function processarSMGOI013(
 
   // 7. Estoque Total Convertido (COLUNA OFICIAL EXPLÍCITA DA SMGOI013)
   const estTotalKey = normalizedList.find((item) =>
-    /^(ESTOQUETOTALCONVERTIDO|ESTOQUECONVERTIDO|SALDOCONVERTIDO|ESTOQUEGERALCONVERTIDO|SALDOTOTALCONVERTIDO|ESTOQUETOTALUNIDADES|ESTOQUETOTAL|TOTALESTOQUE|ESTOQUEGERAL)$/.test(item.norm) ||
+    /^(ESTOQUETOTALCONVERTIDO|ESTOQUECONVERTIDO|SALDOCONVERTIDO|ESTOQUEGERALCONVERTIDO|SALDOTOTALCONVERTIDO|ESTOQUETOTALUNIDADES|ESTOQUETOTAL|TOTALESTOQUE|ESTOQUEGERAL|SALDOTOTAL)$/.test(item.norm) ||
     item.norm.includes('ESTOQUECONVERT') ||
     item.norm.includes('SALDOCONVERT') ||
     (item.norm.includes('ESTOQUE') && item.norm.includes('TOTAL'))
@@ -428,16 +429,19 @@ export async function processarSMGOI013(
     ) {
       if (!headerMap['vendas_qtde']) headerMap['vendas_qtde'] = key;
     }
-    // 10. Match Vendas Preço (MUST NOT BE SEMVENDA OR CUSTO)
+    // 10. Match Vendas Preço Unitário Estrito (NÃO confundir com faturamento Vendas Valor 30d nem com custo)
     else if (
       !norm.includes('SEMVENDA') &&
       !norm.includes('SEMGIRO') &&
       !norm.includes('CUSTO') &&
+      !norm.includes('30D') &&
+      !norm.includes('30DIAS') &&
+      !norm.includes('TOTAL') &&
+      !norm.includes('FATURAMENTO') &&
       (
-        /^(VENDASPRECO|PRECO|PRECOVENDA|VALOR|PRVENDA|VALORVENDA|PRUNITARIO|VENDASVALOR)$/.test(norm) ||
-        (norm.includes('VENDA') && (norm.includes('PRECO') || norm.includes('PR') || norm.includes('VALOR'))) ||
-        (/^VENDAS?PR/.test(norm)) ||
-        norm.includes('PRECO')
+        /^(PRECOVENDA|PRVENDA|PRECOUNITARIO|PRUNITARIO|PRECOTABELA|PRTABELA|PRECOCONSUMIDOR|PRCONSUMIDOR|PRECO)$/.test(norm) ||
+        (norm.includes('PRECO') && norm.includes('VENDA')) ||
+        (norm.includes('PR') && norm.includes('VENDA'))
       )
     ) {
       if (!headerMap['vendas_preco']) headerMap['vendas_preco'] = key;
@@ -655,37 +659,57 @@ export async function processarSMGOI013(
     const isPesavel = isProdutoPesavel(rawEmb);
     let estTotal = 0;
 
-    if (headerMap['estoque_emb1'] || headerMap['estoque_emb9']) {
-      // Cálculo padrão de conversão
-      const posEstoque = calcularPosicaoEstoque(estEmb1, estEmb9, rawEmb, embData.fator);
-      estTotal = posEstoque.estoqueTotal;
+    // CUSTO MÉDIO e VALOR DE ESTOQUE DA PLANILHA (para verificação cruzada de unidade)
+    const custoMedioRaw = headerMap['custo_medio'] ? row[headerMap['custo_medio']] : undefined;
+    const parsedCustoEarly = (custoMedioRaw !== undefined && custoMedioRaw !== null && String(custoMedioRaw).trim() !== '')
+      ? parseNumberSafe(custoMedioRaw, NaN)
+      : NaN;
 
-      // Se EMB1 e EMB9 estiverem zerados ou não informados, mas a planilha trouxer ESTOQUE TOTAL:
-      if (estEmb1 === 0 && estEmb9 === 0 && !isNaN(estTotalPlanilha) && estTotalPlanilha > 0) {
-        estTotal = estTotalPlanilha;
-        if (isPesavel) {
-          estEmb1 = Math.floor(estTotalPlanilha);
-          estEmb9 = Math.round((estTotalPlanilha - estEmb1) * 1000);
-        } else if (embData.fator > 1) {
-          estEmb1 = Math.floor(estTotalPlanilha / embData.fator);
-          estEmb9 = Math.round(estTotalPlanilha % embData.fator);
-        } else {
-          estEmb1 = estTotalPlanilha;
-          estEmb9 = 0;
-        }
-      }
-    } else if (!isNaN(estTotalPlanilha)) {
-      // Planilha com coluna direta de Estoque Total Convertido (NÃO multiplicar pelo fator novamente!)
+    const valorEstoquePlanilhaRaw = headerMap['valor_estoque_planilha'] ? row[headerMap['valor_estoque_planilha']] : undefined;
+    const parsedValorEarly = (valorEstoquePlanilhaRaw !== undefined && valorEstoquePlanilhaRaw !== null && String(valorEstoquePlanilhaRaw).trim() !== '')
+      ? parseNumberSafe(valorEstoquePlanilhaRaw, NaN)
+      : NaN;
+
+    // REGRA FUNDAMENTAL 5: NUNCA RECONVERTER ESTOQUE QUE JÁ ESTÁ CONVERTIDO NA PLANILHA
+    if (!isNaN(estTotalPlanilha)) {
       estTotal = estTotalPlanilha;
       if (isPesavel) {
         estEmb1 = Math.floor(estTotalPlanilha);
         estEmb9 = Math.round((estTotalPlanilha - estEmb1) * 1000);
       } else if (embData.fator > 1) {
-        estEmb1 = Math.floor(estTotalPlanilha / embData.fator);
-        estEmb9 = Math.round(estTotalPlanilha % embData.fator);
+        // Se EMB1 informado na planilha for igual ao Estoque Total, EMB1 já estava em UNIDADES!
+        if (Math.abs(estEmb1 - estTotalPlanilha) < 0.01) {
+          estEmb1 = Math.floor(estTotalPlanilha / embData.fator);
+          estEmb9 = Math.round(estTotalPlanilha % embData.fator);
+        } else if (Math.abs((estEmb1 * embData.fator) + estEmb9 - estTotalPlanilha) < 0.01) {
+          // EMB1 estava em caixas e bate com a conversão
+        } else {
+          estEmb1 = Math.floor(estTotalPlanilha / embData.fator);
+          estEmb9 = Math.round(estTotalPlanilha % embData.fator);
+        }
       } else {
         estEmb1 = estTotalPlanilha;
         estEmb9 = 0;
+      }
+    } else if (headerMap['estoque_emb1'] || headerMap['estoque_emb9']) {
+      // Planilha sem coluna explícita de Estoque Total Convertido
+      // Verificar se EMB1 já está em unidades através da relação com o Valor do Estoque e Custo Médio
+      let emb1JaEmUnidades = false;
+      if (!isPesavel && embData.fator > 1 && !isNaN(parsedValorEarly) && parsedValorEarly > 0 && !isNaN(parsedCustoEarly) && parsedCustoEarly > 0) {
+        const unidadesCalculadasPorCusto = parsedValorEarly / parsedCustoEarly;
+        // Se a quantidade indicada pelo valor/custo for próxima de estEmb1 (e não de estEmb1 * fator)
+        if (Math.abs(estEmb1 - unidadesCalculadasPorCusto) < Math.abs((estEmb1 * embData.fator) - unidadesCalculadasPorCusto)) {
+          emb1JaEmUnidades = true;
+        }
+      }
+
+      if (emb1JaEmUnidades) {
+        estTotal = estEmb1 + estEmb9;
+        estEmb1 = Math.floor(estTotal / embData.fator);
+        estEmb9 = Math.round(estTotal % embData.fator);
+      } else {
+        const posEstoque = calcularPosicaoEstoque(estEmb1, estEmb9, rawEmb, embData.fator);
+        estTotal = posEstoque.estoqueTotal;
       }
     }
 
@@ -693,23 +717,15 @@ export async function processarSMGOI013(
     const vendasPreco = headerMap['vendas_preco'] ? parseNumberSafe(row[headerMap['vendas_preco']]) : undefined;
 
     // CUSTO MÉDIO: Interpretação segura e estrita
-    const custoMedioRaw = headerMap['custo_medio'] ? row[headerMap['custo_medio']] : undefined;
     let custoMedioFinal: number | undefined = undefined;
-    if (custoMedioRaw !== undefined && custoMedioRaw !== null && String(custoMedioRaw).trim() !== '') {
-      const parsedCusto = parseNumberSafe(custoMedioRaw, NaN);
-      if (!isNaN(parsedCusto) && parsedCusto > 0) {
-        custoMedioFinal = Number(parsedCusto.toFixed(4));
-      }
+    if (!isNaN(parsedCustoEarly) && parsedCustoEarly > 0) {
+      custoMedioFinal = Number(parsedCustoEarly.toFixed(4));
     }
 
     // VALOR DE ESTOQUE DA PLANILHA (se pré-calculado pelo ERP da filial)
-    const valorEstoquePlanilhaRaw = headerMap['valor_estoque_planilha'] ? row[headerMap['valor_estoque_planilha']] : undefined;
     let valorEstoquePlanilhaFinal: number | undefined = undefined;
-    if (valorEstoquePlanilhaRaw !== undefined && valorEstoquePlanilhaRaw !== null && String(valorEstoquePlanilhaRaw).trim() !== '') {
-      const parsedVal = parseNumberSafe(valorEstoquePlanilhaRaw, NaN);
-      if (!isNaN(parsedVal) && parsedVal > 0) {
-        valorEstoquePlanilhaFinal = Number(parsedVal.toFixed(2));
-      }
+    if (!isNaN(parsedValorEarly) && parsedValorEarly > 0) {
+      valorEstoquePlanilhaFinal = Number(parsedValorEarly.toFixed(2));
     }
 
     const dataEntrada = headerMap['data_ultima_entrada'] ? parseDateSafe(row[headerMap['data_ultima_entrada']]) : undefined;

@@ -289,6 +289,7 @@ export default function App() {
                 <ImportacaoView
                   metadados={metadados}
                   onNavigateToSaeou060={() => setSubView('saeou060')}
+                  onNavigateToIsv={() => setSubView('isv')}
                   onImportComplete={() => {
                     setProdutos(getProdutos());
                     setVencimentos(getVencimentos());

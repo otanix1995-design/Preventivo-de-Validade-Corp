@@ -15,6 +15,7 @@ import {
   FileSpreadsheet,
   FileText,
   Filter,
+  Info,
   Layers,
   Package,
   PackageX,
@@ -41,6 +42,7 @@ import {
   Promotor,
   SolicitacaoAjusteIsv
 } from '../types';
+import { ModalDetalhesVinculosIsv } from './isv/ModalDetalhesVinculosIsv';
 import { ModalRegistrarAjusteIsv } from './isv/ModalRegistrarAjusteIsv';
 
 interface IsvViewProps {
@@ -64,6 +66,9 @@ export const IsvView: React.FC<IsvViewProps> = ({
   // Modal de registro de ajuste físico
   const [modalAjusteItem, setModalAjusteItem] = useState<ItemIsv | null>(null);
   const [isModalAjusteOpen, setIsModalAjusteOpen] = useState(false);
+
+  // Modal de detalhes dos vínculos comerciais (Múltiplas Indústrias/CNPJs)
+  const [itemDetalhesVinculos, setItemDetalhesVinculos] = useState<ItemIsv | null>(null);
 
   // Modal de geração de PDF
   const [isModalPdfOpen, setIsModalPdfOpen] = useState(false);
@@ -279,6 +284,10 @@ export const IsvView: React.FC<IsvViewProps> = ({
       tituloFiltro = `Agência: ${pdfEntidadeSelecionada}`;
     }
 
+    const fonteOficial = isvService.temPlanilhaIsv()
+      ? 'Planilha Operacional Oficial ISV'
+      : 'Base SMGOI013';
+
     gerarRelatorioIsvA3Pdf(itensFiltrados, {
       tituloFiltro,
       tipoAgrupamento: pdfTipoAgrupamento,
@@ -287,18 +296,24 @@ export const IsvView: React.FC<IsvViewProps> = ({
       exibirValorEstoque: pdfExibirValor,
       filialNome: 'FILIAL 172 - CASCAVEL',
       limiteQuantidade: pdfLimiteExportacao,
+      fonteOficial,
     });
 
     setIsModalPdfOpen(false);
   };
 
   const handleQuickPrintTop30 = () => {
+    const fonteOficial = isvService.temPlanilhaIsv()
+      ? 'Planilha Operacional Oficial ISV'
+      : 'Base SMGOI013';
+
     gerarRelatorioIsvA3Pdf(itensFiltrados, {
       tituloFiltro: 'Geral da Loja (Top 30 Maiores)',
       tipoAgrupamento: 'GERAL',
       exibirValorEstoque: true,
       filialNome: 'FILIAL 172 - CASCAVEL',
       limiteQuantidade: 30,
+      fonteOficial,
     });
   };
 
@@ -328,6 +343,16 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 <span className="text-[10px] font-bold bg-amber-500/20 text-amber-300 px-2 py-0.5 rounded-full border border-amber-500/30 uppercase tracking-wider">
                   Prevenção & Giro
                 </span>
+                {isvService.temPlanilhaIsv() ? (
+                  <span className="text-[10px] font-black bg-emerald-500/20 text-emerald-300 px-2.5 py-0.5 rounded-full border border-emerald-500/40 uppercase tracking-wider flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    Fonte Oficial ISV (XLSX)
+                  </span>
+                ) : (
+                  <span className="text-[10px] font-bold bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded-full border border-blue-500/30 uppercase tracking-wider">
+                    Base SMGOI013
+                  </span>
+                )}
               </div>
               <p className="text-xs text-blue-200 font-medium">
                 Monitoramento de mercadorias paradas, cálculo financeiro e acompanhamento de promotores
@@ -886,20 +911,27 @@ export const IsvView: React.FC<IsvViewProps> = ({
                           </td>
 
                           {/* 3. DESCRIÇÃO */}
-                          <td className="py-2 px-3 font-black text-slate-900 uppercase">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span>{item.descricao}</span>
+                          <td className="py-2.5 px-3 font-black text-slate-900 uppercase">
+                            <div className="flex items-center gap-1.5 flex-nowrap">
+                              <span
+                                className="truncate max-w-[190px] sm:max-w-[260px] block"
+                                title={item.descricao}
+                              >
+                                {item.descricao}
+                              </span>
                               {item.multiplos_cnpjs && (
-                                <span
-                                  className="text-[9px] font-bold bg-amber-100 text-amber-900 px-1.5 py-0.2 rounded border border-amber-300"
-                                  title="Produto relacionado a mais de um CNPJ na base SPCOI007"
+                                <button
+                                  type="button"
+                                  onClick={() => setItemDetalhesVinculos(item)}
+                                  className="text-[9px] font-bold bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded border border-amber-300 shrink-0 hover:bg-amber-200 transition-colors cursor-pointer"
+                                  title="Produto com múltiplos CNPJs na SPCOI007. Clique para ver detalhes."
                                 >
                                   Múltiplos CNPJs
-                                </span>
+                                </button>
                               )}
                               {item.elegivel_ajuste && (
                                 <span
-                                  className="text-[9px] font-bold bg-red-100 text-red-900 px-1.5 py-0.2 rounded border border-red-300"
+                                  className="text-[9px] font-bold bg-red-100 text-red-900 px-1.5 py-0.5 rounded border border-red-300 shrink-0"
                                   title="Candidato a averiguação física (&gt;10d sem venda, &lt;R$250, estoque&gt;0)"
                                 >
                                   Verificar Físico
@@ -909,17 +941,17 @@ export const IsvView: React.FC<IsvViewProps> = ({
                           </td>
 
                           {/* 4. EMBALAGEM */}
-                          <td className="py-2 px-3 text-slate-600 whitespace-nowrap font-mono text-[11px]">
+                          <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap font-mono text-[11px]">
                             {item.embalagem || 'UN'}
                           </td>
 
                           {/* 5. ESTOQUE */}
-                          <td className="py-2 px-3 text-right font-mono font-black text-slate-800 whitespace-nowrap">
+                          <td className="py-2.5 px-3 text-right font-mono font-black text-slate-800 whitespace-nowrap">
                             {item.estoque_formatado}
                           </td>
 
                           {/* 6. DIAS SEM VENDA */}
-                          <td className="py-2 px-2 text-center whitespace-nowrap">
+                          <td className="py-2.5 px-2 text-center whitespace-nowrap">
                             <span
                               className={`font-mono font-bold px-2 py-0.5 rounded text-[11px] ${
                                 item.dias_sem_venda >= 10
@@ -934,36 +966,88 @@ export const IsvView: React.FC<IsvViewProps> = ({
                           </td>
 
                           {/* 7. IDADE */}
-                          <td className="py-2 px-2 text-center font-mono text-slate-600 whitespace-nowrap text-[11px]">
+                          <td className="py-2.5 px-2 text-center font-mono text-slate-600 whitespace-nowrap text-[11px]">
                             {item.idade}d
                           </td>
 
                           {/* 8. INDÚSTRIA */}
-                          <td className="py-2 px-3 text-slate-800 font-medium">
-                            {item.industrias_nomes.length > 0 ? (
-                              item.industrias_nomes.join(' • ')
+                          <td className="py-2.5 px-3 text-slate-800 font-medium whitespace-nowrap">
+                            {item.industrias_nomes.length > 1 ? (
+                              <button
+                                type="button"
+                                onClick={() => setItemDetalhesVinculos(item)}
+                                className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-amber-50 text-amber-900 border border-amber-300 text-[11px] font-bold hover:bg-amber-100 transition-colors shadow-2xs cursor-pointer select-none"
+                                title="Clique para ver todas as indústrias e CNPJs vinculados"
+                              >
+                                <Building2 className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                                <span>Múltiplas indústrias ({item.industrias_nomes.length})</span>
+                              </button>
+                            ) : item.industrias_nomes.length === 1 ? (
+                              <div className="flex items-center gap-1">
+                                <span
+                                  className="text-slate-800 font-medium text-xs truncate max-w-[170px] sm:max-w-[210px] block"
+                                  title={item.industrias_nomes[0]}
+                                >
+                                  {item.industrias_nomes[0]}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setItemDetalhesVinculos(item)}
+                                  className="text-slate-400 hover:text-blue-700 opacity-60 hover:opacity-100 transition-opacity p-0.5 shrink-0 cursor-pointer"
+                                  title="Ver detalhes da indústria e CNPJ"
+                                >
+                                  <Info className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             ) : (
-                              <span className="text-slate-400 italic">Não informada</span>
+                              <span className="text-slate-400 italic text-[11px]">
+                                Indústria não vinculada
+                              </span>
                             )}
                           </td>
 
                           {/* 9. PROMOTOR */}
-                          <td className="py-2 px-3 text-slate-800 font-medium">
-                            {item.promotores_nomes.length > 0 ? (
-                              <span className="text-emerald-800 font-bold">
-                                {item.promotores_nomes.join(' • ')}
+                          <td className="py-2.5 px-3 text-slate-800 font-medium whitespace-nowrap">
+                            {item.promotores_nomes.length > 1 ? (
+                              <button
+                                type="button"
+                                onClick={() => setItemDetalhesVinculos(item)}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-300 text-[11px] font-bold hover:bg-emerald-100 transition-colors cursor-pointer"
+                                title="Clique para ver promotores vinculados por indústria"
+                              >
+                                <UserCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                <span>Múltiplos promotores ({item.promotores_nomes.length})</span>
+                              </button>
+                            ) : item.promotores_nomes.length === 1 ? (
+                              <span
+                                className="text-emerald-900 font-bold text-xs truncate max-w-[140px] block"
+                                title={item.promotores_nomes[0]}
+                              >
+                                {item.promotores_nomes[0]}
                               </span>
                             ) : (
-                              <span className="text-amber-700 text-[11px] font-semibold bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200">
+                              <span className="text-amber-700 text-[11px] font-semibold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 inline-block">
                                 Sem promotor
                               </span>
                             )}
                           </td>
 
                           {/* 10. AGÊNCIA */}
-                          <td className="py-2 px-3 text-slate-600 font-medium text-[11px]">
-                            {item.agencias_nomes.length > 0 ? (
-                              item.agencias_nomes.join(' • ')
+                          <td className="py-2.5 px-3 text-slate-600 font-medium text-[11px] whitespace-nowrap">
+                            {item.agencias_nomes.length > 1 ? (
+                              <span
+                                className="text-slate-700 font-semibold text-[11px] truncate max-w-[120px] block"
+                                title={item.agencias_nomes.join(' • ')}
+                              >
+                                Múltiplas agências ({item.agencias_nomes.length})
+                              </span>
+                            ) : item.agencias_nomes.length === 1 ? (
+                              <span
+                                className="text-slate-700 font-medium text-[11px] truncate max-w-[120px] block"
+                                title={item.agencias_nomes[0]}
+                              >
+                                {item.agencias_nomes[0]}
+                              </span>
                             ) : (
                               <span className="text-slate-400">-</span>
                             )}
@@ -1070,6 +1154,13 @@ export const IsvView: React.FC<IsvViewProps> = ({
         onSuccess={() => {
           recarregarDados();
         }}
+      />
+
+      {/* Modal de Detalhes dos Vínculos Comerciais (Múltiplas Indústrias/CNPJs) */}
+      <ModalDetalhesVinculosIsv
+        isOpen={itemDetalhesVinculos !== null}
+        onClose={() => setItemDetalhesVinculos(null)}
+        item={itemDetalhesVinculos}
       />
 
       {/* Modal de Configuração do Relatório A3 PDF */}
@@ -1369,8 +1460,14 @@ export const IsvView: React.FC<IsvViewProps> = ({
 
                 {(() => {
                   const codigosReferencia = [
-                    { cod: '68059', dig: '164', ref: 'R$ 26.287,99', label: '68059-164' },
-                    { cod: '60662', dig: '158', ref: 'R$ 16.471,28', label: '60662-158' },
+                    { cod: '16337', dig: '160', ref: 'R$ 890,09', label: '16337-160 (M&M TUBE - REGRESSÃO)' },
+                    { cod: '68059', dig: '164', ref: 'R$ 26.287,99', label: '68059-164 (HF.ALHO)' },
+                    { cod: '60662', dig: '158', ref: 'R$ 16.471,28', label: '60662-158 (CHOC.CHARGE)' },
+                    { cod: '84282', dig: '160', ref: 'R$ 8.436,20', label: '84282-160 (DET.VIDA LIMAO)' },
+                    { cod: '7922', dig: '130', ref: 'R$ 8.521,55', label: '7922-130 (REF.SUKITA)' },
+                    { cod: '43708', dig: '134', ref: 'R$ 469,28', label: '43708-134 (SACOLA EXTRUSA)' },
+                    { cod: '4863', dig: '117', ref: 'R$ 441,62', label: '4863-117 (ORGAN.UZ)' },
+                    { cod: '61332', dig: '168', ref: 'R$ 372,42', label: '61332-168 (POTE SANREMO)' },
                     { cod: '85327', dig: '177', ref: 'R$ 16.168,49', label: '85327-177' },
                     { cod: '8911', dig: '191', ref: 'R$ 9.575,49', label: '8911-191' },
                     { cod: '56176', dig: '127', ref: 'R$ 8.977,79', label: '56176-127' },

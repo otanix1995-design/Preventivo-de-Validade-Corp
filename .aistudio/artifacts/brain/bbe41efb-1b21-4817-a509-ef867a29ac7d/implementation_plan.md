@@ -130,3 +130,84 @@ Arquitetura técnica controlada e plano de execução para vincular produtos da 
 * **Teste I (Ordenação)**: Validar ordenação padrão por maior valor financeiro.
 * **Teste J (Não duplicação financeira)**: Confirmar que somatórios do painel consideram produtos únicos.
 * **Teste K (App Promotor intacto)**: Confirmar que nenhuma regra ou código do App Promotor foi modificado.
+
+---
+
+## 6. Atualização V2 — Consulta de Mercadorias e Aproveitamento Integral das 36 Colunas
+
+### Conquistas e Arquitetura Entregue:
+1. **Parser Integral das 36 Colunas (`src/services/isvPlanilhaParser.ts`)**:
+   - Mapeamento dinâmico e posicional de todas as colunas de A até AJ.
+   - Tratamento de colunas duplicadas por contexto:
+     - L/M: Última venda (Data/Hora combinadas em formato BR `DD/MM/AAAA às HH:mm`).
+     - N/O: Última compra (Data/Hora combinadas em formato BR `DD/MM/AAAA às HH:mm`).
+     - V/W: Validade 1 e 2.
+     - AF/AG: Alteração de Preço (Data/Hora combinadas em formato BR `DD/MM/AAAA às HH:mm`).
+   - Normalizador de estoque operacional (`formatarEstoqueOperacionalExtenso`):
+     - `10 CXA (240) + 10` → `10 CAIXAS + 10 UNIDADES`
+     - `249 BDJ (6) + 2` → `249 BANDEJAS + 2 UNIDADES`
+     - `714 KG + 882 G` → `714 KG + 882 G`
+     - `242 UND` → `242 UNIDADES`
+
+2. **Tipos e Metadados (`src/types.ts`)**:
+   - `RegistroPlanilhaIsv`: 36 campos operacionais persistidos e indexados.
+   - `ResponsaveisMercadoria`: Indústrias, CNPJs formatados, Promotores e Agências.
+   - `ProdutoSMG`: Enriquecido com `dados_operacionais`, `estoque_disponivel_texto`, `estoque_original_erp`, `valor_indisponivel`, `bloqueio`, `transito_entrada`, `estoque_indisponivel`, `classe_produto`, `classe_produto_raiz`, `setor_save`, `cadeia`, etc.
+
+3. **Serviços Operacionais (`src/services/isvService.ts`)**:
+   - `getRegistroOperacional(codigoInterno, digito)`: Localiza o registro de 36 colunas por código raiz + dígito ou chave normalizada.
+   - `getResponsaveisPorCodigoInterno(codigoInterno)`: Cruza dados de fornecedores SPCOI007 com indústrias cadastradas e promotores/agências.
+
+4. **Nova Consulta de Mercadorias (`src/components/ConsultaView.tsx`)**:
+   - **Estrutura estrita em 12 seções**:
+     1. *Identificação da mercadoria*: Código raiz, dígito, filial 172, nome oficial, complemento e badges de situação cadastral (Ativo, Gerenciado, Peso Variável).
+     2. *Estoque disponível em destaque*: Rótulo `ESTOQUE DISPONÍVEL` com texto operacional por extenso (`10 CAIXAS + 10 UNIDADES`), texto original do ERP (`10 CXA (240) + 10`) e total numérico, eliminando a exibição separada de Emb1 e Emb9.
+     3. *Embalagem completa*: Embalagem permanente da SMGOI013 ou badge `EMBALAGEM PENDENTE` (sem deduções artificiais).
+     4. *Informações financeiras*: Valor Disponível soberano do ERP (Coluna E), Valor Indisponível (Coluna G) e Custo Médio SMGOI013 de referência.
+     5. *Dias sem venda e idade*: Colunas K e R com alerta visual se `dias_sem_venda >= 10`.
+     6. *Venda nos últimos 30 dias*: Coluna T com média diária calculada.
+     7. *Última venda e última compra*: Colunas L/M e N/O combinadas em padrão brasileiro.
+     8. *Última entrada física*: Rótulos explícitos `NÃO DISPONÍVEL` com aviso de que se aguarda relatório oficial aprovado de recebimento físico.
+     9. *Responsáveis pela mercadoria*: Indústria, CNPJ, Promotor e Agência ou aviso de não vinculação.
+     10. *Classificação e setor*: Classe (P), Classe Raiz (Q), Setor Save (U), Setor (Y), Setor herdado (Z), Cadeia (X).
+     11. *Situação da mercadoria*: Bloqueio (H), Trânsito (I), Estoque Indisponível (J), Resíduo (AD), Alteração de Preço (AF/AG), Verificador (AH), Autonomia (AI), Autonomia de Pedido (AJ).
+     12. *Ação e Vencimentos cadastrados*: Botão de destaque `+ CADASTRAR VENCIMENTO PARA ESTE PRODUTO`, lista de lotes de vencimento com status, projeção de giro e botões de editar/excluir.
+   - **Lista de busca**: Cada item exibe código, embalagem comercial ou pendente, descrição com realce, estoque unificado por extenso (`ESTOQUE: 10 CAIXAS + 10 UNIDADES`), Valor Disponível oficial (`R$ 890,09`) e dias sem venda.
+
+---
+
+## 7. Correção Cirúrgica — Apresentação de Vínculos Múltiplos no ISV
+
+### Conquistas e Entregas:
+1. **Estrutura Compacta na Tabela Principal (`src/components/IsvView.tsx`)**:
+   - Cada produto ocupa rigorosamente **uma única linha** na tabela.
+   - Coluna **INDÚSTRIA**:
+     - > 1 indústria: Botão compacto estilizado `Múltiplas indústrias (X)` com ícone, abrindo o modal de detalhamento.
+     - 1 indústria: Nome truncado na linha com botão de visualização rápida do CNPJ e vínculo.
+     - 0 indústrias: Texto suave `Indústria não vinculada`.
+   - Coluna **PROMOTOR**:
+     - > 1 promotor: Botão compacto `Múltiplos promotores (X)`.
+     - 1 promotor: Nome truncado na linha.
+     - 0 promotores: Badge compacto `Sem promotor`.
+   - Coluna **AGÊNCIA**:
+     - > 1 agência: Resumo compacto `Múltiplas agências (X)`.
+     - 1 agência: Nome truncado na linha.
+     - 0 agências: `-`.
+   - Coluna **DESCRIÇÃO**: Limite visual com `truncate` e badge interativo `Múltiplos CNPJs` com acionamento do painel.
+
+2. **Modal de Detalhamento de Vínculos (`src/components/isv/ModalDetalhesVinculosIsv.tsx`)**:
+   - Painel responsivo com rolagem independente para produtos com dezenas de vínculos (ex: `HF. CEBOLA ATACADÃO` — `19658-143`).
+   - Card dedicado por indústria contendo: Nome completo da indústria, Razão Social, CNPJ formatado, Promotor responsável e Agência correspondente.
+   - Atribuição estrita: Não replica o mesmo promotor para todas as indústrias; cada indústria exibe apenas os promotores a ela vinculados.
+   - Banner de garantia contábil destacando que o produto é contabilizado uma única vez no estoque e no valor.
+
+3. **Compactação no Relatório PDF A3 (`src/services/isvPdfService.ts`)**:
+   - Exibição de `Múltiplas indústrias (X)`, `Múltiplos (X)` e `Múltiplas (X)`.
+   - Evita linhas gigantes e quebras de página desorganizadas.
+   - Preserva os totais financeiros e a regra de produto único nos rankings (Top 30, Top 50, Top 100, Todos).
+
+4. **Integridade de Dados e Filtros (`src/services/isvService.ts`)**:
+   - `_montarVinculosDetalhados`: Mapeia per-indústria os vínculos sem deduplicações indevidas nem mesclas arbitrárias.
+   - `getIndicadoresIsv`: Preserva a contabilização de produtos únicos por `codigo_interno`.
+
+

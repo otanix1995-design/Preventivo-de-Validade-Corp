@@ -4,7 +4,7 @@
  */
 
 const DB_NAME = 'ControleVencimentosDB_v2';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 export const STORES = {
   PRODUTOS: 'produtos',
@@ -23,6 +23,8 @@ export const STORES = {
   VINCULOS_PROMOTOR_INDUSTRIA: 'vinculos_promotor_industria',
   ISV_SOLICITACOES_AJUSTE: 'isv_solicitacoes_ajuste',
   HISTORICO_IMPORTACOES_SPCOI007: 'historico_importacoes_spcoi007',
+  ISV_REGISTROS_OPERACIONAIS: 'isv_registros_operacionais',
+  HISTORICO_IMPORTACOES_ISV: 'historico_importacoes_isv',
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -88,6 +90,12 @@ export function getDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORES.HISTORICO_IMPORTACOES_SPCOI007)) {
         db.createObjectStore(STORES.HISTORICO_IMPORTACOES_SPCOI007, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORES.ISV_REGISTROS_OPERACIONAIS)) {
+        db.createObjectStore(STORES.ISV_REGISTROS_OPERACIONAIS, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORES.HISTORICO_IMPORTACOES_ISV)) {
+        db.createObjectStore(STORES.HISTORICO_IMPORTACOES_ISV, { keyPath: 'id' });
       }
     };
 

@@ -22,36 +22,42 @@ import * as XLSX from 'xlsx';
 import { processarSMGOI013, processarVinculosEAN } from '../services/excelParser';
 import { gerarExemploPlanilhaSAEOU060, processarSAEOU060 } from '../services/saeou060Parser';
 import { gerarExemploPlanilhaSPCOI007, processarArquivoSPCOI007 } from '../services/spcoi007Parser';
+import { gerarExemploPlanilhaISV, processarPlanilhaOperacionalIsv } from '../services/isvPlanilhaParser';
 import { isvService } from '../services/isvService';
+import { formatarMoedaBR } from '../services/deviceId';
 import { cloudSyncService, SyncStatusInfo } from '../services/cloudSyncService';
 import { productRepository } from '../services/productRepository';
 import { clearAllData, getHistoricoImportacoes, getProdutos, loadDemoData, reprocessarBases } from '../services/storage';
-import { MetadadosBase, ResumoImportacao, ResumoImportacaoSPCOI007 } from '../types';
+import { MetadadosBase, ResumoImportacao, ResumoImportacaoIsv, ResumoImportacaoSPCOI007 } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 
 interface ImportacaoViewProps {
   metadados: MetadadosBase;
   onImportComplete?: () => void;
   onNavigateToSaeou060?: () => void;
+  onNavigateToIsv?: () => void;
 }
 
 export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
   metadados,
   onImportComplete,
   onNavigateToSaeou060,
+  onNavigateToIsv,
 }) => {
-  const [activeTab, setActiveTab] = useState<'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007' | 'HISTORICO'>('SMGOI013');
+  const [activeTab, setActiveTab] = useState<'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007' | 'ISV' | 'HISTORICO'>('SMGOI013');
   const [isProcessing, setIsProcessing] = useState(false);
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [progressStatus, setProgressStatus] = useState<string>('Iniciando processamento...');
-  const [processingFileType, setProcessingFileType] = useState<'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007'>('SMGOI013');
+  const [processingFileType, setProcessingFileType] = useState<'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007' | 'ISV'>('SMGOI013');
   const [ultimoResumo, setUltimoResumo] = useState<ResumoImportacao | null>(null);
   const [ultimoResumoSpcoi, setUltimoResumoSpcoi] = useState<ResumoImportacaoSPCOI007 | null>(null);
+  const [ultimoResumoIsv, setUltimoResumoIsv] = useState<ResumoImportacaoIsv | null>(isvService.getResumoIsvAtual());
   const [erroGlobal, setErroGlobal] = useState<string | null>(null);
   const [isDraggingSmg, setIsDraggingSmg] = useState(false);
   const [isDraggingEan, setIsDraggingEan] = useState(false);
   const [isDraggingSaeou, setIsDraggingSaeou] = useState(false);
   const [isDraggingSpcoi, setIsDraggingSpcoi] = useState(false);
+  const [isDraggingIsv, setIsDraggingIsv] = useState(false);
   const [isLimparModalOpen, setIsLimparModalOpen] = useState(false);
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
@@ -82,6 +88,7 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
   const fileInputEanRef = useRef<HTMLInputElement>(null);
   const fileInputSaeouRef = useRef<HTMLInputElement>(null);
   const fileInputSpcoiRef = useRef<HTMLInputElement>(null);
+  const fileInputIsvRef = useRef<HTMLInputElement>(null);
 
   const historico = getHistoricoImportacoes();
   const diagnostico = productRepository.getDiagnosticoBase();
@@ -254,6 +261,71 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
     const files = e.target.files;
     if (files && files.length > 0) {
       handleProcessFileSpcoi(files[0]);
+    }
+  };
+
+  const handleProcessFileIsv = async (file: File) => {
+    if (!file) return;
+
+    setIsProcessing(true);
+    setProcessingFileType('ISV');
+    setProgressPercent(0);
+    setProgressStatus('Lendo e analisando Planilha Operacional do ISV...');
+    setErroGlobal(null);
+    setUltimoResumoIsv(null);
+
+    try {
+      const produtosAtuais = getProdutos();
+      const fornecedoresAtuais = isvService.getFornecedores();
+      const resultado = await processarPlanilhaOperacionalIsv(
+        file,
+        produtosAtuais,
+        fornecedoresAtuais,
+        (percent, status) => {
+          setProgressPercent(percent);
+          setProgressStatus(status);
+        }
+      );
+
+      await isvService.salvarImportacaoPlanilhaIsv(
+        resultado.registros,
+        resultado.resumo
+      );
+
+      setUltimoResumoIsv(resultado.resumo);
+      if (onImportComplete) onImportComplete();
+    } catch (err: any) {
+      console.error('Erro ao importar Planilha ISV:', err);
+      setErroGlobal(
+        err.message ||
+          'Erro ao processar a Planilha Operacional do ISV. Verifique se o arquivo possui as colunas obrigatórias: "Valor Disponível", "Estoque", "Código/Código Interno" e "Nome".'
+      );
+    } finally {
+      setIsProcessing(false);
+      if (fileInputIsvRef.current) fileInputIsvRef.current.value = '';
+    }
+  };
+
+  const handleFileIsvChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      handleProcessFileIsv(files[0]);
+    }
+  };
+
+  const handleDropIsv = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingIsv(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleProcessFileIsv(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleLimparPlanilhaIsv = async () => {
+    if (window.confirm('Deseja realmente limpar a Planilha Operacional do ISV e restaurar os dados originais da SMGOI013?')) {
+      await isvService.limparPlanilhaIsv();
+      setUltimoResumoIsv(null);
+      if (onImportComplete) onImportComplete();
     }
   };
 
@@ -494,7 +566,7 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         </div>
 
         {/* Tab switcher */}
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 bg-gray-100 p-1 rounded-xl">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-1 bg-gray-100 p-1 rounded-xl">
           <button
             onClick={() => setActiveTab('SMGOI013')}
             className={`py-2 px-3 rounded-lg text-xs font-black uppercase tracking-wider transition-all select-none ${
@@ -535,6 +607,20 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
             }`}
           >
             SPCOI007 (Fornec.)
+          </button>
+          <button
+            id="tab-importacao-isv"
+            onClick={() => setActiveTab('ISV')}
+            className={`py-2 px-3 rounded-lg text-xs font-black uppercase tracking-wider transition-all select-none flex items-center justify-center gap-1 ${
+              activeTab === 'ISV'
+                ? 'bg-white text-indigo-700 shadow-xs'
+                : 'text-gray-600 hover:text-gray-900'
+            }`}
+          >
+            <span>Planilha ISV</span>
+            {isvService.temPlanilhaIsv() && (
+              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" title="Base Oficial Ativa" />
+            )}
           </button>
           <button
             onClick={() => setActiveTab('HISTORICO')}
@@ -1267,7 +1353,220 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         </div>
       )}
 
-      {/* TAB 5: HISTÓRICO */}
+      {/* TAB 5: PLANILHA OPERACIONAL DO ISV (FONTE FINANCEIRA OFICIAL) */}
+      {activeTab === 'ISV' && (
+        <div className="space-y-4">
+          <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-black text-gray-900 uppercase tracking-wide">
+                    Planilha Operacional do ISV — Fonte Financeira Oficial
+                  </h3>
+                  {isvService.temPlanilhaIsv() && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-300">
+                      Base Oficial Ativa
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-gray-500 font-medium">
+                  A coluna <strong className="text-gray-700">Valor Disponível</strong> desta planilha é a autoridade máxima e inalterada do módulo ISV, preservando a SMGOI013 para embalagens e SPCOI007 para indústrias.
+                </p>
+              </div>
+
+              {onNavigateToIsv && (
+                <button
+                  type="button"
+                  onClick={onNavigateToIsv}
+                  className="px-3.5 py-2 rounded-xl bg-indigo-50 text-indigo-700 hover:bg-indigo-100 active:bg-indigo-200 border border-indigo-200 font-black text-xs uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all cursor-pointer self-start sm:self-auto shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-600 stroke-[2.5]" />
+                  <span>Ir para Módulo ISV</span>
+                </button>
+              )}
+            </div>
+
+            {/* Rules Callout Box */}
+            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 text-xs text-indigo-950 space-y-2">
+              <div className="flex items-center gap-1.5 font-black uppercase text-indigo-900 tracking-wide">
+                <Info className="w-4 h-4 text-indigo-700 shrink-0 stroke-[2.5]" />
+                <span>Diretrizes Obrigatórias da Fonte Financeira do ISV:</span>
+              </div>
+              <ul className="list-disc list-inside space-y-1 text-[11px] text-indigo-950 font-medium">
+                <li>
+                  <strong>Soberania do Valor Disponível:</strong> O campo <em>Valor Disponível</em> passa a ser a fonte financeira oficial. <strong>Não é multiplicado pelo estoque, não é dividido pelo fator e não é recalculado com custo médio.</strong>
+                </li>
+                <li>
+                  <strong>Identificação Estrita de Produtos:</strong> Identificação correta por <em>Filial + Código Interno (raiz) + Dígito</em>. Zeros à esquerda são preservados para integridade da chave.
+                </li>
+                <li>
+                  <strong>Sinergia com SMGOI013:</strong> A SMGOI013 continua sendo a base permanente da estrutura de embalagens completas (caixas, fatores e setores de loja).
+                </li>
+                <li>
+                  <strong>Sinergia com SPCOI007:</strong> A base SPCOI007 enriquece os dados operacionais com indústrias (CNPJs) e promotores vinculados.
+                </li>
+              </ul>
+            </div>
+
+            {/* Upload Area with Drag and Drop */}
+            <div
+              onDragOver={(e) => {
+                e.preventDefault();
+                setIsDraggingIsv(true);
+              }}
+              onDragLeave={() => setIsDraggingIsv(false)}
+              onDrop={handleDropIsv}
+              className={`border-2 border-dashed rounded-xl p-6 text-center space-y-3 transition-colors ${
+                isDraggingIsv
+                  ? 'border-indigo-600 bg-indigo-50/50'
+                  : 'border-gray-300 hover:border-indigo-600 bg-gray-50'
+              }`}
+            >
+              <UploadCloud className="w-12 h-12 text-indigo-700 mx-auto stroke-[2]" />
+              <div>
+                <p className="text-sm font-black uppercase tracking-wide text-gray-800">
+                  Arraste e solte a Planilha Operacional do ISV aqui
+                </p>
+                <p className="text-xs text-gray-500 font-medium mt-0.5">
+                  Reconhecimento automático por cabeçalho • Formatos aceitos: .xlsx, .xls, .csv
+                </p>
+              </div>
+
+              <input
+                ref={fileInputIsvRef}
+                id="input-file-isv"
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                onChange={handleFileIsvChange}
+                disabled={isProcessing}
+                className="hidden"
+              />
+
+              <button
+                type="button"
+                id="btn-selecionar-isv"
+                onClick={() => fileInputIsvRef.current?.click()}
+                disabled={isProcessing}
+                className="px-5 py-3 rounded-xl bg-indigo-700 hover:bg-indigo-800 text-white font-black uppercase tracking-wider text-xs shadow-md inline-flex items-center gap-2 transition-all active:scale-95 disabled:opacity-50 cursor-pointer"
+              >
+                {isProcessing ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin stroke-[2.5]" />
+                    <span>PROCESSANDO PLANILHA ISV ({progressPercent}%)...</span>
+                  </>
+                ) : (
+                  <>
+                    <UploadCloud className="w-4 h-4 stroke-[2.5]" />
+                    <span>SELECIONAR PLANILHA OPERACIONAL ISV</span>
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={gerarExemploPlanilhaISV}
+                className="text-xs font-black uppercase tracking-wider text-indigo-700 hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 stroke-[2.5]" />
+                Baixar Modelo Oficial ISV (.xlsx com itens de teste da Filial 172)
+              </button>
+
+              {isvService.temPlanilhaIsv() && (
+                <button
+                  type="button"
+                  onClick={handleLimparPlanilhaIsv}
+                  className="text-xs font-black uppercase tracking-wider text-rose-700 hover:text-rose-900 hover:underline flex items-center gap-1 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5 stroke-[2.5]" />
+                  Limpar Planilha Operacional (Restaurar SMGOI013)
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Resumo da Importação ISV caso executada ou carregada do banco */}
+          {ultimoResumoIsv && (
+            <div className="bg-white rounded-xl p-5 border border-emerald-300 shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-gray-100 pb-3">
+                <div className="flex items-center gap-2 text-emerald-800 font-black text-sm uppercase">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                  <span>Resumo da Planilha Operacional ISV ({ultimoResumoIsv.nome_arquivo}):</span>
+                </div>
+                <span className="text-xs font-mono font-bold text-gray-500">
+                  {new Date(ultimoResumoIsv.data_hora).toLocaleString('pt-BR')}
+                </span>
+              </div>
+
+              {/* Cards de Métricas */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
+                <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
+                  <span className="text-[10px] text-slate-500 font-bold uppercase block">Itens Processados</span>
+                  <span className="font-mono font-black text-slate-900 text-sm">
+                    {ultimoResumoIsv.total_processados.toLocaleString('pt-BR')}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-emerald-50 rounded-lg border border-emerald-200">
+                  <span className="text-[10px] text-emerald-700 font-bold uppercase block">Com Valor Disponível</span>
+                  <span className="font-mono font-black text-emerald-950 text-sm">
+                    {ultimoResumoIsv.total_com_valor.toLocaleString('pt-BR')}
+                  </span>
+                </div>
+
+                <div className={`p-2.5 rounded-lg border ${
+                  ultimoResumoIsv.total_sem_valor > 0
+                    ? 'bg-amber-50 border-amber-200 text-amber-900'
+                    : 'bg-slate-50 border-slate-200 text-slate-700'
+                }`}>
+                  <span className="text-[10px] font-bold uppercase block">Sem Valor Oficial</span>
+                  <span className="font-mono font-black text-sm">
+                    {ultimoResumoIsv.total_sem_valor.toLocaleString('pt-BR')}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-indigo-50 rounded-lg border border-indigo-200 col-span-2 sm:col-span-1">
+                  <span className="text-[10px] text-indigo-700 font-bold uppercase block">Valor Total Imobilizado</span>
+                  <span className="font-mono font-black text-indigo-950 text-sm">
+                    {formatarMoedaBR(ultimoResumoIsv.valor_total_disponivel)}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-blue-50 rounded-lg border border-blue-200">
+                  <span className="text-[10px] text-blue-700 font-bold uppercase block">Cruzados SMGOI013</span>
+                  <span className="font-mono font-black text-blue-950 text-sm">
+                    {ultimoResumoIsv.total_cruzados_smgoi013.toLocaleString('pt-BR')}
+                  </span>
+                </div>
+
+                <div className="p-2.5 bg-purple-50 rounded-lg border border-purple-200">
+                  <span className="text-[10px] text-purple-700 font-bold uppercase block">Cruzados SPCOI007</span>
+                  <span className="font-mono font-black text-purple-950 text-sm">
+                    {ultimoResumoIsv.total_cruzados_spcoi007.toLocaleString('pt-BR')}
+                  </span>
+                </div>
+              </div>
+
+              {/* Botão de Ação Rápida para o ISV */}
+              {onNavigateToIsv && (
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={onNavigateToIsv}
+                    className="px-4 py-2 bg-indigo-700 hover:bg-indigo-800 text-white rounded-xl font-black text-xs uppercase tracking-wide flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
+                  >
+                    <Sparkles className="w-4 h-4 stroke-[2.5]" />
+                    <span>Abrir Módulo ISV com Dados Oficiais</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 6: HISTÓRICO */}
       {activeTab === 'HISTORICO' && (
         <div className="space-y-3">
           {historico.length === 0 ? (
