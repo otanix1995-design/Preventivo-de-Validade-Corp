@@ -12,6 +12,7 @@ export interface IsvPdfOptions {
   filialNome?: string;
   limiteQuantidade?: number | 'TODOS'; // Novo: Top 30, Top 50, Top 100 ou 'TODOS'
   fonteOficial?: string; // Ex: "PLANILHA OPERACIONAL OFICIAL ISV"
+  filtrosDescricao?: string; // Descrição de filtros combinados ativos (Setor, Idade, Dias sem venda, etc.)
 }
 
 /**
@@ -126,13 +127,13 @@ export function gerarRelatorioIsvA3Pdf(
 
   // 2. Barra de Resumo da Seleção / Filtros (Abaixo do cabeçalho)
   const isTopRanking = options.limiteQuantidade && options.limiteQuantidade !== 'TODOS';
-  const barraAltura = isTopRanking ? 13 : 11;
+  const barraAltura = isTopRanking || options.filtrosDescricao ? 14 : 11;
   doc.setFillColor(248, 250, 252); // slate-50
   doc.setDrawColor(226, 232, 240); // slate-200
   doc.setLineWidth(0.3);
   doc.rect(marginX, 33, pageWidth - marginX * 2, barraAltura, 'FD');
 
-  doc.setFontSize(8.5);
+  doc.setFontSize(8);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(15, 23, 42);
   let textoFiltro = options.tituloFiltro ? `FILTRO: ${options.tituloFiltro.toUpperCase()}` : 'FILTRO: GERAL DA LOJA';
@@ -142,7 +143,10 @@ export function gerarRelatorioIsvA3Pdf(
   if (isTopRanking) {
     textoFiltro += ` • [TOP ${options.limiteQuantidade} MAIORES PRODUTOS]`;
   }
-  doc.text(textoFiltro, marginX + 4, 38.5);
+  if (options.filtrosDescricao) {
+    textoFiltro += ` • [${options.filtrosDescricao.toUpperCase()}]`;
+  }
+  doc.text(textoFiltro, marginX + 4, 38);
 
   // Totais na barra
   doc.setFont('helvetica', 'bold');
@@ -230,11 +234,19 @@ export function gerarRelatorioIsvA3Pdf(
       agenciaTexto = `Múltiplas (${item.agencias_nomes.length})`;
     }
 
+    const descTexto = item.setor_operacional
+      ? `[${item.setor_operacional}] ${item.descricao}`
+      : item.descricao;
+
+    const embalagemTexto = item.embalagem_divergente
+      ? `${item.embalagem || 'UN'} (DIVERG.)`
+      : (item.embalagem || 'UN');
+
     const linhaBase = [
       item.codigo_interno,
       item.digito || '-',
-      item.descricao,
-      item.embalagem || 'UN',
+      descTexto,
+      embalagemTexto,
       item.estoque_formatado,
       String(item.dias_sem_venda),
       String(item.idade),

@@ -1,4 +1,5 @@
 import {
+  extrairSetorOperacionalIsv,
   FiltrosIsv,
   FornecedorSPCOI007,
   Industria,
@@ -10,6 +11,7 @@ import {
   ResponsaveisMercadoria,
   ResumoImportacaoIsv,
   ResumoImportacaoSPCOI007,
+  SetorOperacionalIsv,
   SolicitacaoAjusteIsv,
   VinculoIndustriaItemIsv,
   VinculoPromotorIndustria,
@@ -572,6 +574,116 @@ class IsvService {
     };
   }
 
+  /**
+   * Resolve a embalagem comercial do produto a partir da base oficial SPCOI007.
+   *
+   * Regras Oficiais (Etapa 2):
+   * 1. Cruzamento pelo código raiz e dígito (ou código raiz).
+   * 2. Se múltiplos fornecedores:
+   *    - Se houver apenas uma embalagem válida distinta: utiliza-a.
+   *    - Se houver embalagens divergentes entre fornecedores: sinaliza conflito
+   *      com divergente = true e preserva as divergências para conferência sem arbitrar.
+   *    - Se não houver embalagem na SPCOI007: recorre à SMGOI013 (se válida) ou retorna "EMBALAGEM PENDENTE".
+   */
+  public resolverEmbalagemSpcoi(
+    codigoInterno: string,
+    digito?: string,
+    fallbackEmbalagem?: string
+  ): {
+    embalagem: string;
+    divergente: boolean;
+    embalagensDistintas: string[];
+    fonte: 'SPCOI007' | 'SMGOI013' | 'PLANILHA_OPERACIONAL' | 'PENDENTE';
+  } {
+    if (!codigoInterno) {
+      return {
+        embalagem: fallbackEmbalagem || 'EMBALAGEM PENDENTE',
+        divergente: false,
+        embalagensDistintas: fallbackEmbalagem ? [fallbackEmbalagem] : [],
+        fonte: fallbackEmbalagem ? 'SMGOI013' : 'PENDENTE',
+      };
+    }
+
+    const codNorm = codigoInterno.toString().trim().replace(/^0+/, '');
+    const digNorm = digito !== undefined ? digito.toString().trim().replace(/^0+/, '') : undefined;
+
+    let fornecedores = this._fornecedores.filter((f) => {
+      const fCod = (f.codigo_interno || '').toString().trim().replace(/^0+/, '');
+      if (fCod !== codNorm) return false;
+      if (digNorm && f.digito) {
+        const fDig = f.digito.toString().trim().replace(/^0+/, '');
+        return fDig === digNorm;
+      }
+      return true;
+    });
+
+    if (fornecedores.length === 0 && digNorm) {
+      fornecedores = this._fornecedores.filter((f) => {
+        const fCod = (f.codigo_interno || '').toString().trim().replace(/^0+/, '');
+        return fCod === codNorm;
+      });
+    }
+
+    const embalagensValidas: string[] = [];
+    const chavesVistas = new Set<string>();
+
+    fornecedores.forEach((f) => {
+      const emb = (f.embalagem || '').trim();
+      if (
+        emb &&
+        emb.toUpperCase() !== 'EMBALAGEM PENDENTE' &&
+        emb.toUpperCase() !== '-' &&
+        emb.toUpperCase() !== 'NULL' &&
+        emb.toUpperCase() !== 'UNDEFINED'
+      ) {
+        const chaveNorm = emb.toUpperCase().replace(/\s+/g, ' ');
+        if (!chavesVistas.has(chaveNorm)) {
+          chavesVistas.add(chaveNorm);
+          embalagensValidas.push(emb);
+        }
+      }
+    });
+
+    if (embalagensValidas.length === 1) {
+      return {
+        embalagem: embalagensValidas[0],
+        divergente: false,
+        embalagensDistintas: embalagensValidas,
+        fonte: 'SPCOI007',
+      };
+    }
+
+    if (embalagensValidas.length > 1) {
+      return {
+        embalagem: embalagensValidas[0],
+        divergente: true,
+        embalagensDistintas: embalagensValidas,
+        fonte: 'SPCOI007',
+      };
+    }
+
+    if (
+      fallbackEmbalagem &&
+      fallbackEmbalagem.trim() &&
+      fallbackEmbalagem.toUpperCase() !== 'EMBALAGEM PENDENTE' &&
+      fallbackEmbalagem.toUpperCase() !== '-'
+    ) {
+      return {
+        embalagem: fallbackEmbalagem.trim(),
+        divergente: false,
+        embalagensDistintas: [fallbackEmbalagem.trim()],
+        fonte: 'SMGOI013',
+      };
+    }
+
+    return {
+      embalagem: 'EMBALAGEM PENDENTE',
+      divergente: false,
+      embalagensDistintas: [],
+      fonte: 'PENDENTE',
+    };
+  }
+
   // ==========================================
   // GESTÃO DE INDÚSTRIAS
   // ==========================================
@@ -916,10 +1028,21 @@ class IsvService {
           reg.fornecedor_planilha
         );
 
+        const setorOperacional = extrairSetorOperacionalIsv(reg.nome || reg.complemento || p?.descricao || '');
+        const embRes = this.resolverEmbalagemSpcoi(
+          reg.codigo_interno,
+          reg.digito,
+          p?.embalagem || reg.complemento || 'UN'
+        );
+
         // Enriquecer produto preservando dados completos da SMGOI013
         const prodItem: ProdutoSMG = p
           ? {
               ...p,
+              embalagem: embRes.embalagem,
+              setor_operacional: setorOperacional,
+              embalagem_divergente: embRes.divergente,
+              embalagens_divergentes: embRes.embalagensDistintas,
               estoque_total: reg.estoque,
               dias_sem_venda: reg.dias_sem_venda,
               idade: reg.idade,
@@ -932,7 +1055,10 @@ class IsvService {
               digito: reg.digito,
               codigo_exibicao: reg.codigo_exibicao,
               descricao: reg.nome,
-              embalagem: reg.complemento || 'UN',
+              setor_operacional: setorOperacional,
+              embalagem: embRes.embalagem,
+              embalagem_divergente: embRes.divergente,
+              embalagens_divergentes: embRes.embalagensDistintas,
               fator_embalagem: 1,
               unidade_medida: 'UN',
               estoque_emb1: reg.estoque,
@@ -969,7 +1095,10 @@ class IsvService {
           digito: reg.digito,
           codigo_exibicao: reg.codigo_exibicao,
           descricao: reg.nome,
-          embalagem: prodItem.embalagem || reg.complemento || 'UN',
+          setor_operacional: setorOperacional,
+          embalagem: embRes.embalagem,
+          embalagem_divergente: embRes.divergente,
+          embalagens_divergentes: embRes.embalagensDistintas,
           estoque_total: reg.estoque,
           estoque_formatado: estoqueFormatado,
           dias_sem_venda: reg.dias_sem_venda,
@@ -1022,6 +1151,13 @@ class IsvService {
         vinculosPorCnpj
       );
 
+      const setorOperacional = extrairSetorOperacionalIsv(p.descricao || '');
+      const embRes = this.resolverEmbalagemSpcoi(
+        p.codigo_interno,
+        p.digito,
+        p.embalagem || 'UN'
+      );
+
       const valorEstoque = this.calcularValorEstoque(p);
       const estoqueFormatado = this.formatarEstoqueIsv(p);
       const multiplosCnpjs = cnpjs.length > 1;
@@ -1038,13 +1174,24 @@ class IsvService {
         estoquePositivo &&
         (valorEstoque === null || valorEstoque < 250);
 
+      const prodAtualizado: ProdutoSMG = {
+        ...p,
+        setor_operacional: setorOperacional,
+        embalagem: embRes.embalagem,
+        embalagem_divergente: embRes.divergente,
+        embalagens_divergentes: embRes.embalagensDistintas,
+      };
+
       return {
-        produto: p,
+        produto: prodAtualizado,
         codigo_interno: p.codigo_interno,
         digito: p.digito,
         codigo_exibicao: p.codigo_exibicao,
         descricao: p.descricao,
-        embalagem: p.embalagem,
+        setor_operacional: setorOperacional,
+        embalagem: embRes.embalagem,
+        embalagem_divergente: embRes.divergente,
+        embalagens_divergentes: embRes.embalagensDistintas,
         estoque_total: p.estoque_total || 0,
         estoque_formatado: estoqueFormatado,
         dias_sem_venda: diasSemVenda,
@@ -1079,6 +1226,13 @@ class IsvService {
           const matchDesc = item.descricao.toUpperCase().includes(q);
           const matchEan = (item.produto.eans || []).some((e) => e.includes(q));
           if (!matchCod && !matchExib && !matchDesc && !matchEan) {
+            return false;
+          }
+        }
+
+        // 1.1. Setor Operacional Oficial (FRIOS, ACOUGUE, HORTIFRUTI, CAFETERIA, LOJA)
+        if (filtros.setorOperacional && filtros.setorOperacional !== 'TODOS') {
+          if (item.setor_operacional !== filtros.setorOperacional) {
             return false;
           }
         }

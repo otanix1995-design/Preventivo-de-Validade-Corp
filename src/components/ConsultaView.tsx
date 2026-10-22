@@ -213,7 +213,14 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
       selectedProduto.codigo_interno
     );
 
-    const embData = parseEmbalagem(selectedProduto.embalagem);
+    const resolucaoEmbalagem = isvService.resolverEmbalagemSpcoi(
+      selectedProduto.codigo_interno,
+      selectedProduto.digito,
+      selectedProduto.embalagem || regOp?.complemento
+    );
+
+    const embExibicao = resolucaoEmbalagem.embalagem;
+    const embData = parseEmbalagem(embExibicao);
     const isPesavel =
       embData.produtoPesavel ||
       embData.tipoControle === 'PESO' ||
@@ -223,8 +230,8 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
     const posEstoque = calcularPosicaoEstoque(
       selectedProduto.estoque_emb1,
       selectedProduto.estoque_emb9,
-      selectedProduto.embalagem,
-      selectedProduto.fator_embalagem
+      embExibicao,
+      selectedProduto.fator_embalagem || embData.fator
     );
 
     // Cálculo do estoque unificado formatado por extenso
@@ -413,27 +420,57 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         </div>
 
         {/* =================================================================== */}
-        {/* SEÇÃO 3: EMBALAGEM COMPLETA DA SMGOI013 */}
+        {/* SEÇÃO 3: EMBALAGEM COMERCIAL (SPCOI007) */}
         {/* =================================================================== */}
         <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-xs font-black text-gray-800 uppercase tracking-wider flex items-center gap-2">
               <Package className="w-4 h-4 text-blue-700 stroke-[2.5]" />
               Embalagem Comercial Completa
             </h3>
-            <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">
-              Base Permanente SMGOI013
+            <span
+              className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded border ${
+                resolucaoEmbalagem.fonte === 'SPCOI007'
+                  ? 'bg-blue-50 text-blue-800 border-blue-200'
+                  : resolucaoEmbalagem.fonte === 'SMGOI013'
+                  ? 'bg-gray-100 text-gray-700 border-gray-200'
+                  : 'bg-amber-50 text-amber-800 border-amber-200'
+              }`}
+            >
+              Fonte: {resolucaoEmbalagem.fonte === 'SPCOI007' ? 'SPCOI007 Oficial' : resolucaoEmbalagem.fonte === 'SMGOI013' ? 'SMGOI013' : 'Pendente'}
             </span>
           </div>
 
-          {temEmbalagemPermanente ? (
+          {resolucaoEmbalagem.divergente ? (
+            <div className="p-3.5 bg-amber-50 rounded-xl border border-amber-300 space-y-2.5">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-700 shrink-0" />
+                <span className="text-xs font-black text-amber-900 uppercase tracking-wider">
+                  CONFLITO DE EMBALAGEM IDENTIFICADO NA SPCOI007
+                </span>
+              </div>
+              <p className="text-xs text-amber-800 leading-relaxed">
+                Foram identificadas <strong>{resolucaoEmbalagem.embalagensDistintas.length} estruturas de embalagem distintas</strong> cadastradas entre fornecedores deste produto. O sistema não arbitrou nenhuma delas automaticamente. Favor averiguar fisicamente no estoque:
+              </p>
+              <div className="flex flex-wrap gap-2 pt-1">
+                {resolucaoEmbalagem.embalagensDistintas.map((emb, idx) => (
+                  <span
+                    key={idx}
+                    className="px-2.5 py-1 rounded-md bg-white border border-amber-300 font-mono text-xs font-black text-amber-950 shadow-2xs"
+                  >
+                    Opção {idx + 1}: {emb}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : embExibicao && embExibicao.toUpperCase() !== 'EMBALAGEM PENDENTE' ? (
             <div className="p-3.5 bg-gray-50 rounded-xl border border-gray-200 flex items-center justify-between gap-3">
               <div className="space-y-0.5">
                 <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider block">
-                  Estrutura da Embalagem
+                  Estrutura da Embalagem ({resolucaoEmbalagem.fonte})
                 </span>
                 <span className="text-base font-black text-gray-900 font-mono uppercase">
-                  {selectedProduto.embalagem}
+                  {embExibicao}
                 </span>
               </div>
               <div className="text-right">
@@ -453,7 +490,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                   EMBALAGEM PENDENTE
                 </span>
                 <p className="text-xs text-amber-800">
-                  Mercadoria sem embalagem cadastrada na base permanente SMGOI013. O sistema não deduz a embalagem comercial a partir do texto do estoque.
+                  Mercadoria sem embalagem cadastrada nas fontes oficiais (SPCOI007 ou SMGOI013). O sistema não deduz a embalagem comercial a partir do texto do estoque.
                 </p>
               </div>
             </div>
@@ -492,7 +529,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               </span>
             </div>
 
-            {/* Valor Indisponível e Custo Médio SMGO */}
+            {/* Valor Indisponível e Situação de Venda */}
             <div className="space-y-2">
               <div className="p-2.5 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-between">
                 <span className="text-xs text-gray-600 font-bold uppercase">Valor Indisponível (Col. G):</span>
@@ -504,9 +541,9 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               </div>
 
               <div className="p-2.5 bg-gray-50 rounded-lg border border-gray-200 flex items-center justify-between">
-                <span className="text-xs text-gray-600 font-bold uppercase">Custo Médio SMGOI013:</span>
+                <span className="text-xs text-gray-600 font-bold uppercase">Venda 30 Dias:</span>
                 <strong className="text-xs font-mono font-black text-gray-900">
-                  {selectedProduto.custo_medio ? formatarMoedaBR(selectedProduto.custo_medio) : 'Não informado'}
+                  {venda30d} {isPesavel ? 'KG' : 'UN'} ({mediaDiaria}/dia)
                 </strong>
               </div>
             </div>
@@ -1211,11 +1248,12 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                   e.includes(debouncedQuery.trim())
                 );
 
-                // Embalagem da SMGOI013 ou EMBALAGEM PENDENTE
-                const temEmb =
-                  prod.embalagem &&
-                  prod.embalagem.trim() !== '' &&
-                  prod.embalagem.toUpperCase() !== 'EMBALAGEM PENDENTE';
+                // Resolução da Embalagem via SPCOI007
+                const resEmbItem = isvService.resolverEmbalagemSpcoi(
+                  prod.codigo_interno,
+                  prod.digito,
+                  prod.embalagem || regOpItem?.complemento
+                );
 
                 // Estoque unificado por extenso
                 let estoqueExtenso = '';
@@ -1225,7 +1263,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                   const posEstoqueItem = calcularPosicaoEstoque(
                     prod.estoque_emb1,
                     prod.estoque_emb9,
-                    prod.embalagem,
+                    resEmbItem.embalagem,
                     prod.fator_embalagem
                   );
                   estoqueExtenso = formatarEstoqueOperacionalExtenso(
@@ -1255,9 +1293,16 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                             <HighlightText text={prod.codigo_exibicao} query={debouncedQuery} />
                           </span>
 
-                          {temEmb ? (
+                          {resEmbItem.divergente ? (
+                            <span
+                              className="text-[10px] font-black text-amber-900 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded"
+                              title={`Embalagens conflitantes na SPCOI007: ${resEmbItem.embalagensDistintas.join(' / ')}`}
+                            >
+                              EMB. DIVERGENTE ({resEmbItem.embalagensDistintas.length})
+                            </span>
+                          ) : resEmbItem.embalagem && resEmbItem.embalagem.toUpperCase() !== 'EMBALAGEM PENDENTE' ? (
                             <span className="text-xs font-bold text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
-                              {prod.embalagem}
+                              {resEmbItem.embalagem}
                             </span>
                           ) : (
                             <span className="text-[10px] font-black text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 uppercase">

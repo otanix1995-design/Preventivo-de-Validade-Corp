@@ -61,6 +61,11 @@ export interface ProdutoSMG {
   
   // Vínculos EAN
   eans: string[];
+
+  // Classificação Operacional de Setor e Embalagem SPCOI007
+  setor_operacional?: SetorOperacionalIsv;
+  embalagem_divergente?: boolean;
+  embalagens_divergentes?: string[];
   
   // Dados operacionais da Nova Planilha Operacional Oficial (quando importada)
   dados_operacionais?: RegistroPlanilhaIsv;
@@ -632,13 +637,86 @@ export interface VinculoIndustriaItemIsv {
   promotores: PromotorVinculadoItem[];
 }
 
+export type SetorOperacionalIsv = 'FRIOS' | 'ACOUGUE' | 'HORTIFRUTI' | 'CAFETERIA' | 'LOJA';
+
+export interface InfoSetorOperacional {
+  id: SetorOperacionalIsv;
+  label: string;
+  prefixo: string;
+  corHex: string;
+  bgTailwind: string;
+  textTailwind: string;
+  borderTailwind: string;
+}
+
+export const SETORES_OPERACIONAIS_CONFIG: Record<SetorOperacionalIsv, InfoSetorOperacional> = {
+  FRIOS: {
+    id: 'FRIOS',
+    label: 'Frios',
+    prefixo: 'RF.',
+    corHex: '#2563EB',
+    bgTailwind: 'bg-blue-600',
+    textTailwind: 'text-white',
+    borderTailwind: 'border-blue-700',
+  },
+  ACOUGUE: {
+    id: 'ACOUGUE',
+    label: 'Açougue',
+    prefixo: 'AC.',
+    corHex: '#DC2626',
+    bgTailwind: 'bg-red-600',
+    textTailwind: 'text-white',
+    borderTailwind: 'border-red-700',
+  },
+  HORTIFRUTI: {
+    id: 'HORTIFRUTI',
+    label: 'Hortifruti',
+    prefixo: 'HF.',
+    corHex: '#16A34A',
+    bgTailwind: 'bg-emerald-600',
+    textTailwind: 'text-white',
+    borderTailwind: 'border-emerald-700',
+  },
+  CAFETERIA: {
+    id: 'CAFETERIA',
+    label: 'Cafeteria',
+    prefixo: 'CR.',
+    corHex: '#92400E',
+    bgTailwind: 'bg-amber-800',
+    textTailwind: 'text-white',
+    borderTailwind: 'border-amber-900',
+  },
+  LOJA: {
+    id: 'LOJA',
+    label: 'Loja',
+    prefixo: 'OUTROS',
+    corHex: '#7C3AED',
+    bgTailwind: 'bg-purple-600',
+    textTailwind: 'text-white',
+    borderTailwind: 'border-purple-700',
+  },
+};
+
+export function extrairSetorOperacionalIsv(descricao: string): SetorOperacionalIsv {
+  if (!descricao) return 'LOJA';
+  const clean = descricao.trim().toUpperCase();
+  if (clean.startsWith('RF.')) return 'FRIOS';
+  if (clean.startsWith('AC.')) return 'ACOUGUE';
+  if (clean.startsWith('HF.')) return 'HORTIFRUTI';
+  if (clean.startsWith('CR.')) return 'CAFETERIA';
+  return 'LOJA';
+}
+
 export interface ItemIsv {
   produto: ProdutoSMG;
   codigo_interno: string;
   digito: string;
   codigo_exibicao: string;
   descricao: string;
+  setor_operacional: SetorOperacionalIsv;
   embalagem: string;
+  embalagem_divergente?: boolean;
+  embalagens_divergentes?: string[];
   estoque_total: number;
   estoque_formatado: string;
   dias_sem_venda: number;
@@ -661,6 +739,7 @@ export interface FiltrosIsv {
   industriaCnpj: string;
   promotorId: string;
   termoBusca: string;
+  setorOperacional: 'TODOS' | SetorOperacionalIsv;
   setorFisico: string;
   setorBalanco: string;
   diasSemVenda: number | null;

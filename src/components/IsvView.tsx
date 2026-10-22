@@ -40,7 +40,9 @@ import {
   ItemIsv,
   ProdutoSMG,
   Promotor,
-  SolicitacaoAjusteIsv
+  SETORES_OPERACIONAIS_CONFIG,
+  SetorOperacionalIsv,
+  SolicitacaoAjusteIsv,
 } from '../types';
 import { ModalDetalhesVinculosIsv } from './isv/ModalDetalhesVinculosIsv';
 import { ModalRegistrarAjusteIsv } from './isv/ModalRegistrarAjusteIsv';
@@ -143,6 +145,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
     industriaCnpj: 'TODAS',
     promotorId: 'TODOS',
     termoBusca: '',
+    setorOperacional: 'TODOS',
     setorFisico: 'TODOS',
     setorBalanco: 'TODOS',
     diasSemVenda: null,
@@ -288,6 +291,8 @@ export const IsvView: React.FC<IsvViewProps> = ({
       ? 'Planilha Operacional Oficial ISV'
       : 'Base SMGOI013';
 
+    const filtrosDescricao = getFiltrosAtivosDescricao();
+
     gerarRelatorioIsvA3Pdf(itensFiltrados, {
       tituloFiltro,
       tipoAgrupamento: pdfTipoAgrupamento,
@@ -297,9 +302,40 @@ export const IsvView: React.FC<IsvViewProps> = ({
       filialNome: 'FILIAL 172 - CASCAVEL',
       limiteQuantidade: pdfLimiteExportacao,
       fonteOficial,
+      filtrosDescricao,
     });
 
     setIsModalPdfOpen(false);
+  };
+
+  const getFiltrosAtivosDescricao = (): string => {
+    const parts: string[] = [];
+    if (filtros.setorOperacional && filtros.setorOperacional !== 'TODOS') {
+      const conf = SETORES_OPERACIONAIS_CONFIG[filtros.setorOperacional];
+      parts.push(`Setor: ${conf ? conf.label : filtros.setorOperacional}`);
+    }
+    if (filtros.diasSemVenda !== null) {
+      parts.push(`Dias s/ venda ${filtros.modoDiasSemVenda === 'EXATO' ? '=' : '>='} ${filtros.diasSemVenda}d`);
+    }
+    if (filtros.idade !== null) {
+      parts.push(`Idade ${filtros.modoIdade === 'EXATO' ? '=' : '>='} ${filtros.idade}d`);
+    }
+    if (filtros.filtroEstoque !== 'TODOS') {
+      parts.push(filtros.filtroEstoque === 'COM_ESTOQUE' ? 'Com Estoque' : 'Estoque Zerado');
+    }
+    if (filtros.filtroValor !== 'TODOS') {
+      parts.push(filtros.filtroValor === 'ATE_250' ? 'Até R$250' : 'Acima R$250');
+    }
+    if (filtros.situacaoVinculo !== 'TODOS') {
+      parts.push(
+        filtros.situacaoVinculo === 'COM_PROMOTOR'
+          ? 'Com Promotor'
+          : filtros.situacaoVinculo === 'SEM_PROMOTOR'
+          ? 'Sem Promotor'
+          : 'Múltiplos CNPJs'
+      );
+    }
+    return parts.join(' | ');
   };
 
   const handleQuickPrintTop30 = () => {
@@ -314,6 +350,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
       filialNome: 'FILIAL 172 - CASCAVEL',
       limiteQuantidade: 30,
       fonteOficial,
+      filtrosDescricao: getFiltrosAtivosDescricao(),
     });
   };
 
@@ -498,6 +535,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                     industriaCnpj: 'TODAS',
                     promotorId: 'TODOS',
                     termoBusca: '',
+                    setorOperacional: 'TODOS',
                     setorFisico: 'TODOS',
                     setorBalanco: 'TODOS',
                     diasSemVenda: null,
@@ -510,7 +548,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                     ordenacao: 'MAIOR_VALOR',
                   })
                 }
-                className="text-[11px] font-bold text-blue-700 hover:underline flex items-center gap-1"
+                className="text-[11px] font-bold text-blue-700 hover:underline flex items-center gap-1 cursor-pointer"
               >
                 <RefreshCw className="w-3 h-3" />
                 Restaurar Padrão
@@ -580,8 +618,55 @@ export const IsvView: React.FC<IsvViewProps> = ({
               </div>
             </div>
 
-            {/* Linha 2: Dias Sem Venda Chips (3, 4, 5, 6, 7, 8, 9, 10, 15) */}
-            <div className="pt-1 flex items-center gap-1.5 overflow-x-auto text-xs pb-1">
+            {/* Linha 2: Novo Filtro SETOR Operacional Oficial (RF., AC., HF., CR., LOJA) */}
+            <div className="pt-1 flex items-center gap-1.5 overflow-x-auto text-xs pb-1 border-t border-slate-100">
+              <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
+                Setor:
+              </span>
+              <button
+                type="button"
+                onClick={() => setFiltros((prev) => ({ ...prev, setorOperacional: 'TODOS' }))}
+                className={`px-2.5 py-1 rounded text-[11px] font-black uppercase tracking-wider transition-colors cursor-pointer ${
+                  filtros.setorOperacional === 'TODOS'
+                    ? 'bg-slate-800 text-white shadow-2xs'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                Todos
+              </button>
+              {(Object.keys(SETORES_OPERACIONAIS_CONFIG) as SetorOperacionalIsv[]).map((setorKey) => {
+                const conf = SETORES_OPERACIONAIS_CONFIG[setorKey];
+                const isSelected = filtros.setorOperacional === setorKey;
+                return (
+                  <button
+                    key={setorKey}
+                    type="button"
+                    onClick={() =>
+                      setFiltros((prev) => ({
+                        ...prev,
+                        setorOperacional: prev.setorOperacional === setorKey ? 'TODOS' : setorKey,
+                      }))
+                    }
+                    className={`px-2.5 py-1 rounded text-[11px] font-black uppercase tracking-wider whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'text-white shadow-xs'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200 border border-slate-200'
+                    }`}
+                    style={isSelected ? { backgroundColor: conf.corHex } : undefined}
+                  >
+                    <span
+                      className="w-2 h-2 rounded-full shrink-0"
+                      style={{ backgroundColor: conf.corHex }}
+                    />
+                    <span>{conf.label}</span>
+                    <span className="text-[9px] opacity-80 font-mono">({conf.prefixo})</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Linha 3: Dias Sem Venda Chips (3, 4, 5, 6, 7, 8, 9, 10, 15) */}
+            <div className="pt-1 flex items-center gap-1.5 overflow-x-auto text-xs pb-1 border-t border-slate-100">
               <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
                 Dias s/ Venda:
               </span>
@@ -633,6 +718,93 @@ export const IsvView: React.FC<IsvViewProps> = ({
                   onClick={() => setFiltros((prev) => ({ ...prev, modoDiasSemVenda: 'EXATO' }))}
                   className={`px-1.5 py-0.5 rounded font-bold ${
                     filtros.modoDiasSemVenda === 'EXATO'
+                      ? 'bg-slate-800 text-white'
+                      : 'text-slate-500'
+                  }`}
+                >
+                  Exato
+                </button>
+              </div>
+            </div>
+
+            {/* Linha 4: Novo Filtro IDADE da Mercadoria (Independente de Dias Sem Venda) */}
+            <div className="pt-1 flex items-center gap-1.5 overflow-x-auto text-xs pb-1 border-t border-slate-100">
+              <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
+                Idade da Mercadoria:
+              </span>
+              <button
+                type="button"
+                onClick={() => setFiltros((prev) => ({ ...prev, idade: null }))}
+                className={`px-2 py-0.5 rounded text-[11px] font-bold ${
+                  filtros.idade === null
+                    ? 'bg-blue-700 text-white'
+                    : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                }`}
+              >
+                Todas
+              </button>
+              {[30, 60, 90, 180, 365].map((dias) => (
+                <button
+                  key={dias}
+                  type="button"
+                  onClick={() =>
+                    setFiltros((prev) => ({
+                      ...prev,
+                      idade: prev.idade === dias ? null : dias,
+                    }))
+                  }
+                  className={`px-2 py-0.5 rounded text-[11px] font-bold whitespace-nowrap ${
+                    filtros.idade === dias
+                      ? 'bg-purple-700 text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {dias}d{filtros.modoIdade === 'MINIMO' ? '+' : ''}
+                </button>
+              ))}
+
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="Dias..."
+                  value={filtros.idade !== null ? filtros.idade : ''}
+                  onChange={(e) => {
+                    const val = e.target.value.trim() === '' ? null : Math.max(0, parseInt(e.target.value, 10) || 0);
+                    setFiltros((prev) => ({ ...prev, idade: val }));
+                  }}
+                  className="w-16 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 text-xs font-mono font-bold text-slate-900 focus:bg-white focus:outline-hidden"
+                  title="Digite a idade em dias"
+                />
+                {filtros.idade !== null && (
+                  <button
+                    type="button"
+                    onClick={() => setFiltros((prev) => ({ ...prev, idade: null }))}
+                    className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    title="Limpar idade"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1 pl-2 border-l border-slate-200 text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => setFiltros((prev) => ({ ...prev, modoIdade: 'MINIMO' }))}
+                  className={`px-1.5 py-0.5 rounded font-bold ${
+                    filtros.modoIdade === 'MINIMO'
+                      ? 'bg-slate-800 text-white'
+                      : 'text-slate-500'
+                  }`}
+                >
+                  Mínimo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFiltros((prev) => ({ ...prev, modoIdade: 'EXATO' }))}
+                  className={`px-1.5 py-0.5 rounded font-bold ${
+                    filtros.modoIdade === 'EXATO'
                       ? 'bg-slate-800 text-white'
                       : 'text-slate-500'
                   }`}
@@ -913,8 +1085,22 @@ export const IsvView: React.FC<IsvViewProps> = ({
                           {/* 3. DESCRIÇÃO */}
                           <td className="py-2.5 px-3 font-black text-slate-900 uppercase">
                             <div className="flex items-center gap-1.5 flex-nowrap">
+                              {/* Badge discreto com cor exata do Setor Operacional */}
+                              {(() => {
+                                const confSetor = SETORES_OPERACIONAIS_CONFIG[item.setor_operacional] || SETORES_OPERACIONAIS_CONFIG.LOJA;
+                                return (
+                                  <span
+                                    className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded text-white tracking-wider shrink-0 shadow-2xs select-none"
+                                    style={{ backgroundColor: confSetor.corHex }}
+                                    title={`Setor Operacional: ${confSetor.label} (${confSetor.prefixo})`}
+                                  >
+                                    {confSetor.label}
+                                  </span>
+                                );
+                              })()}
+
                               <span
-                                className="truncate max-w-[190px] sm:max-w-[260px] block"
+                                className="truncate max-w-[170px] sm:max-w-[240px] block"
                                 title={item.descricao}
                               >
                                 {item.descricao}
@@ -942,7 +1128,17 @@ export const IsvView: React.FC<IsvViewProps> = ({
 
                           {/* 4. EMBALAGEM */}
                           <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap font-mono text-[11px]">
-                            {item.embalagem || 'UN'}
+                            {item.embalagem_divergente ? (
+                              <div
+                                className="inline-flex items-center gap-1 text-amber-900 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200"
+                                title={`Conflito de embalagem na SPCOI007: ${item.embalagens_divergentes?.join(' / ')}`}
+                              >
+                                <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
+                                <span>{item.embalagem}</span>
+                              </div>
+                            ) : (
+                              <span>{item.embalagem || 'UN'}</span>
+                            )}
                           </td>
 
                           {/* 5. ESTOQUE */}
