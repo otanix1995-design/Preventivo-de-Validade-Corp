@@ -104,46 +104,37 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
 
     const smgResults = productRepository.searchProducts(debouncedQuery);
 
-    // Complementar com registros da nova planilha operacional que porventura ainda não estejam na SMGOI013
-    const opRegistros = isvService.getRegistrosIsvOperacional();
-    if (opRegistros.length > 0) {
-      const q = debouncedQuery.trim().toUpperCase();
-      const qNorm = q.replace(/^0+/, '');
+    // Complementar com registros da nova planilha operacional usando busca indexada rápida (limitada a 50)
+    if (isvService.temPlanilhaIsv()) {
       const smgKeys = new Set(smgResults.map((p) => `${p.codigo_interno}-${p.digito || ''}`));
+      const opRegistros = isvService.searchRegistrosOperacionais(debouncedQuery, 50);
 
       const additionalProds: ProdutoSMG[] = [];
-      for (const reg of opRegistros) {
+      for (let i = 0; i < opRegistros.length; i++) {
+        const reg = opRegistros[i];
         const key = `${reg.codigo_interno}-${reg.digito || ''}`;
         if (smgKeys.has(key)) continue;
 
-        const matchCode =
-          reg.codigo_interno === qNorm ||
-          reg.codigo_exibicao.toUpperCase().includes(q) ||
-          reg.codigo_original.includes(q);
-        const matchNome = reg.nome.toUpperCase().includes(q);
-
-        if (matchCode || matchNome) {
-          additionalProds.push({
-            id: `op_${reg.codigo_interno}_${reg.digito}`,
-            codigo_original: reg.codigo_original,
-            codigo_completo: reg.codigo_original,
-            codigo_interno: reg.codigo_interno,
-            digito: reg.digito,
-            codigo_exibicao: reg.codigo_exibicao,
-            chave_normalizada: reg.chave_normalizada || `${reg.codigo_interno}-${reg.digito}`,
-            descricao: reg.nome + (reg.complemento ? ` ${reg.complemento}` : ''),
-            embalagem: 'EMBALAGEM PENDENTE',
-            estoque_emb1: 0,
-            estoque_emb9: reg.estoque,
-            estoque_total: reg.estoque,
-            vendas_qtde_30d: reg.venda_30_dias,
-            dias_sem_venda: reg.dias_sem_venda,
-            idade: reg.idade,
-            eans: [],
-            dados_operacionais: reg,
-            atualizado_em: new Date().toISOString(),
-          });
-        }
+        additionalProds.push({
+          id: `op_${reg.codigo_interno}_${reg.digito}`,
+          codigo_original: reg.codigo_original,
+          codigo_completo: reg.codigo_original,
+          codigo_interno: reg.codigo_interno,
+          digito: reg.digito,
+          codigo_exibicao: reg.codigo_exibicao,
+          chave_normalizada: reg.chave_normalizada || `${reg.codigo_interno}-${reg.digito}`,
+          descricao: reg.nome + (reg.complemento ? ` ${reg.complemento}` : ''),
+          embalagem: 'EMBALAGEM PENDENTE',
+          estoque_emb1: 0,
+          estoque_emb9: reg.estoque,
+          estoque_total: reg.estoque,
+          vendas_qtde_30d: reg.venda_30_dias,
+          dias_sem_venda: reg.dias_sem_venda,
+          idade: reg.idade,
+          eans: [],
+          dados_operacionais: reg,
+          atualizado_em: new Date().toISOString(),
+        });
       }
       return [...smgResults, ...additionalProds];
     }

@@ -637,7 +637,7 @@ export interface VinculoIndustriaItemIsv {
   promotores: PromotorVinculadoItem[];
 }
 
-export type SetorOperacionalIsv = 'FRIOS' | 'ACOUGUE' | 'HORTIFRUTI' | 'CAFETERIA' | 'LOJA';
+export type SetorOperacionalIsv = 'FRIOS' | 'ACOUGUE' | 'HORTIFRUTI' | 'LOJA';
 
 export interface InfoSetorOperacional {
   id: SetorOperacionalIsv;
@@ -677,19 +677,10 @@ export const SETORES_OPERACIONAIS_CONFIG: Record<SetorOperacionalIsv, InfoSetorO
     textTailwind: 'text-white',
     borderTailwind: 'border-emerald-700',
   },
-  CAFETERIA: {
-    id: 'CAFETERIA',
-    label: 'Cafeteria',
-    prefixo: 'CR.',
-    corHex: '#92400E',
-    bgTailwind: 'bg-amber-800',
-    textTailwind: 'text-white',
-    borderTailwind: 'border-amber-900',
-  },
   LOJA: {
     id: 'LOJA',
     label: 'Loja',
-    prefixo: 'OUTROS',
+    prefixo: 'CR. / OUTROS',
     corHex: '#7C3AED',
     bgTailwind: 'bg-purple-600',
     textTailwind: 'text-white',
@@ -703,7 +694,7 @@ export function extrairSetorOperacionalIsv(descricao: string): SetorOperacionalI
   if (clean.startsWith('RF.')) return 'FRIOS';
   if (clean.startsWith('AC.')) return 'ACOUGUE';
   if (clean.startsWith('HF.')) return 'HORTIFRUTI';
-  if (clean.startsWith('CR.')) return 'CAFETERIA';
+  // CR. e todos os outros produtos pertencem ao setor LOJA
   return 'LOJA';
 }
 
@@ -739,7 +730,7 @@ export interface FiltrosIsv {
   industriaCnpj: string;
   promotorId: string;
   termoBusca: string;
-  setorOperacional: 'TODOS' | SetorOperacionalIsv;
+  setorOperacional: 'TODOS' | SetorOperacionalIsv | 'CAFETERIA';
   setorFisico: string;
   setorBalanco: string;
   diasSemVenda: number | null;

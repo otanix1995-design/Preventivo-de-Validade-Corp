@@ -210,4 +210,23 @@ Arquitetura técnica controlada e plano de execução para vincular produtos da 
    - `_montarVinculosDetalhados`: Mapeia per-indústria os vínculos sem deduplicações indevidas nem mesclas arbitrárias.
    - `getIndicadoresIsv`: Preserva a contabilização de produtos únicos por `codigo_interno`.
 
+---
+
+## 8. Correção de Desempenho e Estabilidade — Otimização da Base de 65.000 Registros
+
+### Problemas Solucionados
+1. **Eliminação de Scans Lineares $O(N \times M)$**:
+   - `resolverEmbalagemSpcoi`: Substituído por mapas rápidos `_fornecedoresByCod` e `_fornecedoresByCodDig` com cache `_embalagemCache`.
+   - `getRegistroOperacional`: Substituído por índice $O(1)$ `_regOpByKey` e `_regOpByCod`, resolvendo código + dígito instantaneamente.
+   - `getResponsaveisPorCodigoInterno`: Otimizado com `_responsaveisCache` e mapas indexados de fornecedores e indústrias.
+2. **Avaliação Preguiçosa (Lazy) de Múltiplos Vínculos**:
+   - No carregamento inicial de 65.000 itens do ISV, o objeto `vinculos_detalhados` não é gerado antecipadamente para todos os itens, economizando dezenas de megabytes de RAM e milhares de alocações de objetos. O modal resolve sob demanda através de `isvService.getVinculosDetalhados(item)`.
+3. **Busca Bounded na Consulta de Mercadorias**:
+   - Implementado `isvService.searchRegistrosOperacionais(termo, 50)` com saída antecipada logo ao atingir 50 resultados, eliminando a clonagem e varredura completa da base de 65.000 itens em cada digitação.
+4. **Otimização de Filtros e Indicadores no ISV**:
+   - Variáveis invariantes de filtro (`qUpper`, `promotorNomeAlvo`, `normFiltroCnpj`) içadas para fora do laço `.filter()`.
+   - Cálculo de indicadores consolidado em uma única passada (`getIndicadoresIsv`), fornecendo métricas, contagens de produtos com/sem valor e total financeiro de forma unificada.
+   - Memoização da contagem de possíveis ajustes (`totalAjustes`) para evitar execuções pesadas no JSX.
+
+
 

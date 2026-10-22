@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import React from 'react';
+import { isvService } from '../../services/isvService';
 import { ItemIsv, VinculoIndustriaItemIsv } from '../../types';
 
 interface ModalDetalhesVinculosIsvProps {
@@ -26,7 +27,10 @@ export const ModalDetalhesVinculosIsv: React.FC<ModalDetalhesVinculosIsvProps> =
 }) => {
   if (!isOpen || !item) return null;
 
-  const vinculos: VinculoIndustriaItemIsv[] = item.vinculos_detalhados || [];
+  const vinculos: VinculoIndustriaItemIsv[] =
+    item.vinculos_detalhados && item.vinculos_detalhados.length > 0
+      ? item.vinculos_detalhados
+      : isvService.getVinculosDetalhados(item);
 
   return (
     <div

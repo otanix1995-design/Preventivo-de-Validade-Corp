@@ -225,25 +225,20 @@ export const IsvView: React.FC<IsvViewProps> = ({
     return isvService.filtrarItensIsv(base, filtros);
   }, [itensIsvBrutos, filtros, subAba]);
 
-  // Indicadores consolidados do painel (sempre com produtos únicos)
+  // Indicadores consolidados do painel (sempre com produtos únicos e cálculo unificado em uma única passada)
   const indicadores = useMemo(() => {
     return isvService.getIndicadoresIsv(itensFiltrados);
   }, [itensFiltrados]);
 
-  // Resumo financeiro estrito da lista filtrada
-  const valorTotalFiltrado = useMemo(() => {
-    return itensFiltrados.reduce((acc, item) => {
-      return acc + (item.valor_estoque !== null ? item.valor_estoque : 0);
-    }, 0);
-  }, [itensFiltrados]);
+  // Resumo financeiro estrito da lista filtrada (reutiliza resultado consolidado)
+  const valorTotalFiltrado = indicadores.valorTotalEstoque;
+  const qtdComValor = indicadores.qtdComValor;
+  const qtdSemValor = indicadores.qtdSemValor;
 
-  const qtdComValor = useMemo(() => {
-    return itensFiltrados.filter((i) => i.valor_estoque !== null).length;
-  }, [itensFiltrados]);
-
-  const qtdSemValor = useMemo(() => {
-    return itensFiltrados.filter((i) => i.valor_estoque === null).length;
-  }, [itensFiltrados]);
+  // Memoizar contagem de elegíveis para ajustes para evitar varrer 65.000 itens no JSX em cada render
+  const totalAjustes = useMemo(() => {
+    return itensIsvBrutos.filter((i) => i.elegivel_ajuste).length;
+  }, [itensIsvBrutos]);
 
   // Itens da página atual
   const totalPaginas = Math.ceil(itensFiltrados.length / ITENS_POR_PAGINA) || 1;
@@ -445,7 +440,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
             }`}
           >
             <AlertTriangle className="w-3.5 h-3.5 text-amber-300" />
-            <span>Possíveis Ajustes ({itensIsvBrutos.filter((i) => i.elegivel_ajuste).length})</span>
+            <span>Possíveis Ajustes ({totalAjustes})</span>
           </button>
 
           <button
