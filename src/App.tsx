@@ -189,7 +189,7 @@ export default function App() {
       />
 
       {/* 2. Main Content Container */}
-      <main className="flex-1 w-full max-w-4xl mx-auto px-3.5 sm:px-6 pt-4 pb-20">
+      <main className="flex-1 w-full max-w-6xl mx-auto px-3.5 sm:px-6 pt-4 pb-20">
         {/* TAB: DASHBOARD */}
         {activeTab === 'dashboard' && (
           <DashboardView
@@ -208,6 +208,9 @@ export default function App() {
             }}
             onCadastrarDireto={() => {
               setIsSelectProdutoModalOpen(true);
+            }}
+            onCadastrarParaProduto={(prod) => {
+              handleOpenCadastrarForProduto(prod);
             }}
           />
         )}
@@ -247,6 +250,22 @@ export default function App() {
               }
             }}
           />
+        )}
+
+        {/* TAB: ISV (Inteligência de Estoque) */}
+        {activeTab === 'isv' && (
+          <div className="space-y-3">
+            <IsvView
+              produtos={produtos}
+              onSelectProduto={(prod) => {
+                setSelectedProduto(prod);
+                setActiveTab('consulta');
+                setSubView(null);
+              }}
+              onOpenCadastrarModal={handleOpenCadastrarForProduto}
+              onBack={() => setActiveTab('dashboard')}
+            />
+          </div>
         )}
 
         {/* TAB: MAIS (Menu & Sub-Views) */}

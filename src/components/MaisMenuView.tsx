@@ -59,7 +59,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
       iconColor: 'text-blue-700',
       iconBg: 'bg-blue-100',
       title: 'Módulo SAEOU060',
-      desc: 'Entrada de apontamentos de vencimentos dos promotores e cruzamento com a SMGOI013.',
+      desc: 'Entrada de apontamentos de vencimentos dos promotores e cruzamento com a BASE DO RUB.',
       badge: 'Novo Módulo',
     },
     {
@@ -67,7 +67,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
       icon: FileSpreadsheet,
       iconColor: 'text-emerald-700',
       iconBg: 'bg-emerald-100',
-      title: 'Importar Planilhas (SMGOI013, EANs & SAEOU060)',
+      title: 'Importar Planilhas (BASE DO RUB, EANs & SAEOU060)',
       desc: 'Atualize o estoque, giro de 30 dias e vínculos EAN sem perder os lotes cadastrados.',
       badge: 'Principal',
     },
@@ -84,8 +84,8 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
       icon: TrendingDown,
       iconColor: 'text-amber-700',
       iconBg: 'bg-amber-100',
-      title: 'ISV — Itens Sem Venda',
-      desc: 'Gestão de mercadorias paradas, cálculo financeiro por Custo Médio, indústrias, promotores e PDF A3.',
+      title: 'ISV | Inteligência de Estoque',
+      desc: 'Gestão de mercadorias paradas, valor disponível da base do RUB, indústrias, promotores e PDF A4.',
       badge: 'Módulo ISV',
     },
     {
@@ -118,18 +118,18 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
     <div id="view-mais-menu" className="space-y-4 pb-24 max-w-4xl mx-auto">
       {/* Top Card: Info Filial with Bold Typography */}
       <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200 space-y-2 relative overflow-hidden">
-        <div className="absolute top-0 left-0 right-0 h-1.5 bg-blue-700" />
+        <div className="absolute top-0 left-0 right-0 h-1.5 bg-[#F36B0B]" />
 
         <div className="flex items-center justify-between pt-1">
           <div>
-            <span className="text-[10px] font-black uppercase tracking-wider text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+            <span className="text-[10px] font-black uppercase tracking-wider text-[#C94F00] bg-orange-50 px-2 py-0.5 rounded border border-orange-200">
               CONFIGURAÇÕES E MÓDULOS
             </span>
             <h2 className="text-lg font-black text-gray-900 uppercase tracking-tight leading-tight mt-1">
               Filial 172 - Cascavel
             </h2>
           </div>
-          <span className="text-xs font-mono font-black text-blue-900 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-md uppercase">
+          <span className="text-xs font-mono font-black text-orange-950 bg-orange-50 border border-orange-200 px-2.5 py-1 rounded-md uppercase">
             v2.0 Mobile
           </span>
         </div>
@@ -139,17 +139,17 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
       </div>
 
       {/* Cloud Firestore Central Card */}
-      <div className="bg-gradient-to-br from-blue-900 via-indigo-900 to-slate-900 text-white rounded-xl p-4 shadow-sm border border-blue-800 space-y-3">
+      <div className="bg-gradient-to-br from-slate-950 via-orange-950 to-slate-950 text-white rounded-xl p-4 shadow-sm border border-orange-900/40 space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center border border-white/20">
-              <Cloud className="w-4 h-4 text-blue-300 stroke-[2.5]" />
+              <Cloud className="w-4 h-4 text-orange-300 stroke-[2.5]" />
             </div>
             <div>
               <h3 className="text-xs font-black uppercase tracking-wider text-white">
                 Base Central Firestore
               </h3>
-              <p className="text-[11px] text-blue-200 font-medium">
+              <p className="text-[11px] text-orange-200 font-medium">
                 Conexão Nuvem entre App Principal e App Promotor
               </p>
             </div>
@@ -163,7 +163,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
           <button
             id="btn-abrir-nuvem-central"
             onClick={() => setIsNuvemModalOpen(true)}
-            className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
+            className="px-3.5 py-2 rounded-lg bg-[#F36B0B] hover:bg-[#C94F00] text-white text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
           >
             <Cloud className="w-3.5 h-3.5" />
             <span>Sincronizar Base com a Nuvem</span>
@@ -196,7 +196,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
                   onNavigateSub(item.id);
                 }
               }}
-              className="w-full bg-white rounded-xl p-4 border border-gray-200 hover:border-blue-500 hover:shadow-xs transition-all flex items-center justify-between gap-3 text-left active:scale-[0.99] group cursor-pointer"
+              className="w-full bg-white rounded-xl p-4 border border-gray-200 hover:border-orange-400 hover:shadow-xs transition-all flex items-center justify-between gap-3 text-left active:scale-[0.99] group cursor-pointer"
             >
               <div className="flex items-center gap-3.5">
                 <div className={`w-11 h-11 rounded-xl ${item.iconBg} flex items-center justify-center shrink-0 border border-black/5`}>
@@ -204,7 +204,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-black text-gray-900 uppercase group-hover:text-blue-700 transition-colors">
+                    <h3 className="text-sm font-black text-gray-900 uppercase group-hover:text-[#F36B0B] transition-colors">
                       {item.title}
                     </h3>
                     {item.badge && (
@@ -219,7 +219,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
                 </div>
               </div>
 
-              <ArrowRight className="w-4 h-4 text-gray-400 group-hover:text-blue-700 group-hover:translate-x-1 transition-all shrink-0 stroke-[2.5]" />
+              <ArrowRight className="w-4 h-4 text-gray-400 group-hover:text-[#F36B0B] group-hover:translate-x-1 transition-all shrink-0 stroke-[2.5]" />
             </button>
           );
         })}

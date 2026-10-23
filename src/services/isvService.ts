@@ -1361,6 +1361,8 @@ class IsvService {
   public filtrarItensIsv(itens: ItemIsv[], filtros: FiltrosIsv): ItemIsv[] {
     const q = filtros.termoBusca ? filtros.termoBusca.trim().toUpperCase() : '';
     const temBusca = q.length > 0;
+    const qDigits = temBusca ? q.replace(/\D/g, '') : '';
+    const qDigitsSemZero = qDigits.replace(/^0+/, '');
 
     const promotorAlvo = (filtros.promotorId && filtros.promotorId !== 'TODOS')
       ? promotorService.getPromotores().find((pr) => pr.promotorId === filtros.promotorId)
@@ -1373,13 +1375,28 @@ class IsvService {
 
     return itens
       .filter((item) => {
-        // 1. Termo de busca (Código interno, dígito, código completo, descrição, EAN)
+        // 1. Termo de busca abrangente (Código raiz, código com dígito, descrição, EAN, Indústria, CNPJ)
         if (temBusca) {
-          const matchCod = item.codigo_interno.includes(q);
-          const matchExib = item.codigo_exibicao.toUpperCase().includes(q);
+          const matchCod = item.codigo_interno.includes(q) || (qDigitsSemZero.length > 0 && item.codigo_interno.includes(qDigitsSemZero));
+          const codComDigito = `${item.codigo_interno}-${item.digito || ''}`.toUpperCase();
+          const codComDigitoSemHifen = `${item.codigo_interno}${item.digito || ''}`.toUpperCase();
+          const matchExib = item.codigo_exibicao.toUpperCase().includes(q) ||
+            codComDigito.includes(q) ||
+            (qDigits.length > 0 && codComDigitoSemHifen.includes(qDigits));
           const matchDesc = item.descricao.toUpperCase().includes(q);
-          const matchEan = (item.produto.eans || []).some((e) => e.includes(q));
-          if (!matchCod && !matchExib && !matchDesc && !matchEan) {
+          const matchEan = (item.produto.eans || []).some((e) => e.includes(q) || (qDigits.length > 0 && e.includes(qDigits)));
+          const matchIndustria = (item.industrias_nomes || []).some((ind) => ind.toUpperCase().includes(q));
+          const matchCnpj = (item.cnpjs || []).some((cnpj) => {
+            if (cnpj.includes(q)) return true;
+            if (qDigits.length >= 3) {
+              const cnpjLimpo = cnpj.replace(/\D/g, '');
+              const cnpjSemZero = cnpjLimpo.replace(/^0+/, '');
+              if (cnpjLimpo.includes(qDigits) || cnpjSemZero.includes(qDigitsSemZero)) return true;
+            }
+            return false;
+          });
+
+          if (!matchCod && !matchExib && !matchDesc && !matchEan && !matchIndustria && !matchCnpj) {
             return false;
           }
         }

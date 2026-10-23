@@ -284,7 +284,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
 
     const fonteOficial = isvService.temPlanilhaIsv()
       ? 'Planilha Operacional Oficial ISV'
-      : 'Base SMGOI013';
+      : 'BASE DO RUB';
 
     const filtrosDescricao = getFiltrosAtivosDescricao();
 
@@ -336,7 +336,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
   const handleQuickPrintTop30 = () => {
     const fonteOficial = isvService.temPlanilhaIsv()
       ? 'Planilha Operacional Oficial ISV'
-      : 'Base SMGOI013';
+      : 'BASE DO RUB';
 
     gerarRelatorioIsvA3Pdf(itensFiltrados, {
       tituloFiltro: 'Geral da Loja (Top 30 Maiores)',
@@ -352,7 +352,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
   return (
     <div id="view-isv-itens-sem-venda" className="space-y-4 pb-24 max-w-6xl mx-auto animate-fadeIn">
       {/* 1. Header do Módulo com Gradiente Executivo */}
-      <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 text-white rounded-2xl p-4 sm:p-5 shadow-lg border border-slate-800 space-y-3 relative overflow-hidden">
+      <div className="bg-gradient-to-r from-slate-950 via-orange-950 to-slate-950 text-white rounded-2xl p-4 sm:p-5 shadow-lg border border-orange-900/40 space-y-3 relative overflow-hidden">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-3">
             {onBack && (
@@ -364,8 +364,8 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 <ArrowLeft className="w-5 h-5" />
               </button>
             )}
-            <div className="w-10 h-10 rounded-xl bg-blue-600/30 flex items-center justify-center border border-blue-500/40">
-              <TrendingDown className="w-5 h-5 text-blue-300 stroke-[2.5]" />
+            <div className="w-10 h-10 rounded-xl bg-[#F36B0B]/30 flex items-center justify-center border border-orange-500/40">
+              <TrendingDown className="w-5 h-5 text-orange-300 stroke-[2.5]" />
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
@@ -381,38 +381,38 @@ export const IsvView: React.FC<IsvViewProps> = ({
                     Fonte Oficial ISV (XLSX)
                   </span>
                 ) : (
-                  <span className="text-[10px] font-bold bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded-full border border-blue-500/30 uppercase tracking-wider">
-                    Base SMGOI013
+                  <span className="text-[10px] font-bold bg-orange-500/20 text-orange-300 px-2 py-0.5 rounded-full border border-orange-500/30 uppercase tracking-wider">
+                    BASE DO RUB
                   </span>
                 )}
               </div>
-              <p className="text-xs text-blue-200 font-medium">
-                Monitoramento de mercadorias paradas, cálculo financeiro e acompanhamento de promotores
+              <p className="text-xs text-orange-200 font-medium">
+                Monitoramento de mercadorias paradas, inteligência de estoque e acompanhamento de promotores
               </p>
             </div>
           </div>
 
-          {/* Botões de Ação: Imprimir Top 30 e Gerar Relatório A3 */}
+          {/* Botões de Ação: Imprimir Top 30 e Gerar Relatório A4 */}
           <div className="flex items-center gap-2 flex-wrap">
             <button
               id="btn-quick-print-top30"
               type="button"
               onClick={handleQuickPrintTop30}
-              className="px-3.5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-amber-400"
-              title="Exporta imediatamente os 30 maiores produtos por valor em PDF A3"
+              className="px-3.5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-amber-400 cursor-pointer"
+              title="Exporta imediatamente os 30 maiores produtos por valor em PDF A4 Horizontal"
             >
               <FileText className="w-4 h-4 stroke-[2.5]" />
-              <span>Imprimir Top 30</span>
+              <span>Imprimir Top 30 (A4)</span>
             </button>
 
             <button
               id="btn-abrir-modal-pdf-isv"
               type="button"
               onClick={() => setIsModalPdfOpen(true)}
-              className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-black text-xs uppercase tracking-wider transition-all flex items-center gap-2 shadow-md active:scale-95"
+              className="px-4 py-2.5 rounded-xl bg-[#F36B0B] hover:bg-[#C94F00] text-white font-black text-xs uppercase tracking-wider transition-all flex items-center gap-2 shadow-md active:scale-95 cursor-pointer"
             >
               <Download className="w-4 h-4 stroke-[2.5]" />
-              <span>Opções A3 (PDF)</span>
+              <span>Relatório A4 (PDF)</span>
             </button>
           </div>
         </div>
@@ -423,7 +423,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
             onClick={() => setSubAba('geral')}
             className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
               subAba === 'geral'
-                ? 'bg-blue-600 text-white'
+                ? 'bg-[#F36B0B] text-white'
                 : 'text-slate-300 hover:text-white hover:bg-white/10'
             }`}
           >
@@ -470,7 +470,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
         {/* Com Estoque */}
         <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs space-y-1">
           <span className="text-[10px] font-bold text-slate-400 uppercase block">Com Estoque</span>
-          <span className="text-base sm:text-lg font-black text-blue-700 font-mono">
+          <span className="text-base sm:text-lg font-black text-[#C94F00] font-mono">
             {indicadores.produtosComEstoque}
           </span>
         </div>
@@ -517,7 +517,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
           <div className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <span className="text-xs font-black uppercase text-slate-800 flex items-center gap-1.5">
-                <Filter className="w-3.5 h-3.5 text-blue-700" />
+                <Filter className="w-3.5 h-3.5 text-[#F36B0B]" />
                 Filtros Combináveis
               </span>
 
@@ -543,7 +543,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                     ordenacao: 'MAIOR_VALOR',
                   })
                 }
-                className="text-[11px] font-bold text-blue-700 hover:underline flex items-center gap-1 cursor-pointer"
+                className="text-[11px] font-bold text-[#C94F00] hover:underline flex items-center gap-1 cursor-pointer"
               >
                 <RefreshCw className="w-3 h-3" />
                 Restaurar Padrão
@@ -557,10 +557,10 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
                 <input
                   type="text"
-                  placeholder="Código, dígito ou descrição..."
+                  placeholder="Buscar código, descrição, EAN, indústria ou CNPJ..."
                   value={filtros.termoBusca}
                   onChange={(e) => setFiltros((prev) => ({ ...prev, termoBusca: e.target.value }))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-blue-600 focus:outline-hidden"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-[#F36B0B] focus:outline-hidden"
                 />
               </div>
 
@@ -569,7 +569,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 <select
                   value={filtros.agencia}
                   onChange={(e) => setFiltros((prev) => ({ ...prev, agencia: e.target.value }))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-blue-600 focus:outline-hidden"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-[#F36B0B] focus:outline-hidden"
                 >
                   <option value="TODAS">Agência: Todas</option>
                   {agenciasDisponiveis.map((ag) => (
@@ -585,7 +585,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 <select
                   value={filtros.industriaCnpj}
                   onChange={(e) => setFiltros((prev) => ({ ...prev, industriaCnpj: e.target.value }))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-blue-600 focus:outline-hidden"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-[#F36B0B] focus:outline-hidden"
                 >
                   <option value="TODAS">Indústria: Todas</option>
                   {industrias.map((ind) => (
@@ -601,7 +601,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 <select
                   value={filtros.promotorId}
                   onChange={(e) => setFiltros((prev) => ({ ...prev, promotorId: e.target.value }))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-blue-600 focus:outline-hidden"
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-[#F36B0B] focus:outline-hidden"
                 >
                   <option value="TODOS">Promotor: Todos</option>
                   {promotores.map((p) => (
@@ -613,7 +613,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
               </div>
             </div>
 
-            {/* Linha 2: Novo Filtro SETOR Operacional Oficial (RF., AC., HF., CR., LOJA) */}
+            {/* Linha 2: Filtro SETOR Operacional Oficial (TODOS, FRIOS, AÇOUGUE, HORTIFRUTI, LOJA) */}
             <div className="pt-1 flex items-center gap-1.5 overflow-x-auto text-xs pb-1 border-t border-slate-100">
               <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
                 Setor:
@@ -629,7 +629,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
               >
                 Todos
               </button>
-              {(Object.keys(SETORES_OPERACIONAIS_CONFIG) as SetorOperacionalIsv[]).map((setorKey) => {
+              {(['FRIOS', 'ACOUGUE', 'HORTIFRUTI', 'LOJA'] as const).map((setorKey) => {
                 const conf = SETORES_OPERACIONAIS_CONFIG[setorKey];
                 const isSelected = filtros.setorOperacional === setorKey;
                 return (
@@ -654,7 +654,6 @@ export const IsvView: React.FC<IsvViewProps> = ({
                       style={{ backgroundColor: conf.corHex }}
                     />
                     <span>{conf.label}</span>
-                    <span className="text-[9px] opacity-80 font-mono">({conf.prefixo})</span>
                   </button>
                 );
               })}
@@ -670,7 +669,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 onClick={() => setFiltros((prev) => ({ ...prev, diasSemVenda: null }))}
                 className={`px-2 py-0.5 rounded text-[11px] font-bold ${
                   filtros.diasSemVenda === null
-                    ? 'bg-blue-700 text-white'
+                    ? 'bg-[#F36B0B] text-white'
                     : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
@@ -688,13 +687,38 @@ export const IsvView: React.FC<IsvViewProps> = ({
                   }
                   className={`px-2 py-0.5 rounded text-[11px] font-bold whitespace-nowrap ${
                     filtros.diasSemVenda === dias
-                      ? 'bg-amber-600 text-white'
+                      ? 'bg-[#F36B0B] text-white'
                       : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
                 >
                   {dias}d{filtros.modoDiasSemVenda === 'MINIMO' ? '+' : ''}
                 </button>
               ))}
+
+              <div className="flex items-center gap-1">
+                <input
+                  type="number"
+                  min="0"
+                  placeholder="Dias..."
+                  value={filtros.diasSemVenda !== null ? filtros.diasSemVenda : ''}
+                  onChange={(e) => {
+                    const val = e.target.value.trim() === '' ? null : Math.max(0, parseInt(e.target.value, 10) || 0);
+                    setFiltros((prev) => ({ ...prev, diasSemVenda: val }));
+                  }}
+                  className="w-16 bg-slate-50 border border-slate-200 rounded px-1.5 py-0.5 text-xs font-mono font-bold text-slate-900 focus:bg-white focus:outline-hidden"
+                  title="Digite os dias sem venda"
+                />
+                {filtros.diasSemVenda !== null && (
+                  <button
+                    type="button"
+                    onClick={() => setFiltros((prev) => ({ ...prev, diasSemVenda: null }))}
+                    className="p-1 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    title="Limpar dias sem venda"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
 
               <div className="flex items-center gap-1 pl-2 border-l border-slate-200 text-[10px]">
                 <button
@@ -722,7 +746,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
               </div>
             </div>
 
-            {/* Linha 4: Novo Filtro IDADE da Mercadoria (Independente de Dias Sem Venda) */}
+            {/* Linha 4: Filtro IDADE da Mercadoria (Estrutura idêntica a Dias Sem Venda) */}
             <div className="pt-1 flex items-center gap-1.5 overflow-x-auto text-xs pb-1 border-t border-slate-100">
               <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
                 Idade da Mercadoria:
@@ -732,13 +756,13 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 onClick={() => setFiltros((prev) => ({ ...prev, idade: null }))}
                 className={`px-2 py-0.5 rounded text-[11px] font-bold ${
                   filtros.idade === null
-                    ? 'bg-blue-700 text-white'
+                    ? 'bg-[#F36B0B] text-white'
                     : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
-                Todas
+                Todos
               </button>
-              {[30, 60, 90, 180, 365].map((dias) => (
+              {[3, 4, 5, 6, 7, 8, 9, 10, 15].map((dias) => (
                 <button
                   key={dias}
                   type="button"
@@ -750,7 +774,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                   }
                   className={`px-2 py-0.5 rounded text-[11px] font-bold whitespace-nowrap ${
                     filtros.idade === dias
-                      ? 'bg-purple-700 text-white'
+                      ? 'bg-[#F36B0B] text-white'
                       : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                   }`}
                 >
@@ -1078,24 +1102,20 @@ export const IsvView: React.FC<IsvViewProps> = ({
                           </td>
 
                           {/* 3. DESCRIÇÃO */}
-                          <td className="py-2.5 px-3 font-black text-slate-900 uppercase">
+                          <td className="py-2.5 px-3 uppercase">
                             <div className="flex items-center gap-1.5 flex-nowrap">
-                              {/* Badge discreto com cor exata do Setor Operacional */}
-                              {(() => {
-                                const confSetor = SETORES_OPERACIONAIS_CONFIG[item.setor_operacional] || SETORES_OPERACIONAIS_CONFIG.LOJA;
-                                return (
-                                  <span
-                                    className="text-[9px] font-black uppercase px-1.5 py-0.5 rounded text-white tracking-wider shrink-0 shadow-2xs select-none"
-                                    style={{ backgroundColor: confSetor.corHex }}
-                                    title={`Setor Operacional: ${confSetor.label} (${confSetor.prefixo})`}
-                                  >
-                                    {confSetor.label}
-                                  </span>
-                                );
-                              })()}
-
                               <span
-                                className="truncate max-w-[170px] sm:max-w-[240px] block"
+                                className="truncate max-w-[220px] sm:max-w-[340px] block font-black"
+                                style={{
+                                  color:
+                                    item.setor_operacional === 'FRIOS'
+                                      ? '#2563EB'
+                                      : item.setor_operacional === 'ACOUGUE'
+                                      ? '#DC2626'
+                                      : item.setor_operacional === 'HORTIFRUTI'
+                                      ? '#16A34A'
+                                      : '#7C3AED',
+                                }}
                                 title={item.descricao}
                               >
                                 {item.descricao}
@@ -1567,7 +1587,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 >
                   <Download className="w-4 h-4 stroke-[2.5]" />
                   <span>
-                    Baixar PDF A3 ({pdfLimiteExportacao === 'TODOS' ? itensFiltrados.length : Math.min(Number(pdfLimiteExportacao), itensFiltrados.length)} Itens)
+                    Baixar PDF A4 Horizontal ({pdfLimiteExportacao === 'TODOS' ? itensFiltrados.length : Math.min(Number(pdfLimiteExportacao), itensFiltrados.length)} Itens)
                   </span>
                 </button>
               </div>
@@ -1585,10 +1605,10 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 <Search className="w-5 h-5 text-blue-400" />
                 <div>
                   <h3 className="text-sm font-black uppercase tracking-wide">
-                    Auditoria de Classificação Financeira & Custo Médio
+                    CLASSIFICAÇÃO FINANCEIRA — BASE DO RUB
                   </h3>
                   <p className="text-[11px] text-slate-300">
-                    Inspeção em tempo de execução dos 5 códigos oficiais de referência e do catálogo SMGOI013
+                    Inspeção em tempo de execução dos 5 códigos oficiais de referência e da BASE DO RUB
                   </p>
                 </div>
               </div>

@@ -400,7 +400,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
     >
       <div className="bg-white w-full max-w-lg rounded-t-2xl sm:rounded-2xl shadow-2xl flex flex-col max-h-[92vh] overflow-hidden border border-gray-200">
         {/* Modal Header with Bold Typography */}
-        <div className="bg-blue-700 text-white px-5 py-4 flex items-center justify-between shrink-0 border-b border-blue-800">
+        <div className="bg-[#F36B0B] text-white px-5 py-4 flex items-center justify-between shrink-0 border-b border-[#C94F00]">
           {/* Header title */}
           <div className="flex items-center gap-2.5">
             <div className="w-9 h-9 rounded-lg bg-white/10 flex items-center justify-center border border-white/20">
@@ -418,7 +418,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                   ? 'EDITAR VENCIMENTO'
                   : 'CADASTRAR VENCIMENTO'}
               </h2>
-              <p className="text-xs text-blue-200 font-mono font-bold">
+              <p className="text-xs text-orange-100 font-mono font-bold">
                 CÓD: <strong>{produto.codigo_exibicao}</strong>
               </p>
             </div>
@@ -438,16 +438,16 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
           {isViewingExistingLote && (
             <div
               id="banner-modo-edicao-existente"
-              className="p-3.5 rounded-xl bg-blue-50 border border-blue-200 text-blue-950 flex items-center justify-between gap-3 shadow-xs"
+              className="p-3.5 rounded-xl bg-orange-50 border border-orange-200 text-orange-950 flex items-center justify-between gap-3 shadow-xs"
             >
               <div className="min-w-0">
-                <span className="text-[10px] font-black uppercase tracking-wider text-blue-700 block">
+                <span className="text-[10px] font-black uppercase tracking-wider text-[#C94F00] block">
                   MODO DE EDIÇÃO
                 </span>
-                <p className="text-xs font-black uppercase text-blue-950">
+                <p className="text-xs font-black uppercase text-orange-950">
                   Visualizando cadastro existente deste vencimento
                 </p>
-                <p className="text-[11px] text-blue-800 mt-0.5">
+                <p className="text-[11px] text-[#C94F00] mt-0.5">
                   Você pode atualizar quantidade, preço ou observação deste lote.
                 </p>
               </div>
@@ -811,7 +811,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
             <div className="bg-gray-50 border border-gray-200 rounded-xl p-3.5 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-black text-gray-800 uppercase tracking-wider flex items-center gap-1">
-                  <Sparkles className="w-3.5 h-3.5 text-blue-700 stroke-[2.5]" />
+                  <Sparkles className="w-3.5 h-3.5 text-[#F36B0B] stroke-[2.5]" />
                   Avaliação Operacional Prévia
                 </span>
                 <StatusBadge status={projecaoPreview.status} size="sm" />
@@ -857,7 +857,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                   value={loteIdentificador}
                   onChange={(e) => setLoteIdentificador(e.target.value)}
                   placeholder="Ex: L1029"
-                  className="w-full bg-white border border-gray-300 focus:border-blue-700 rounded-lg px-3 py-2 text-xs font-bold font-mono text-gray-900 focus:outline-hidden"
+                  className="w-full bg-white border border-gray-300 focus:border-[#F36B0B] rounded-lg px-3 py-2 text-xs font-bold font-mono text-gray-900 focus:outline-hidden"
                 />
               </div>
 
@@ -871,7 +871,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
                   value={observacao}
                   onChange={(e) => setObservacao(e.target.value)}
                   placeholder="Ex: Ponta de gôndola, rebaixado..."
-                  className="w-full bg-white border border-gray-300 focus:border-blue-700 rounded-lg px-3 py-2 text-xs font-bold text-gray-900 focus:outline-hidden"
+                  className="w-full bg-white border border-gray-300 focus:border-[#F36B0B] rounded-lg px-3 py-2 text-xs font-bold text-gray-900 focus:outline-hidden"
                 />
               </div>
             </div>
@@ -956,7 +956,7 @@ export const CadastrarVencimentoModal: React.FC<CadastrarVencimentoModalProps> =
               className={`flex-1 py-3 px-4 rounded-xl text-white font-black uppercase text-xs tracking-wider shadow-md flex items-center justify-center gap-2 transition-all ${
                 isSubmitting || Boolean(duplicateInfo)
                   ? 'bg-gray-400 cursor-not-allowed opacity-75'
-                  : 'bg-blue-700 hover:bg-blue-800 active:bg-blue-950 active:scale-[0.98] cursor-pointer'
+                  : 'bg-[#F36B0B] hover:bg-[#C94F00] active:bg-[#A84100] active:scale-[0.98] cursor-pointer'
               }`}
             >
               {isSubmitting ? (

@@ -8,18 +8,19 @@ export interface IsvPdfOptions {
   tipoAgrupamento?: 'GERAL' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA';
   nomeEntidade?: string;
   subtituloEntidade?: string; // ex: "CNPJ: 01.123.456/0001-88 - DANONE LTDA" ou "Agência: SPEED PROMO"
-  exibirValorEstoque: boolean; // Padrão: true. Quando false, remove a coluna 11 e todos os totais em R$
+  exibirValorEstoque: boolean; // Padrão: true. Quando false, remove a coluna de valor e redistribui a largura
   filialNome?: string;
-  limiteQuantidade?: number | 'TODOS'; // Novo: Top 30, Top 50, Top 100 ou 'TODOS'
-  fonteOficial?: string; // Ex: "PLANILHA OPERACIONAL OFICIAL ISV"
+  limiteQuantidade?: number | 'TODOS'; // Top 30, Top 50, Top 100 ou 'TODOS'
+  fonteOficial?: string; // Ex: "BASE DO RUB"
   filtrosDescricao?: string; // Descrição de filtros combinados ativos (Setor, Idade, Dias sem venda, etc.)
+  tipoRelatorioTitulo?: string; // "PRODUTOS EM ISV", "RELATÓRIO POR INDÚSTRIA", "RELATÓRIO POR AGÊNCIA"
 }
 
 /**
- * Gera relatório oficial sob demanda do módulo ISV — ITENS SEM VENDA
- * no formato padrão aprovado A3 Horizontal (Paisagem).
+ * Gera relatório oficial do módulo ISV | INTELIGÊNCIA DE ESTOQUE
+ * no padrão obrigatório A4 Horizontal (Paisagem - 297mm x 210mm).
  */
-export function gerarRelatorioIsvA3Pdf(
+export function gerarRelatorioIsvA4Pdf(
   itens: ItemIsv[],
   options: IsvPdfOptions
 ): void {
@@ -29,20 +30,20 @@ export function gerarRelatorioIsvA3Pdf(
       ? itens.slice(0, Number(options.limiteQuantidade))
       : itens;
 
-  // Inicializa documento em A3 Horizontal (420mm x 297mm)
+  // Inicializa documento em A4 Horizontal (297mm x 210mm)
   const doc = new jsPDF({
     orientation: 'landscape',
     unit: 'mm',
-    format: 'a3',
+    format: 'a4',
   });
 
-  const pageWidth = doc.internal.pageSize.getWidth(); // ~420 mm
-  const pageHeight = doc.internal.pageSize.getHeight(); // ~297 mm
-  const marginX = 14;
+  const pageWidth = doc.internal.pageSize.getWidth(); // 297 mm
+  const pageHeight = doc.internal.pageSize.getHeight(); // 210 mm
+  const marginX = 12;
 
   const agora = new Date();
   const dataHoraEmissao = agora.toLocaleString('pt-BR');
-  const filial = options.filialNome || 'FILIAL 172 - CASCAVEL';
+  const filial = options.filialNome || 'Filial 172 — Cascavel';
   const exibirValor = options.exibirValorEstoque;
 
   // Totalizadores garantindo distinção obrigatória entre exibidos e conjunto total filtrado
@@ -75,65 +76,64 @@ export function gerarRelatorioIsvA3Pdf(
     }
   });
 
-  // 1. Cabeçalho Principal (Faixa Azul Escuro Corporativo)
+  // 1. Cabeçalho Principal (Fundo Azul Escuro Corporativo #0F172A)
   doc.setFillColor(15, 23, 42); // slate-900
-  doc.rect(0, 0, pageWidth, 28, 'F');
+  doc.rect(0, 0, pageWidth, 24, 'F');
 
-  // Faixa de acento azul royal
-  doc.setFillColor(29, 78, 216); // blue-700
-  doc.rect(0, 28, pageWidth, 2, 'F');
+  // Faixa de acento azul royal (#2563EB)
+  doc.setFillColor(37, 99, 235);
+  doc.rect(0, 24, pageWidth, 2, 'F');
 
   // Título e Identificação da Filial
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(14);
-  doc.text('CONTROLE DE VENCIMENTOS & PREVENÇÃO DE PERDAS', marginX, 10);
+  doc.setFontSize(13);
+  doc.text('ISV | INTELIGÊNCIA DE ESTOQUE', marginX, 9);
 
-  doc.setFontSize(10);
+  doc.setFontSize(9);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(191, 219, 254); // blue-200
-  doc.text(`${filial} • SISTEMA OPERACIONAL`, marginX, 16);
+  doc.text(filial, marginX, 15);
 
-  // Título do Módulo Centralizado
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(15);
-  doc.setTextColor(255, 255, 255);
-
-  let tituloPrincipal = 'ISV — ITENS SEM VENDA';
+  // Tipo de Relatório (Centro)
+  let tipoRelatorio = options.tipoRelatorioTitulo || 'PRODUTOS EM ISV';
   if (options.tipoAgrupamento === 'INDUSTRIA' && options.nomeEntidade) {
-    tituloPrincipal = `INDÚSTRIA: ${options.nomeEntidade.toUpperCase()}`;
-  } else if (options.tipoAgrupamento === 'PROMOTOR' && options.nomeEntidade) {
-    tituloPrincipal = `PROMOTOR: ${options.nomeEntidade.toUpperCase()}`;
+    tipoRelatorio = `RELATÓRIO POR INDÚSTRIA: ${options.nomeEntidade.toUpperCase()}`;
   } else if (options.tipoAgrupamento === 'AGENCIA' && options.nomeEntidade) {
-    tituloPrincipal = `AGÊNCIA: ${options.nomeEntidade.toUpperCase()}`;
+    tipoRelatorio = `RELATÓRIO POR AGÊNCIA: ${options.nomeEntidade.toUpperCase()}`;
+  } else if (options.tipoAgrupamento === 'PROMOTOR' && options.nomeEntidade) {
+    tipoRelatorio = `RELATÓRIO POR PROMOTOR: ${options.nomeEntidade.toUpperCase()}`;
   }
 
-  doc.text(tituloPrincipal, pageWidth / 2, 13, { align: 'center' });
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11);
+  doc.setTextColor(255, 255, 255);
+  doc.text(tipoRelatorio, pageWidth / 2, 10, { align: 'center' });
 
   // Subtítulo da Entidade (CNPJ, Razão Social ou Agência)
   if (options.subtituloEntidade) {
-    doc.setFontSize(9);
+    doc.setFontSize(8);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(226, 232, 240);
-    doc.text(options.subtituloEntidade, pageWidth / 2, 19, { align: 'center' });
+    doc.text(options.subtituloEntidade, pageWidth / 2, 15, { align: 'center' });
   }
 
-  // Data/Hora e Identificação do Documento (Direita)
-  doc.setFontSize(8.5);
+  // Data/Hora e Padrão A4 Horizontal (Direita)
+  doc.setFontSize(8);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(203, 213, 225); // slate-300
-  doc.text(`Emissão: ${dataHoraEmissao}`, pageWidth - marginX, 10, { align: 'right' });
-  doc.text('FORMATO OFICIAL A3 HORIZONTAL', pageWidth - marginX, 16, { align: 'right' });
+  doc.text(`Emissão: ${dataHoraEmissao}`, pageWidth - marginX, 9, { align: 'right' });
+  doc.text('PADRÃO OFICIAL A4 HORIZONTAL', pageWidth - marginX, 15, { align: 'right' });
 
-  // 2. Barra de Resumo da Seleção / Filtros (Abaixo do cabeçalho)
+  // 2. Barra de Resumo da Seleção / Filtros / Totais
   const isTopRanking = options.limiteQuantidade && options.limiteQuantidade !== 'TODOS';
-  const barraAltura = isTopRanking || options.filtrosDescricao ? 14 : 11;
+  const barraAltura = isTopRanking || options.filtrosDescricao ? 13 : 10;
   doc.setFillColor(248, 250, 252); // slate-50
   doc.setDrawColor(226, 232, 240); // slate-200
   doc.setLineWidth(0.3);
-  doc.rect(marginX, 33, pageWidth - marginX * 2, barraAltura, 'FD');
+  doc.rect(marginX, 28, pageWidth - marginX * 2, barraAltura, 'FD');
 
-  doc.setFontSize(8);
+  doc.setFontSize(7.5);
   doc.setFont('helvetica', 'bold');
   doc.setTextColor(15, 23, 42);
   let textoFiltro = options.tituloFiltro ? `FILTRO: ${options.tituloFiltro.toUpperCase()}` : 'FILTRO: GERAL DA LOJA';
@@ -141,118 +141,102 @@ export function gerarRelatorioIsvA3Pdf(
     textoFiltro += ` • [FONTE: ${options.fonteOficial.toUpperCase()}]`;
   }
   if (isTopRanking) {
-    textoFiltro += ` • [TOP ${options.limiteQuantidade} MAIORES PRODUTOS]`;
+    textoFiltro += ` • [TOP ${options.limiteQuantidade}]`;
   }
   if (options.filtrosDescricao) {
     textoFiltro += ` • [${options.filtrosDescricao.toUpperCase()}]`;
   }
-  doc.text(textoFiltro, marginX + 4, 38);
+  doc.text(textoFiltro, marginX + 3, 33);
 
   // Totais na barra
-  doc.setFont('helvetica', 'bold');
-  doc.setTextColor(30, 41, 59);
-
   if (isTopRanking) {
-    const textoTop = `VALOR DOS ${totalProdutosExibidos} PRODUTOS EXIBIDOS: ${formatarMoedaBR(valorTotalExibidos)}`;
-    doc.setFontSize(9);
+    const textoTop = `Exibindo ${totalProdutosExibidos} de ${totalProdutosFiltrados} produtos | Valor Exibido: ${formatarMoedaBR(valorTotalExibidos)}`;
+    doc.setFontSize(8);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(15, 23, 42);
-    doc.text(textoTop, pageWidth - marginX - 4, 38.5, { align: 'right' });
+    doc.text(textoTop, pageWidth - marginX - 3, 33, { align: 'right' });
 
-    let textoConjunto = `VALOR TOTAL DE TODOS OS ${totalProdutosFiltrados} PRODUTOS FILTRADOS: ${formatarMoedaBR(valorTotalFiltrados)}`;
+    let textoConjunto = `Valor Total Filtrado: ${formatarMoedaBR(valorTotalFiltrados)}`;
     if (qtdSemValorFiltrados > 0) {
-      textoConjunto += `  *(Total parcial: ${qtdSemValorFiltrados} ${qtdSemValorFiltrados === 1 ? 'item sem custo' : 'itens sem custo'})`;
+      textoConjunto += ` (${qtdSemValorFiltrados} ${qtdSemValorFiltrados === 1 ? 'item s/ valor' : 'itens s/ valor'})`;
     }
-    doc.setFontSize(8);
+    doc.setFontSize(7);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(71, 85, 105);
-    doc.text(textoConjunto, pageWidth - marginX - 4, 43.5, { align: 'right' });
+    doc.text(textoConjunto, pageWidth - marginX - 3, 38, { align: 'right' });
   } else {
-    let textoTotais = `TOTAL DE PRODUTOS: ${totalProdutosExibidos}`;
+    let textoTotais = `Total: ${totalProdutosExibidos} produtos`;
     if (exibirValor) {
-      textoTotais += `   |   VALOR TOTAL DO ESTOQUE FILTRADO: ${formatarMoedaBR(valorTotalFiltrados)}`;
+      textoTotais += `  |  Valor Disponível: ${formatarMoedaBR(valorTotalFiltrados)}`;
       if (qtdSemValorFiltrados > 0) {
-        textoTotais += `  *(Parcial: ${qtdSemValorFiltrados} sem custo)`;
+        textoTotais += ` (${qtdSemValorFiltrados} s/ valor)`;
       }
     }
-    doc.text(textoTotais, pageWidth - marginX - 4, 40, { align: 'right' });
+    doc.setFontSize(8);
+    doc.setFont('helvetica', 'bold');
+    doc.text(textoTotais, pageWidth - marginX - 3, 34.5, { align: 'right' });
   }
 
-  // 3. Montagem da Tabela com as 11 ou 10 Colunas Oficiais
-  // ORDEM EXATA DAS COLUNAS:
-  // 1. CÓDIGO
-  // 2. DIG
-  // 3. DESCRIÇÃO
-  // 4. EMBALAGEM
-  // 5. ESTOQUE
-  // 6. DIAS SEM VENDA
-  // 7. IDADE
-  // 8. INDÚSTRIA
-  // 9. PROMOTOR
-  // 10. AGÊNCIA
-  // 11. VALOR DO ESTOQUE (opcional conforme exibirValor)
-
-  const cabecalhosCompletos = [
+  // 3. Montagem das Colunas e Linhas para A4 Horizontal
+  // 1. CÓDIGO (18 mm)
+  // 2. DIG (12 mm)
+  // 3. DESCRIÇÃO DA MERCADORIA (65 mm)
+  // 4. EMBALAGEM (24 mm)
+  // 5. ESTOQUE (25 mm)
+  // 6. DIAS S/V (18 mm)
+  // 7. IDADE (15 mm)
+  // 8. INDÚSTRIA / AGÊNCIA (35 mm)
+  // 9. VALOR DISPONÍVEL (24 mm)
+  const cabecalhosComValor = [
     'CÓDIGO',
     'DIG',
-    'DESCRIÇÃO',
+    'DESCRIÇÃO DA MERCADORIA',
     'EMBALAGEM',
     'ESTOQUE',
-    'DIAS SEM VENDA',
+    'DIAS S/V',
     'IDADE',
-    'INDÚSTRIA',
-    'PROMOTOR',
-    'AGÊNCIA',
-    'VALOR DO ESTOQUE',
+    'INDÚSTRIA / AGÊNCIA',
+    'VALOR DISP.',
   ];
 
-  const cabecalhosSemValor = cabecalhosCompletos.slice(0, 10);
-  const cabecalhosFinais = exibirValor ? cabecalhosCompletos : cabecalhosSemValor;
+  const cabecalhosSemValor = [
+    'CÓDIGO',
+    'DIG',
+    'DESCRIÇÃO DA MERCADORIA',
+    'EMBALAGEM',
+    'ESTOQUE',
+    'DIAS S/V',
+    'IDADE',
+    'INDÚSTRIA / AGÊNCIA',
+  ];
+
+  const cabecalhosFinais = exibirValor ? cabecalhosComValor : cabecalhosSemValor;
 
   const linhasDados = itensProcessados.map((item) => {
-    // 8. INDÚSTRIA: Formatação compacta no PDF A3 para evitar linhas gigantes
-    let industriaTexto = 'Indústria não vinculada';
-    if (item.industrias_nomes.length === 1) {
-      industriaTexto = item.industrias_nomes[0];
-    } else if (item.industrias_nomes.length > 1) {
-      industriaTexto = `Múltiplas indústrias (${item.industrias_nomes.length})`;
+    // Indústria / Agência compacta
+    let industriaAgenciaTexto = '-';
+    if (item.industrias_nomes && item.industrias_nomes.length > 0) {
+      industriaAgenciaTexto = item.industrias_nomes[0];
+      if (item.agencias_nomes && item.agencias_nomes.length > 0) {
+        industriaAgenciaTexto += ` (${item.agencias_nomes[0]})`;
+      }
+    } else if (item.agencias_nomes && item.agencias_nomes.length > 0) {
+      industriaAgenciaTexto = item.agencias_nomes[0];
     }
-
-    // 9. PROMOTOR: Formatação compacta
-    let promotorTexto = 'Sem promotor';
-    if (item.promotores_nomes.length === 1) {
-      promotorTexto = item.promotores_nomes[0];
-    } else if (item.promotores_nomes.length > 1) {
-      promotorTexto = `Múltiplos (${item.promotores_nomes.length})`;
-    }
-
-    // 10. AGÊNCIA: Formatação compacta
-    let agenciaTexto = '-';
-    if (item.agencias_nomes.length === 1) {
-      agenciaTexto = item.agencias_nomes[0];
-    } else if (item.agencias_nomes.length > 1) {
-      agenciaTexto = `Múltiplas (${item.agencias_nomes.length})`;
-    }
-
-    const descTexto = item.setor_operacional
-      ? `[${item.setor_operacional}] ${item.descricao}`
-      : item.descricao;
 
     const embalagemTexto = item.embalagem_divergente
-      ? `${item.embalagem || 'UN'} (DIVERG.)`
+      ? `${item.embalagem || 'UN'} *`
       : (item.embalagem || 'UN');
 
     const linhaBase = [
       item.codigo_interno,
       item.digito || '-',
-      descTexto,
+      item.descricao,
       embalagemTexto,
       item.estoque_formatado,
       String(item.dias_sem_venda),
       String(item.idade),
-      industriaTexto,
-      promotorTexto,
-      agenciaTexto,
+      industriaAgenciaTexto,
     ];
 
     if (exibirValor) {
@@ -262,53 +246,51 @@ export function gerarRelatorioIsvA3Pdf(
     return linhaBase;
   });
 
-  // Larguras das colunas proporcionais para A3 (largura útil ~392 mm)
+  // Configuração das larguras exatas em mm para caber perfeitamente no A4 landscape (largura útil: ~273mm)
   const columnStylesConfig: Record<number, any> = exibirValor
     ? {
-        0: { cellWidth: 22, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-        1: { cellWidth: 14, halign: 'center', fontStyle: 'bold' }, // DIG
-        2: { cellWidth: 92, halign: 'left' }, // DESCRIÇÃO
-        3: { cellWidth: 32, halign: 'left' }, // EMBALAGEM
-        4: { cellWidth: 32, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
-        5: { cellWidth: 26, halign: 'center', fontStyle: 'bold' }, // DIAS SEM VENDA
-        6: { cellWidth: 20, halign: 'center' }, // IDADE
-        7: { cellWidth: 48, halign: 'left' }, // INDÚSTRIA
-        8: { cellWidth: 40, halign: 'left' }, // PROMOTOR
-        9: { cellWidth: 36, halign: 'left' }, // AGÊNCIA
-        10: { cellWidth: 30, halign: 'right', fontStyle: 'bold' }, // VALOR DO ESTOQUE
+        0: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
+        1: { cellWidth: 12, halign: 'center', fontStyle: 'bold' }, // DIG
+        2: { cellWidth: 72, halign: 'left' }, // DESCRIÇÃO
+        3: { cellWidth: 26, halign: 'left' }, // EMBALAGEM
+        4: { cellWidth: 28, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
+        5: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // DIAS S/V
+        6: { cellWidth: 16, halign: 'center' }, // IDADE
+        7: { cellWidth: 49, halign: 'left' }, // INDÚSTRIA / AGÊNCIA
+        8: { cellWidth: 30, halign: 'right', fontStyle: 'bold' }, // VALOR DISPONÍVEL
       }
     : {
-        0: { cellWidth: 24, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-        1: { cellWidth: 16, halign: 'center', fontStyle: 'bold' }, // DIG
-        2: { cellWidth: 104, halign: 'left' }, // DESCRIÇÃO
-        3: { cellWidth: 36, halign: 'left' }, // EMBALAGEM
-        4: { cellWidth: 36, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
-        5: { cellWidth: 28, halign: 'center', fontStyle: 'bold' }, // DIAS SEM VENDA
-        6: { cellWidth: 24, halign: 'center' }, // IDADE
-        7: { cellWidth: 54, halign: 'left' }, // INDÚSTRIA
-        8: { cellWidth: 44, halign: 'left' }, // PROMOTOR
-        9: { cellWidth: 40, halign: 'left' }, // AGÊNCIA
+        0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
+        1: { cellWidth: 14, halign: 'center', fontStyle: 'bold' }, // DIG
+        2: { cellWidth: 92, halign: 'left' }, // DESCRIÇÃO
+        3: { cellWidth: 30, halign: 'left' }, // EMBALAGEM
+        4: { cellWidth: 32, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
+        5: { cellWidth: 22, halign: 'center', fontStyle: 'bold' }, // DIAS S/V
+        6: { cellWidth: 18, halign: 'center' }, // IDADE
+        7: { cellWidth: 41, halign: 'left' }, // INDÚSTRIA / AGÊNCIA
       };
 
   autoTable(doc, {
     head: [cabecalhosFinais],
     body: linhasDados,
-    startY: 47,
-    margin: { left: marginX, right: marginX, bottom: 15 },
+    startY: 28 + barraAltura + 3,
+    margin: { left: marginX, right: marginX, bottom: 12 },
     theme: 'grid',
+    showHead: 'everyPage', // Repetição automática do cabeçalho em todas as páginas
     styles: {
       font: 'helvetica',
-      fontSize: 8,
-      cellPadding: 2,
+      fontSize: 7.5,
+      cellPadding: 1.8,
       textColor: [15, 23, 42],
       lineColor: [203, 213, 225],
       lineWidth: 0.15,
       valign: 'middle',
+      overflow: 'linebreak',
     },
     headStyles: {
       fillColor: [30, 41, 59], // slate-800
       textColor: [255, 255, 255],
-      fontSize: 8,
+      fontSize: 7.5,
       fontStyle: 'bold',
       halign: 'center',
       valign: 'middle',
@@ -318,28 +300,28 @@ export function gerarRelatorioIsvA3Pdf(
     },
     columnStyles: columnStylesConfig,
     didDrawPage: (data) => {
-      // Rodapé da página com numeração
+      // Rodapé da página com identificação e numeração
       const pageNumber = data.pageNumber;
-      doc.setFontSize(8);
+      doc.setFontSize(7.5);
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(100, 116, 139); // slate-500
 
       doc.text(
-        `Controle de Vencimentos • Filial 172 Cascavel — Relatório ISV Itens Sem Venda (A3)`,
+        `ISV | Inteligência de Estoque • Filial 172 — Cascavel`,
         marginX,
-        pageHeight - 7
+        pageHeight - 5
       );
 
       doc.text(
         `Página ${pageNumber}`,
         pageWidth - marginX,
-        pageHeight - 7,
+        pageHeight - 5,
         { align: 'right' }
       );
     },
   });
 
-  // Nome do arquivo padronizado
+  // Nome do arquivo padronizado A4
   const dia = String(agora.getDate()).padStart(2, '0');
   const mes = String(agora.getMonth() + 1).padStart(2, '0');
   const ano = agora.getFullYear();
@@ -348,8 +330,35 @@ export function gerarRelatorioIsvA3Pdf(
 
   const sufixoLimite = options.limiteQuantidade && options.limiteQuantidade !== 'TODOS' ? `TOP${options.limiteQuantidade}_` : '';
   const sufixoValor = exibirValor ? 'COM_VALOR' : 'SEM_VALOR';
-  const nomeArquivo = `RELATORIO_ISV_A3_${sufixoLimite}${dia}-${mes}-${ano}_${hora}${min}_${sufixoValor}.pdf`;
+  const prefixoEntidade = options.nomeEntidade ? `${options.tipoAgrupamento || 'ENTIDADE'}_` : '';
+  const nomeArquivo = `ISV_A4_${prefixoEntidade}${sufixoLimite}${dia}-${mes}-${ano}_${hora}${min}_${sufixoValor}.pdf`;
 
   // Download do PDF
   doc.save(nomeArquivo);
+}
+
+// Manter alias retrocompatível para evitar quebras em chamadas antigas
+export const gerarRelatorioIsvA3Pdf = gerarRelatorioIsvA4Pdf;
+
+/**
+ * Gera relatório A4 específico para uma Indústria ou Agência selecionada no Drilldown
+ */
+export function gerarRelatorioEntidadeIsvA4Pdf(
+  tipo: 'INDUSTRIA' | 'AGENCIA',
+  entidadeNome: string,
+  subtitulo: string,
+  itens: ItemIsv[],
+  options?: Partial<IsvPdfOptions>
+): void {
+  gerarRelatorioIsvA4Pdf(itens, {
+    tipoAgrupamento: tipo,
+    nomeEntidade: entidadeNome,
+    subtituloEntidade: subtitulo,
+    tituloFiltro: `${tipo === 'INDUSTRIA' ? 'Indústria' : 'Agência'}: ${entidadeNome}`,
+    exibirValorEstoque: options?.exibirValorEstoque !== undefined ? options.exibirValorEstoque : true,
+    filialNome: 'Filial 172 — Cascavel',
+    fonteOficial: 'BASE DO RUB',
+    tipoRelatorioTitulo: tipo === 'INDUSTRIA' ? 'RELATÓRIO POR INDÚSTRIA' : 'RELATÓRIO POR AGÊNCIA',
+    ...options,
+  });
 }

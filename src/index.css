@@ -1,1 +1,24 @@
 @import "tailwindcss";
+
+@theme {
+  --color-brand-primary: #F36B0B;
+  --color-brand-light: #FF8B35;
+  --color-brand-dark: #C94F00;
+  --color-brand-50: #FFF7ED;
+  --color-brand-100: #FFEDD5;
+}
+
+:root {
+  --color-saveweb-orange: #F36B0B;
+  --color-saveweb-light: #FF8B35;
+  --color-saveweb-dark: #C94F00;
+  --color-saveweb-bg: #F8F9FA;
+  --color-saveweb-card: #FFFFFF;
+  --color-saveweb-border: #E5E7EB;
+  --color-saveweb-text: #1F2937;
+}
+
+body {
+  background-color: #F8F9FA;
+  color: #1F2937;
+}

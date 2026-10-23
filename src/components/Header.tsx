@@ -89,18 +89,18 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <header
       id="app-header"
-      className="sticky top-0 z-30 bg-blue-700 text-white shadow-lg border-b border-blue-800 select-none flex-none"
+      className="sticky top-0 z-30 bg-[#F36B0B] text-white shadow-lg border-b border-[#C94F00] select-none flex-none"
     >
       {/* Top Banner with Bold Typography */}
       <div className="px-4 py-3.5 flex items-center justify-between gap-3 max-w-7xl mx-auto">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-white/10 flex items-center justify-center border border-white/20 shadow-xs shrink-0">
+          <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center border border-white/25 shadow-xs shrink-0">
             <Calendar className="w-5 h-5 text-white stroke-[2.5]" />
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-lg sm:text-xl font-black tracking-tight uppercase leading-tight">
-                Controle de Vencimentos
+              <h1 className="text-base sm:text-xl font-black tracking-tight uppercase leading-tight">
+                ISV | INTELIGÊNCIA DE ESTOQUE
               </h1>
               {isDemo && (
                 <span className="px-2 py-0.5 rounded text-[10px] font-black bg-amber-400 text-slate-950 uppercase tracking-wider shadow-xs flex items-center gap-1">
@@ -109,8 +109,8 @@ export const Header: React.FC<HeaderProps> = ({
                 </span>
               )}
             </div>
-            <p className="text-xs text-blue-200 font-bold uppercase tracking-wider mt-0.5">
-              {filial} <span className="opacity-75 font-normal">| SMGOI013</span>
+            <p className="text-xs text-orange-100 font-bold uppercase tracking-wider mt-0.5">
+              FILIAL 172 — CASCAVEL <span className="opacity-80 font-normal">| BASE DO RUB</span>
             </p>
           </div>
         </div>
@@ -119,7 +119,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-2 sm:gap-3">
           {ultimaAtualizacao && (
             <div className="hidden md:block text-right">
-              <p className="text-[10px] uppercase font-bold text-blue-200 tracking-wider">
+              <p className="text-[10px] uppercase font-bold text-orange-100 tracking-wider">
                 Última Atualização
               </p>
               <p className="text-xs font-mono font-bold text-white">
@@ -133,7 +133,7 @@ export const Header: React.FC<HeaderProps> = ({
               id="header-btn-search"
               onClick={onQuickSearchClick}
               aria-label="Buscar"
-              className="p-2 rounded-xl bg-white/10 hover:bg-white/20 active:bg-white/30 text-white transition-colors"
+              className="p-2 rounded-xl bg-white/15 hover:bg-white/25 active:bg-white/30 text-white transition-colors"
             >
               <Search className="w-4 h-4 stroke-[2.5]" />
             </button>
@@ -165,16 +165,16 @@ export const Header: React.FC<HeaderProps> = ({
             }
             className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-xs uppercase tracking-wide transition-all border shrink-0 cursor-pointer ${
               isSyncing
-                ? 'bg-amber-500/25 text-amber-200 border-amber-400/50 animate-pulse'
+                ? 'bg-amber-500/25 text-amber-100 border-amber-300/50 animate-pulse'
                 : hasErrors
-                ? 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-200 border-rose-400/50'
+                ? 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-100 border-rose-300/50'
                 : pendingCount > 0
-                ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border-amber-400/40'
+                ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border-amber-300/40'
                 : syncStatus.state === 'connected'
-                ? 'bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-100 border-emerald-400/50 hover:border-emerald-300 shadow-xs'
+                ? 'bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-100 border-emerald-300/50 hover:border-emerald-200 shadow-xs'
                 : syncStatus.state === 'connecting'
-                ? 'bg-blue-500/25 text-blue-200 border-blue-400/50'
-                : 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-200 border-rose-400/50'
+                ? 'bg-white/20 text-orange-100 border-white/30'
+                : 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-100 border-rose-300/50'
             }`}
           >
             {isSyncing ? (
@@ -186,7 +186,7 @@ export const Header: React.FC<HeaderProps> = ({
             ) : syncStatus.state === 'connected' ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-300" />
             ) : syncStatus.state === 'connecting' ? (
-              <RefreshCw className="w-4 h-4 animate-spin text-blue-300" />
+              <RefreshCw className="w-4 h-4 animate-spin text-white" />
             ) : (
               <CloudOff className="w-4 h-4 text-rose-300" />
             )}
@@ -208,23 +208,24 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             id="header-btn-scanner"
             onClick={onOpenScanner}
-            className="flex items-center gap-1.5 bg-white text-blue-700 hover:bg-blue-50 active:bg-blue-100 px-3.5 py-2 rounded-xl font-black text-xs uppercase tracking-wide shadow-md shadow-blue-900/20 transition-all active:scale-95 shrink-0"
+            className="flex items-center gap-1.5 bg-white text-[#C94F00] hover:bg-orange-50 active:bg-orange-100 px-3.5 py-2 rounded-xl font-black text-xs uppercase tracking-wide shadow-md shadow-orange-950/20 transition-all active:scale-95 shrink-0 cursor-pointer"
           >
-            <Camera className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+            <Camera className="w-4 h-4 text-[#C94F00] stroke-[2.5]" />
             <span>Ler EAN</span>
           </button>
         </div>
       </div>
 
       {/* Subheader bar with operational status in Bold Typography */}
-      <div className="bg-blue-800/90 px-4 py-1.5 text-[11px] text-blue-100 flex items-center justify-between border-t border-blue-600/40 max-w-7xl mx-auto">
+      <div className="bg-[#C94F00] px-4 py-1.5 text-[11px] text-orange-100 flex items-center justify-between border-t border-orange-400/30 max-w-7xl mx-auto">
         <div className="flex items-center gap-2 truncate">
-          <Database className="w-3.5 h-3.5 text-blue-300 shrink-0" />
+          <Database className="w-3.5 h-3.5 text-orange-200 shrink-0" />
           <span className="truncate">
-            <span className="uppercase font-bold text-blue-200">Base:</span>{' '}
-            <strong className="text-white font-black">{currentStatus}</strong>
+            <strong className="text-white font-black">
+              {currentStatus === 'SMGOI013' ? 'BASE DO RUB' : `BASE: ${currentStatus}`}
+            </strong>
             {ultimaAtualizacao && (
-              <span className="text-blue-200 ml-1.5 font-mono text-[10px]">
+              <span className="text-orange-200 ml-1.5 font-mono text-[10px]">
                 ({ultimaAtualizacao})
               </span>
             )}
@@ -233,10 +234,10 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-2 shrink-0">
           {metadados?.total_produtos !== undefined && (
             <>
-              <span className="text-blue-200 font-bold">
+              <span className="text-orange-200 font-bold">
                 <strong className="text-white font-black">{metadados.total_produtos}</strong> prods
               </span>
-              <span className="w-1 h-1 rounded-full bg-blue-300"></span>
+              <span className="w-1 h-1 rounded-full bg-orange-300"></span>
             </>
           )}
           <span className="text-white font-bold uppercase tracking-wider text-[10px]">
@@ -247,10 +248,10 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Sync Toast Feedback */}
       {syncToast && (
-        <div className="bg-blue-950 text-white border-t border-b border-blue-500/30 px-4 py-2 text-xs flex items-center justify-between gap-3 shadow-md animate-in fade-in slide-in-from-top-1">
+        <div className="bg-slate-900 text-white border-t border-b border-orange-500/30 px-4 py-2 text-xs flex items-center justify-between gap-3 shadow-md animate-in fade-in slide-in-from-top-1">
           <div className="flex items-center gap-2 max-w-7xl mx-auto w-full">
             <Cloud className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span className="font-semibold text-blue-100">{syncToast}</span>
+            <span className="font-semibold text-orange-100">{syncToast}</span>
           </div>
         </div>
       )}

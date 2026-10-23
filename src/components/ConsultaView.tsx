@@ -281,7 +281,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             onClick={() => onSelectProduto(null)}
             className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 text-xs font-black uppercase tracking-wider shadow-2xs transition-colors cursor-pointer"
           >
-            <ArrowLeft className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+            <ArrowLeft className="w-4 h-4 text-[#C94F00] stroke-[2.5]" />
             <span>Voltar para Busca</span>
           </button>
 
@@ -289,7 +289,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             id="btn-scanner-shortcut-detail"
             type="button"
             onClick={onOpenScanner}
-            className="flex items-center gap-1.5 text-xs font-black uppercase tracking-wider text-blue-700 hover:underline cursor-pointer"
+            className="flex items-center gap-1.5 text-xs font-black uppercase tracking-wider text-[#C94F00] hover:underline cursor-pointer"
           >
             <Camera className="w-4 h-4 stroke-[2.5]" />
             <span>Escanear Outro</span>
@@ -300,11 +300,11 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         {/* SEÇÃO 1: IDENTIFICAÇÃO DA MERCADORIA */}
         {/* =================================================================== */}
         <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm space-y-3 relative overflow-hidden">
-          <div className="absolute top-0 left-0 right-0 h-1.5 bg-blue-700" />
+          <div className="absolute top-0 left-0 right-0 h-1.5 bg-[#F36B0B]" />
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-black uppercase tracking-wider text-blue-800 bg-blue-50 px-2.5 py-1 rounded-md border border-blue-200 font-mono">
+              <span className="text-xs font-black uppercase tracking-wider text-[#C94F00] bg-orange-50 px-2.5 py-1 rounded-md border border-orange-200 font-mono">
                 CÓDIGO: {selectedProduto.codigo_exibicao}
               </span>
               <span className="text-[11px] font-black uppercase tracking-wider text-gray-700 bg-gray-100 px-2.5 py-1 rounded-md border border-gray-200">
@@ -326,7 +326,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               <span
                 className={`text-[10px] font-black px-2 py-0.5 rounded border uppercase ${
                   isGerenciado
-                    ? 'bg-blue-50 text-blue-800 border-blue-200'
+                    ? 'bg-orange-50 text-[#C94F00] border-orange-200'
                     : 'bg-gray-100 text-gray-700 border-gray-300'
                 }`}
               >
@@ -371,7 +371,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             </div>
             <div className="bg-gray-50 p-2.5 rounded-lg border border-gray-100">
               <span className="text-[10px] text-gray-500 font-bold uppercase block tracking-wider">Chave Filial</span>
-              <strong className="text-blue-900 font-mono text-xs truncate block">172-{selectedProduto.codigo_interno}</strong>
+              <strong className="text-[#C94F00] font-mono text-xs truncate block">172-{selectedProduto.codigo_interno}</strong>
             </div>
           </div>
         </div>
@@ -379,27 +379,27 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         {/* =================================================================== */}
         {/* SEÇÃO 2: ESTOQUE DISPONÍVEL EM DESTAQUE (UNIFICADO, SEM EMB1/EMB9) */}
         {/* =================================================================== */}
-        <div className="bg-white rounded-xl p-5 border border-blue-200 shadow-sm space-y-3 relative overflow-hidden bg-gradient-to-br from-white via-white to-blue-50/40">
+        <div className="bg-white rounded-xl p-5 border border-orange-200 shadow-sm space-y-3 relative overflow-hidden bg-gradient-to-br from-white via-white to-orange-50/40">
           <div className="flex items-center justify-between">
-            <h3 className="text-xs font-black text-blue-900 uppercase tracking-wider flex items-center gap-2">
-              <Boxes className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+            <h3 className="text-xs font-black text-orange-950 uppercase tracking-wider flex items-center gap-2">
+              <Boxes className="w-4 h-4 text-[#F36B0B] stroke-[2.5]" />
               ESTOQUE DISPONÍVEL
             </h3>
-            <span className="text-xs font-black text-blue-900 bg-blue-100/80 px-2.5 py-1 rounded-md border border-blue-300 uppercase font-mono">
+            <span className="text-xs font-black text-[#C94F00] bg-orange-100/80 px-2.5 py-1 rounded-md border border-orange-300 uppercase font-mono">
               Total: {estoqueTotalNumerico} {isPesavel ? 'KG' : 'UN'}
             </span>
           </div>
 
-          <div className="p-4 bg-blue-50/60 rounded-xl border border-blue-200/80 text-center space-y-1">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800 block">
+          <div className="p-4 bg-orange-50/60 rounded-xl border border-orange-200/80 text-center space-y-1">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-[#C94F00] block">
               Posição Operacional da Mercadoria
             </span>
-            <div className="text-2xl sm:text-3xl font-black font-mono text-blue-950 tracking-tight">
+            <div className="text-2xl sm:text-3xl font-black font-mono text-orange-950 tracking-tight">
               {estoqueTextoExtenso}
             </div>
             {estoqueTextoOriginal && estoqueTextoOriginal !== estoqueTextoExtenso && (
-              <div className="pt-1.5 flex items-center justify-center gap-1.5 text-xs text-blue-700 font-semibold">
-                <FileSpreadsheet className="w-3.5 h-3.5 text-blue-600" />
+              <div className="pt-1.5 flex items-center justify-center gap-1.5 text-xs text-[#C94F00] font-semibold">
+                <FileSpreadsheet className="w-3.5 h-3.5 text-[#F36B0B]" />
                 <span>Original ERP: <strong className="font-mono">{estoqueTextoOriginal}</strong></span>
               </div>
             )}
@@ -416,19 +416,19 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-xs font-black text-gray-800 uppercase tracking-wider flex items-center gap-2">
-              <Package className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+              <Package className="w-4 h-4 text-[#F36B0B] stroke-[2.5]" />
               Embalagem Comercial Completa
             </h3>
             <span
               className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded border ${
                 resolucaoEmbalagem.fonte === 'SPCOI007'
-                  ? 'bg-blue-50 text-blue-800 border-blue-200'
+                  ? 'bg-orange-50 text-[#C94F00] border-orange-200'
                   : resolucaoEmbalagem.fonte === 'SMGOI013'
                   ? 'bg-gray-100 text-gray-700 border-gray-200'
                   : 'bg-amber-50 text-amber-800 border-amber-200'
               }`}
             >
-              Fonte: {resolucaoEmbalagem.fonte === 'SPCOI007' ? 'SPCOI007 Oficial' : resolucaoEmbalagem.fonte === 'SMGOI013' ? 'SMGOI013' : 'Pendente'}
+              Fonte: {resolucaoEmbalagem.fonte === 'SPCOI007' ? 'SPCOI007 Oficial' : resolucaoEmbalagem.fonte === 'SMGOI013' ? 'Base do RUB' : 'Pendente'}
             </span>
           </div>
 
@@ -468,7 +468,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                 <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider block">
                   Fator Comercial
                 </span>
-                <span className="text-sm font-black text-blue-700 font-mono">
+                <span className="text-sm font-black text-[#C94F00] font-mono">
                   {selectedProduto.fator_embalagem || embData.fator || 1} un/emb
                 </span>
               </div>
@@ -481,7 +481,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                   EMBALAGEM PENDENTE
                 </span>
                 <p className="text-xs text-amber-800">
-                  Mercadoria sem embalagem cadastrada nas fontes oficiais (SPCOI007 ou SMGOI013). O sistema não deduz a embalagem comercial a partir do texto do estoque.
+                  Mercadoria sem embalagem cadastrada nas fontes oficiais (SPCOI007 ou Base do RUB). O sistema não deduz a embalagem comercial a partir do texto do estoque.
                 </p>
               </div>
             </div>
@@ -547,7 +547,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-black text-gray-800 uppercase tracking-wider flex items-center gap-2">
-              <History className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+              <History className="w-4 h-4 text-[#F36B0B] stroke-[2.5]" />
               Dias Sem Venda & Idade da Mercadoria
             </h3>
             {diasSemVenda >= 10 && (
@@ -891,7 +891,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         <div className="bg-white rounded-xl p-5 border border-gray-200 shadow-sm space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-black text-gray-800 uppercase tracking-wider flex items-center gap-2">
-              <CalendarClock className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+              <CalendarClock className="w-4 h-4 text-[#F36B0B] stroke-[2.5]" />
               Lotes de Vencimento Cadastrados
             </h3>
             <span className="text-xs font-mono font-bold text-gray-500">
@@ -904,7 +904,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             id="btn-cadastrar-vencimento-secao12"
             type="button"
             onClick={() => onOpenCadastrarModal(selectedProduto)}
-            className="w-full py-3.5 px-4 rounded-xl bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white font-black text-sm uppercase tracking-wider shadow-md shadow-blue-700/20 flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-[0.99]"
+            className="w-full py-3.5 px-4 rounded-xl bg-[#F36B0B] hover:bg-[#C94F00] active:bg-[#A84100] text-white font-black text-sm uppercase tracking-wider shadow-md shadow-orange-600/20 flex items-center justify-center gap-2 transition-all cursor-pointer active:scale-[0.99]"
           >
             <Plus className="w-5 h-5 stroke-[3]" />
             <span>+ CADASTRAR VENCIMENTO PARA ESTE PRODUTO</span>
@@ -954,7 +954,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                         <button
                           type="button"
                           onClick={() => onOpenCadastrarModal(selectedProduto, lote)}
-                          className="p-1.5 rounded-lg bg-white border border-gray-200 text-gray-700 hover:text-blue-700 hover:border-blue-300 transition-colors cursor-pointer"
+                          className="p-1.5 rounded-lg bg-white border border-gray-200 text-gray-700 hover:text-[#C94F00] hover:border-orange-300 transition-colors cursor-pointer"
                           title="Editar lote"
                         >
                           <Pencil className="w-3.5 h-3.5" />
@@ -1000,7 +1000,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             id="btn-cadastrar-vencimento-consulta"
             type="button"
             onClick={() => onOpenCadastrarModal(selectedProduto)}
-            className="flex-1 py-3.5 px-4 rounded-xl bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white font-black text-xs sm:text-sm uppercase tracking-wider shadow-lg shadow-blue-700/30 flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer"
+            className="flex-1 py-3.5 px-4 rounded-xl bg-[#F36B0B] hover:bg-[#C94F00] active:bg-[#A84100] text-white font-black text-xs sm:text-sm uppercase tracking-wider shadow-lg shadow-orange-600/30 flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer"
           >
             <Plus className="w-5 h-5 stroke-[3]" />
             <span>Cadastrar Vencimento</span>
@@ -1019,7 +1019,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
       <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200 space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-xs font-black uppercase tracking-wider text-gray-800 flex items-center gap-2">
-            <Search className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+            <Search className="w-4 h-4 text-[#F36B0B] stroke-[2.5]" />
             Consulta de Mercadoria
           </h2>
           {debouncedQuery.trim() && (
@@ -1040,7 +1040,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             placeholder="Buscar por código, descrição ou EAN..."
             value={inputQuery}
             onChange={(e) => handleSearchChange(e.target.value)}
-            className="w-full bg-gray-50 border-2 border-gray-200 focus:border-blue-600 focus:bg-white rounded-xl pl-11 pr-24 py-3 text-sm font-bold text-gray-900 focus:outline-hidden transition-all shadow-2xs"
+            className="w-full bg-gray-50 border-2 border-gray-200 focus:border-[#F36B0B] focus:bg-white rounded-xl pl-11 pr-24 py-3 text-sm font-bold text-gray-900 focus:outline-hidden transition-all shadow-2xs"
             autoFocus
           />
 
@@ -1060,7 +1060,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               id="btn-trigger-scanner-in-search"
               type="button"
               onClick={onOpenScanner}
-              className="bg-blue-700 hover:bg-blue-800 text-white p-2 rounded-lg shadow-2xs flex items-center justify-center transition-colors active:scale-95 cursor-pointer"
+              className="bg-[#F36B0B] hover:bg-[#C94F00] text-white p-2 rounded-lg shadow-2xs flex items-center justify-center transition-colors active:scale-95 cursor-pointer"
               title="Ler Código de Barras pela Câmera"
             >
               <Camera className="w-4 h-4 stroke-[2.5]" />
@@ -1078,13 +1078,13 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         <div className="bg-white rounded-xl p-3.5 border border-gray-200 shadow-2xs space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold text-gray-600 flex items-center gap-1.5 uppercase tracking-wider">
-              <Filter className="w-3.5 h-3.5 text-blue-700" />
+              <Filter className="w-3.5 h-3.5 text-[#F36B0B]" />
               Filtrar por Gramagem / Apresentação:
             </span>
             {gramagemFilter && (
               <button
                 onClick={() => setGramagemFilter(null)}
-                className="text-[11px] font-bold text-blue-700 hover:underline flex items-center gap-1 cursor-pointer"
+                className="text-[11px] font-bold text-[#C94F00] hover:underline flex items-center gap-1 cursor-pointer"
               >
                 <span>Limpar filtro</span>
                 <X className="w-3 h-3" />
@@ -1098,7 +1098,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               onClick={() => setGramagemFilter(null)}
               className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all select-none cursor-pointer ${
                 gramagemFilter === null
-                  ? 'bg-blue-700 text-white shadow-2xs'
+                  ? 'bg-[#F36B0B] text-white shadow-2xs'
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
               }`}
             >
@@ -1114,12 +1114,12 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                   onClick={() => setGramagemFilter(isSelected ? null : g.texto)}
                   className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all select-none flex items-center gap-1 cursor-pointer ${
                     isSelected
-                      ? 'bg-blue-700 text-white shadow-2xs'
+                      ? 'bg-[#F36B0B] text-white shadow-2xs'
                       : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
                   }`}
                 >
                   <span>{g.texto}</span>
-                  <span className={isSelected ? 'text-blue-200 text-[10px]' : 'text-gray-500 text-[10px]'}>
+                  <span className={isSelected ? 'text-orange-100 text-[10px]' : 'text-gray-500 text-[10px]'}>
                     ({g.count})
                   </span>
                 </button>
@@ -1130,12 +1130,12 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
           {gramagemFilter && (
             <div className="flex items-center gap-2 pt-1 border-t border-gray-100 text-xs">
               <span className="text-gray-500">Filtro ativo:</span>
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-200 font-bold">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md bg-orange-50 text-[#C94F00] border border-orange-200 font-bold">
                 Gramagem: {gramagemFilter}
                 <button
                   type="button"
                   onClick={() => setGramagemFilter(null)}
-                  className="hover:text-blue-950 p-0.5 cursor-pointer"
+                  className="hover:text-orange-950 p-0.5 cursor-pointer"
                   title="Remover filtro de gramagem"
                 >
                   <X className="w-3 h-3" />
@@ -1149,7 +1149,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
       {/* ESTADO INICIAL: Sem busca */}
       {!debouncedQuery.trim() ? (
         <div className="bg-white rounded-2xl p-8 border border-gray-200 text-center space-y-4 shadow-xs">
-          <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-700 flex items-center justify-center mx-auto border border-blue-100">
+          <div className="w-14 h-14 rounded-2xl bg-orange-50 text-[#F36B0B] flex items-center justify-center mx-auto border border-orange-100">
             <Search className="w-7 h-7 stroke-[2]" />
           </div>
           <div className="space-y-1.5 max-w-md mx-auto">
@@ -1165,7 +1165,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             <button
               type="button"
               onClick={onOpenScanner}
-              className="inline-flex items-center gap-2 px-4 py-2.5 bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white rounded-xl text-xs font-black uppercase tracking-wider shadow-2xs transition-colors cursor-pointer"
+              className="inline-flex items-center gap-2 px-4 py-2.5 bg-[#F36B0B] hover:bg-[#C94F00] active:bg-[#A84100] text-white rounded-xl text-xs font-black uppercase tracking-wider shadow-2xs transition-colors cursor-pointer"
             >
               <Camera className="w-4 h-4 stroke-[2.5]" />
               <span>Escanear Código de Barras</span>
@@ -1204,17 +1204,17 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               </div>
 
               {onOpenVincularModal && (
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 max-w-md mx-auto space-y-3 text-left">
+                <div className="bg-orange-50 border border-orange-200 rounded-xl p-4 max-w-md mx-auto space-y-3 text-left">
                   <div className="flex items-start gap-2.5">
-                    <div className="p-1.5 rounded-lg bg-blue-600 text-white shrink-0">
+                    <div className="p-1.5 rounded-lg bg-[#F36B0B] text-white shrink-0">
                       <Link2 className="w-4 h-4" />
                     </div>
                     <div>
-                      <h5 className="text-xs font-black text-blue-950 uppercase tracking-tight">
+                      <h5 className="text-xs font-black text-orange-950 uppercase tracking-tight">
                         Leu ou buscou um Código de Barras (EAN)?
                       </h5>
-                      <p className="text-[11px] text-blue-800 font-medium mt-0.5">
-                        Você pode associar o código <strong className="font-mono">{debouncedQuery}</strong> a um produto da base SMGOI013 agora mesmo.
+                      <p className="text-[11px] text-[#C94F00] font-medium mt-0.5">
+                        Você pode associar o código <strong className="font-mono">{debouncedQuery}</strong> a um produto da base do RUB agora mesmo.
                       </p>
                     </div>
                   </div>
@@ -1223,7 +1223,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                     type="button"
                     id="btn-vincular-ean-empty-search"
                     onClick={() => onOpenVincularModal(debouncedQuery)}
-                    className="w-full py-2.5 px-3 bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white rounded-lg text-xs font-black uppercase tracking-wider flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer"
+                    className="w-full py-2.5 px-3 bg-[#F36B0B] hover:bg-[#C94F00] active:bg-[#A84100] text-white rounded-lg text-xs font-black uppercase tracking-wider flex items-center justify-center gap-1.5 transition-colors shadow-2xs cursor-pointer"
                   >
                     <Plus className="w-3.5 h-3.5 stroke-[3]" />
                     <span>Vincular Código "{debouncedQuery}" Manualmente</span>
@@ -1275,12 +1275,12 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                     key={prod.id}
                     id={`prod-card-${prod.codigo_interno}`}
                     onClick={() => handleSelectProduct(prod)}
-                    className="bg-white rounded-xl p-4 border border-gray-200 hover:border-blue-500 hover:shadow-xs transition-all cursor-pointer space-y-2.5 active:scale-[0.99]"
+                    className="bg-white rounded-xl p-4 border border-gray-200 hover:border-orange-400 hover:shadow-xs transition-all cursor-pointer space-y-2.5 active:scale-[0.99]"
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="space-y-1">
                         <div className="flex items-center flex-wrap gap-1.5">
-                          <span className="text-xs font-mono font-black text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                          <span className="text-xs font-mono font-black text-[#C94F00] bg-orange-50 px-2 py-0.5 rounded border border-orange-200">
                             <HighlightText text={prod.codigo_exibicao} query={debouncedQuery} />
                           </span>
 
@@ -1319,7 +1319,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
 
                       {/* ESTOQUE DISPONÍVEL UNIFICADO (SEM EMB1/EMB9) */}
                       <div className="text-right shrink-0">
-                        <span className="text-xs font-black font-mono text-blue-900 bg-blue-50/80 px-2 py-0.5 rounded border border-blue-200 block">
+                        <span className="text-xs font-black font-mono text-orange-950 bg-orange-50/80 px-2 py-0.5 rounded border border-orange-200 block">
                           ESTOQUE: {estoqueExtenso}
                         </span>
                         {valorDisponivel !== null && valorDisponivel !== undefined && (
@@ -1352,7 +1352,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                           {diasSV}D
                         </strong>
                       </span>
-                      <span className="text-blue-700 font-black uppercase text-[11px] tracking-wide flex items-center gap-1">
+                      <span className="text-[#C94F00] font-black uppercase text-[11px] tracking-wide flex items-center gap-1">
                         Consultar Detalhes →
                       </span>
                     </div>
@@ -1377,7 +1377,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               </button>
 
               <div className="text-xs font-bold text-gray-700">
-                Página <span className="font-black text-blue-700">{currentPage}</span> de{' '}
+                Página <span className="font-black text-[#C94F00]">{currentPage}</span> de{' '}
                 <span className="font-black text-gray-900">{totalPages}</span>
               </div>
 

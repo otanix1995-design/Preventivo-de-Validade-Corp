@@ -242,18 +242,18 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
 
   return (
     <div id="view-vencimentos" className="space-y-4 pb-24 max-w-4xl mx-auto">
-      {/* CABEÇALHO AZUL PRINCIPAL: VALIDADES & TRABALHO DIÁRIO */}
-      <div className="bg-blue-600 text-white rounded-2xl p-4 sm:p-5 shadow-md space-y-3.5">
+      {/* CABEÇALHO LARANJA PRINCIPAL: VALIDADES & TRABALHO DIÁRIO */}
+      <div className="bg-[#F36B0B] text-white rounded-2xl p-4 sm:p-5 shadow-md border border-[#C94F00] space-y-3.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-blue-700/80 rounded-xl border border-blue-400">
+            <div className="p-2.5 bg-[#C94F00]/80 rounded-xl border border-orange-300/40">
               <Calendar className="w-6 h-6 text-white stroke-[2.5]" />
             </div>
             <div>
               <h1 className="text-lg sm:text-xl font-black tracking-tight leading-tight">
                 VALIDADES
               </h1>
-              <p className="text-xs text-blue-100 font-medium mt-0.5">
+              <p className="text-xs text-orange-100 font-medium mt-0.5">
                 Trabalho diário {activeSubTab === 'saeou060' ? '• Próximos 15 dias' : activeSubTab === 'analise_promotor' ? '• Análise e Aprovação de Promotores' : '• Controle de Vencimentos'}
               </p>
             </div>
@@ -261,7 +261,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
 
           <button
             onClick={() => onOpenCadastrarModal()}
-            className="px-3.5 py-2 bg-white text-blue-800 hover:bg-blue-50 active:bg-blue-100 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-sm active:scale-95"
+            className="px-3.5 py-2 bg-white text-[#C94F00] hover:bg-orange-50 active:bg-orange-100 rounded-xl text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-all shadow-sm active:scale-95"
           >
             <Plus className="w-4 h-4 stroke-[3]" />
             <span>Novo Lote</span>
@@ -269,14 +269,14 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
         </div>
 
         {/* SELETOR DE ALTERNÂNCIA [ CONTROLE ] [ SAEOU060 ] [ ANÁLISE PROMOTOR ] */}
-        <div className="grid grid-cols-3 bg-blue-700/70 p-1 rounded-xl border border-blue-400/40 gap-1">
+        <div className="grid grid-cols-3 bg-[#C94F00]/70 p-1 rounded-xl border border-orange-400/40 gap-1">
           <button
             id="tab-btn-controle"
             onClick={() => setActiveSubTab('controle')}
             className={`py-2 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1 sm:gap-1.5 ${
               activeSubTab === 'controle'
-                ? 'bg-white text-blue-900 shadow-sm'
-                : 'text-blue-100 hover:text-white hover:bg-blue-600/50'
+                ? 'bg-white text-[#C94F00] shadow-sm'
+                : 'text-orange-100 hover:text-white hover:bg-orange-600/50'
             }`}
           >
             <Calendar className="w-3.5 h-3.5 shrink-0" />
@@ -285,8 +285,8 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
               <span
                 className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold shrink-0 ${
                   activeSubTab === 'controle'
-                    ? 'bg-blue-100 text-blue-800'
-                    : 'bg-blue-800/80 text-blue-200'
+                    ? 'bg-orange-100 text-[#C94F00]'
+                    : 'bg-[#A84100]/80 text-orange-200'
                 }`}
               >
                 {vencimentos.length}
@@ -299,8 +299,8 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
             onClick={() => setActiveSubTab('saeou060')}
             className={`py-2 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1 sm:gap-1.5 ${
               activeSubTab === 'saeou060'
-                ? 'bg-white text-blue-900 shadow-sm'
-                : 'text-blue-100 hover:text-white hover:bg-blue-600/50'
+                ? 'bg-white text-[#C94F00] shadow-sm'
+                : 'text-orange-100 hover:text-white hover:bg-orange-600/50'
             }`}
           >
             <FileSpreadsheet className="w-3.5 h-3.5 shrink-0" />
@@ -309,8 +309,8 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
               <span
                 className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold shrink-0 ${
                   activeSubTab === 'saeou060'
-                    ? 'bg-blue-100 text-blue-800'
-                    : 'bg-blue-800/80 text-blue-200'
+                    ? 'bg-orange-100 text-[#C94F00]'
+                    : 'bg-[#A84100]/80 text-orange-200'
                 }`}
               >
                 {saeouCount}
@@ -323,8 +323,8 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
             onClick={() => setActiveSubTab('analise_promotor')}
             className={`py-2 px-1.5 sm:px-3 rounded-lg text-[11px] sm:text-xs font-black uppercase tracking-wider transition-all flex items-center justify-center gap-1 sm:gap-1.5 ${
               activeSubTab === 'analise_promotor'
-                ? 'bg-white text-blue-900 shadow-sm'
-                : 'text-blue-100 hover:text-white hover:bg-blue-600/50'
+                ? 'bg-white text-[#C94F00] shadow-sm'
+                : 'text-orange-100 hover:text-white hover:bg-orange-600/50'
             }`}
           >
             <Clock className="w-3.5 h-3.5 shrink-0" />
@@ -344,7 +344,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
         </div>
 
         {pendingSyncCount > 0 && (
-          <div className="flex items-center justify-between text-xs bg-blue-500/30 border border-blue-300/40 rounded-lg px-3 py-1.5 text-blue-100">
+          <div className="flex items-center justify-between text-xs bg-orange-800/30 border border-orange-300/40 rounded-lg px-3 py-1.5 text-orange-100">
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
               <span>Dados salvos localmente • Sincronização em segundo plano ({pendingSyncCount} pendente{pendingSyncCount > 1 ? 's' : ''})</span>
@@ -381,7 +381,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
                 <h2 className="text-xs font-black uppercase tracking-wider text-gray-800 flex items-center gap-2">
-                  <Calendar className="w-4 h-4 text-blue-700 stroke-[2.5]" />
+                  <Calendar className="w-4 h-4 text-[#F36B0B] stroke-[2.5]" />
                   Lista de Lotes em Acompanhamento
                 </h2>
                 <p className="text-xs text-gray-500 font-mono mt-0.5">
@@ -470,7 +470,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                 placeholder="Filtrar por código, descrição ou EAN..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full bg-gray-50 border border-gray-200 focus:border-blue-600 focus:bg-white rounded-xl pl-10 pr-3 py-2.5 text-xs font-bold text-gray-900 focus:outline-hidden transition-all shadow-2xs"
+                className="w-full bg-gray-50 border border-gray-200 focus:border-[#F36B0B] focus:bg-white rounded-xl pl-10 pr-3 py-2.5 text-xs font-bold text-gray-900 focus:outline-hidden transition-all shadow-2xs"
               />
             </div>
 
@@ -519,7 +519,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                     onClick={() => setActiveFilter(f.id)}
                     className={`px-3 py-1.5 rounded-xl text-xs font-bold uppercase tracking-wider whitespace-nowrap transition-all select-none ${
                       isSelected
-                        ? 'bg-blue-700 text-white shadow-xs'
+                        ? 'bg-[#F36B0B] text-white shadow-xs'
                         : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
                     }`}
                   >
@@ -546,7 +546,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                 {activeFilter !== 'TODOS' ? (
                   <button
                     onClick={() => setActiveFilter('TODOS')}
-                    className="px-4 py-2 bg-blue-50 text-blue-700 font-bold uppercase tracking-wider rounded-xl text-xs hover:bg-blue-100"
+                    className="px-4 py-2 bg-orange-50 text-[#C94F00] font-bold uppercase tracking-wider rounded-xl text-xs hover:bg-orange-100"
                   >
                     Ver todos os lotes
                   </button>
@@ -554,13 +554,13 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                   <div className="flex items-center justify-center gap-2 pt-2">
                     <button
                       onClick={() => onOpenCadastrarModal()}
-                      className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs rounded-xl shadow-xs"
+                      className="px-4 py-2 bg-[#F36B0B] hover:bg-[#C94F00] text-white font-bold text-xs rounded-xl shadow-xs"
                     >
                       Cadastrar Novo Lote
                     </button>
                     <button
                       onClick={() => setActiveSubTab('saeou060')}
-                      className="px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold text-xs rounded-xl border border-blue-200"
+                      className="px-4 py-2 bg-orange-50 hover:bg-orange-100 text-[#C94F00] font-bold text-xs rounded-xl border border-orange-200"
                     >
                       Ir para SAEOU060
                     </button>
@@ -586,7 +586,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                         ? 'bg-amber-50/40 border-amber-400 ring-2 ring-amber-500 shadow-xs'
                         : lote.enviar_ao_comprador
                         ? 'bg-orange-50/50 border-orange-300 hover:border-orange-400 shadow-xs'
-                        : 'bg-white border-gray-200 hover:border-blue-500 hover:shadow-xs'
+                        : 'bg-white border-gray-200 hover:border-orange-400 hover:shadow-xs'
                     }`}
                   >
                     {/* Header Row */}
@@ -619,14 +619,14 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                             <span>CARTAZ</span>
                           </button>
 
-                          <span className="text-xs font-mono font-bold text-blue-700 bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                          <span className="text-xs font-mono font-bold text-[#C94F00] bg-orange-50 px-2 py-0.5 rounded border border-orange-200">
                             {lote.codigo_exibicao || lote.codigo_interno}
                           </span>
                           <span className="text-xs font-bold text-gray-600">
                             {lote.embalagem || produto?.embalagem}
                           </span>
                           {lote.origem === 'SAEOU060' && (
-                            <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded font-bold">
+                            <span className="text-[10px] bg-orange-100 text-[#C94F00] px-2 py-0.5 rounded font-bold">
                               SAEOU060
                             </span>
                           )}
@@ -679,7 +679,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                               if (foundProd) onOpenCadastrarModal(foundProd, lote);
                             }
                           }}
-                          className="p-1.5 text-blue-600 hover:text-blue-800 hover:bg-blue-50 rounded-lg transition-colors border border-blue-200"
+                          className="p-1.5 text-[#C94F00] hover:text-[#A84100] hover:bg-orange-50 rounded-lg transition-colors border border-orange-200"
                           title="Editar este lote ou preço de rebaixe"
                         >
                           <Pencil className="w-3.5 h-3.5 stroke-[2.5]" />
@@ -708,7 +708,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
 
                       <div className="bg-gray-50 p-2.5 rounded-xl border border-gray-100">
                         <span className="text-[11px] text-gray-500 font-medium">Qtd. Vencendo:</span>
-                        <p className="font-bold text-blue-700 mt-0.5">
+                        <p className="font-bold text-[#C94F00] mt-0.5">
                           {lote.quantidade_total_unidades} UN
                         </p>
                         <span className="text-[10px] text-gray-500 block mt-0.5">
@@ -721,7 +721,7 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                         <p className="font-bold text-gray-900 mt-0.5">
                           {produto?.estoque_total !== undefined ? `${produto.estoque_total} ${produto.unidade_medida || 'UN'}` : '-'}
                         </p>
-                        <span className="text-[10px] text-gray-400 block mt-0.5">Base SMGOI013</span>
+                        <span className="text-[10px] text-gray-400 block mt-0.5">Base do RUB</span>
                       </div>
 
                       <div className="bg-gray-50 p-2.5 rounded-xl border border-gray-100">
