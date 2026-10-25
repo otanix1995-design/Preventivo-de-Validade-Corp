@@ -120,7 +120,7 @@ export interface LoteVencimento {
   enviar_ao_comprador?: boolean;
 
   // Auditoria e Origem
-  origem?: 'MANUAL' | 'SMGOI013' | 'SAEOU060';
+  origem?: 'MANUAL' | 'BASE_RUB' | 'SMGOI013' | 'SAEOU060';
   preco_normal?: number | null; // Preço Normal (DE)
   precoNormal?: number | null;
   preco_trabalhado?: number | null; // Preço de Rebaixe (POR)
@@ -230,7 +230,7 @@ export interface DivergenciaRegistro {
     | 'DADOS_INCONSISTENTES'
     | 'SAEOU060_DIVERGENCIA'
     | 'OUTRO';
-  origem?: 'SMGOI013' | 'VINCULOS_EAN' | 'VENCIMENTO' | 'SAEOU060' | 'MANUAL';
+  origem?: 'BASE_RUB' | 'SMGOI013' | 'VINCULOS_EAN' | 'VENCIMENTO' | 'SAEOU060' | 'MANUAL';
   codigo_interno?: string;
   identificador?: string;
   descricao?: string;
@@ -243,7 +243,7 @@ export interface DivergenciaRegistro {
 
 export interface ResumoImportacao {
   id?: string;
-  tipo: 'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060';
+  tipo: 'BASE_RUB' | 'SMGOI013' | 'VINCULOS_EAN' | 'SAEOU060';
   data_hora: string;
   total_lidos: number;
   total_atualizados: number;
@@ -261,10 +261,11 @@ export interface ResumoImportacao {
 export interface MetadadosBase {
   filial_numero: string;
   filial_nome: string;
+  ultima_atualizacao_base_rub?: string;
   ultima_atualizacao_smgoi013?: string;
   ultima_atualizacao_eans?: string;
   ultima_atualizacao_saeou060?: string;
-  status_base: 'SMGOI013' | 'DEMO' | 'VAZIA';
+  status_base: 'BASE_RUB' | 'SMGOI013' | 'DEMO' | 'VAZIA';
   total_produtos: number;
   total_vencimentos: number;
   total_eans: number;
@@ -834,7 +835,8 @@ export interface ResumoImportacaoIsv {
   total_com_valor: number;
   total_sem_valor: number;
   valor_total_disponivel: number;
-  total_cruzados_smgoi013: number;
+  total_cruzados_base_rub?: number;
+  total_cruzados_smgoi013?: number;
   total_cruzados_spcoi007: number;
   avisos: string[];
 }

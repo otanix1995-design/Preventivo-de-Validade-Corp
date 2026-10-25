@@ -50,6 +50,50 @@ export interface ResultadoCalculoFinanceiro {
   fatorUtilizado: number;
 }
 
+export interface DashboardData {
+  indicadores: {
+    valorTotal: number;
+    totalSkus: number;
+    totalIndustrias: number;
+    totalAgencias: number;
+  };
+  top10Produtos: ItemIsv[];
+  top10Industrias: {
+    cnpj: string;
+    nome: string;
+    razaoSocial?: string;
+    valorTotal: number;
+    skusSet: Set<string>;
+    itens: ItemIsv[];
+  }[];
+  top10Agencias: {
+    nome: string;
+    valorTotal: number;
+    skusSet: Set<string>;
+    industriasSet: Set<string>;
+    promotoresSet: Set<string>;
+    itens: ItemIsv[];
+  }[];
+}
+
+export function isFiltrosPadrao(filtros?: FiltrosIsv | null): boolean {
+  if (!filtros) return true;
+  return (
+    (!filtros.agencia || filtros.agencia === 'TODAS') &&
+    (!filtros.industriaCnpj || filtros.industriaCnpj === 'TODAS') &&
+    (!filtros.promotorId || filtros.promotorId === 'TODOS') &&
+    (!filtros.termoBusca || !filtros.termoBusca.trim()) &&
+    (!filtros.setorOperacional || filtros.setorOperacional === 'TODOS') &&
+    (!filtros.setorFisico || filtros.setorFisico === 'TODOS') &&
+    (!filtros.setorBalanco || filtros.setorBalanco === 'TODOS') &&
+    (filtros.diasSemVenda === null || filtros.diasSemVenda === undefined) &&
+    (filtros.idade === null || filtros.idade === undefined) &&
+    (!filtros.filtroEstoque || filtros.filtroEstoque === 'TODOS') &&
+    (!filtros.filtroValor || filtros.filtroValor === 'TODOS') &&
+    (!filtros.situacaoVinculo || filtros.situacaoVinculo === 'TODOS')
+  );
+}
+
 /**
  * FUNÇÃO CENTRALIZADA E OFICIAL DE CÁLCULO FINANCEIRO DO ISV:
  * Reutilizada rigorosamente pela interface, ordenação global e relatórios PDF A3.
@@ -256,10 +300,31 @@ class IsvService {
     embalagem: string;
     divergente: boolean;
     embalagensDistintas: string[];
-    fonte: 'SPCOI007' | 'SMGOI013' | 'PLANILHA_OPERACIONAL' | 'PENDENTE';
+    fonte: 'SPCOI007' | 'BASE_RUB' | 'SMGOI013' | 'PLANILHA_OPERACIONAL' | 'PENDENTE';
   }>();
   private _responsaveisCache = new Map<string, ResponsaveisMercadoria>();
   private _itensIsvCache: ItemIsv[] | null = null;
+  private _baselineDashboard: DashboardData | null = null;
+
+  constructor() {
+    try {
+      productRepository.subscribe(() => {
+        this.invalidarCache();
+      });
+    } catch {
+      // safe fallback
+    }
+  }
+
+  /**
+   * Invalida explicitamente os caches do ISV (chamado após novas importações ou alterações de dados)
+   */
+  public invalidarCache(): void {
+    this._embalagemCache.clear();
+    this._responsaveisCache.clear();
+    this._itensIsvCache = null;
+    this._baselineDashboard = null;
+  }
 
   /**
    * Reconstrói todos os índices em memória em O(N) com tempos inferiores a 10ms.
@@ -269,6 +334,7 @@ class IsvService {
     this._embalagemCache.clear();
     this._responsaveisCache.clear();
     this._itensIsvCache = null;
+    this._baselineDashboard = null;
 
     // 1. Indexar registros operacionais (até 65.000 itens)
     this._regOpByCod.clear();
@@ -731,14 +797,14 @@ class IsvService {
     embalagem: string;
     divergente: boolean;
     embalagensDistintas: string[];
-    fonte: 'SPCOI007' | 'SMGOI013' | 'PLANILHA_OPERACIONAL' | 'PENDENTE';
+    fonte: 'SPCOI007' | 'BASE_RUB' | 'SMGOI013' | 'PLANILHA_OPERACIONAL' | 'PENDENTE';
   } {
     if (!codigoInterno) {
       return {
         embalagem: fallbackEmbalagem || 'EMBALAGEM PENDENTE',
         divergente: false,
         embalagensDistintas: fallbackEmbalagem ? [fallbackEmbalagem] : [],
-        fonte: fallbackEmbalagem ? 'SMGOI013' : 'PENDENTE',
+        fonte: fallbackEmbalagem ? 'BASE_RUB' : 'PENDENTE',
       };
     }
 
@@ -782,7 +848,7 @@ class IsvService {
       embalagem: string;
       divergente: boolean;
       embalagensDistintas: string[];
-      fonte: 'SPCOI007' | 'SMGOI013' | 'PLANILHA_OPERACIONAL' | 'PENDENTE';
+      fonte: 'SPCOI007' | 'BASE_RUB' | 'SMGOI013' | 'PLANILHA_OPERACIONAL' | 'PENDENTE';
     };
 
     if (embalagensValidas.length === 1) {
@@ -809,7 +875,7 @@ class IsvService {
         embalagem: fallbackEmbalagem.trim(),
         divergente: false,
         embalagensDistintas: [fallbackEmbalagem.trim()],
-        fonte: 'SMGOI013',
+        fonte: 'BASE_RUB',
       };
     } else {
       resultado = {
@@ -1126,7 +1192,7 @@ class IsvService {
    * Produto (SMGOI013) ↔ Fornecedor/Indústria (SPCOI007) ↔ Promotor/Agência (Vínculos)
    */
   public getItensIsv(produtos?: ProdutoSMG[]): ItemIsv[] {
-    if (!produtos && this._itensIsvCache) {
+    if (this._itensIsvCache) {
       return this._itensIsvCache;
     }
 
@@ -1348,9 +1414,28 @@ class IsvService {
       });
     }
 
-    if (!produtos) {
-      this._itensIsvCache = result;
-    }
+    // Ordenação padrão inicial por MAIOR_VALOR para resposta imediata
+    result.sort((a, b) => {
+      const hasA = a.valor_estoque !== null && a.valor_estoque !== undefined;
+      const hasB = b.valor_estoque !== null && b.valor_estoque !== undefined;
+      if (hasA && !hasB) return -1;
+      if (!hasA && hasB) return 1;
+      if (hasA && hasB) {
+        const diff = (b.valor_estoque as number) - (a.valor_estoque as number);
+        if (Math.abs(diff) > 0.0001) return diff;
+      }
+      const diffDias = (b.dias_sem_venda || 0) - (a.dias_sem_venda || 0);
+      if (diffDias !== 0) return diffDias;
+      const diffIdade = (b.idade || 0) - (a.idade || 0);
+      if (diffIdade !== 0) return diffIdade;
+      const codA = parseInt(a.codigo_interno, 10) || 0;
+      const codB = parseInt(b.codigo_interno, 10) || 0;
+      if (codA !== codB) return codA - codB;
+      return (a.digito || '').localeCompare(b.digito || '');
+    });
+
+    this._itensIsvCache = result;
+    this._baselineDashboard = this._computeDashboardData(result);
 
     return result;
   }
@@ -1359,6 +1444,12 @@ class IsvService {
    * Aplica filtros combináveis sobre a lista de itens ISV com variáveis pré-computadas.
    */
   public filtrarItensIsv(itens: ItemIsv[], filtros: FiltrosIsv): ItemIsv[] {
+    // Atalho de altíssimo desempenho: Se os filtros forem os padrões e ordenação por maior valor,
+    // retorna a lista íntegra já ordenada sem alocar novo array ou reexecutar filtros O(N)
+    if (isFiltrosPadrao(filtros) && (filtros.ordenacao === 'MAIOR_VALOR' || !filtros.ordenacao)) {
+      return itens;
+    }
+
     const q = filtros.termoBusca ? filtros.termoBusca.trim().toUpperCase() : '';
     const temBusca = q.length > 0;
     const qDigits = temBusca ? q.replace(/\D/g, '') : '';
@@ -1564,6 +1655,155 @@ class IsvService {
 
         return 0;
       });
+  }
+
+  /**
+   * Obtém os indicadores e top 10 do Dashboard com retorno imediato O(1) quando
+   * os filtros são os padrões, ou computação unificada em passagem única (single-pass O(N))
+   * quando filtros estão ativos, eliminando múltiplos laços e cópias desnecessárias.
+   */
+  public getDashboardData(itensFiltrados: ItemIsv[], filtros: FiltrosIsv): DashboardData {
+    if (isFiltrosPadrao(filtros) && this._baselineDashboard) {
+      return this._baselineDashboard;
+    }
+    return this._computeDashboardData(itensFiltrados);
+  }
+
+  /**
+   * Computa todos os agregados do Dashboard (Indicadores + Top 10 Produtos + Top 10 Indústrias + Top 10 Agências)
+   * em um único percurso linear pelos registros (Single-pass O(N)).
+   */
+  private _computeDashboardData(itens: ItemIsv[]): DashboardData {
+    let valorTotal = 0;
+    const industriasSet = new Set<string>();
+    const agenciasSet = new Set<string>();
+
+    const mapaInd = new Map<string, {
+      cnpj: string;
+      nome: string;
+      razaoSocial?: string;
+      valorTotal: number;
+      skusSet: Set<string>;
+      itens: ItemIsv[];
+    }>();
+
+    const mapaAg = new Map<string, {
+      nome: string;
+      valorTotal: number;
+      skusSet: Set<string>;
+      industriasSet: Set<string>;
+      promotoresSet: Set<string>;
+      itens: ItemIsv[];
+    }>();
+
+    const produtosComValor: ItemIsv[] = [];
+
+    for (let i = 0; i < itens.length; i++) {
+      const it = itens[i];
+      const val = it.valor_estoque || 0;
+
+      if (it.valor_estoque !== null && it.valor_estoque !== undefined) {
+        valorTotal += it.valor_estoque;
+        if (it.valor_estoque > 0) {
+          produtosComValor.push(it);
+        }
+      }
+
+      // Agregação de Indústrias
+      const cnpjs = it.cnpjs && it.cnpjs.length > 0 ? it.cnpjs : ['SEM_CNPJ'];
+      for (let j = 0; j < cnpjs.length; j++) {
+        const cnpj = cnpjs[j];
+        if (cnpj !== 'SEM_CNPJ') {
+          industriasSet.add(cnpj);
+        }
+
+        let indEntry = mapaInd.get(cnpj);
+        if (!indEntry) {
+          const indObj = this.getIndustriaByCnpj(cnpj);
+          const nome = cnpj === 'SEM_CNPJ'
+            ? 'Indústria não informada'
+            : (indObj?.nome_exibicao || indObj?.razao_social || cnpj);
+          indEntry = {
+            cnpj,
+            nome,
+            razaoSocial: indObj?.razao_social,
+            valorTotal: 0,
+            skusSet: new Set<string>(),
+            itens: [],
+          };
+          mapaInd.set(cnpj, indEntry);
+        }
+
+        if (!indEntry.skusSet.has(it.codigo_interno)) {
+          indEntry.skusSet.add(it.codigo_interno);
+          indEntry.valorTotal += val;
+          indEntry.itens.push(it);
+        }
+      }
+
+      // Agregação de Agências
+      const ags = it.agencias_nomes && it.agencias_nomes.length > 0 ? it.agencias_nomes : ['Sem Agência'];
+      for (let k = 0; k < ags.length; k++) {
+        const ag = ags[k];
+        if (ag && ag.trim() && ag !== 'Sem Agência') {
+          agenciasSet.add(ag.trim());
+        }
+
+        let agEntry = mapaAg.get(ag);
+        if (!agEntry) {
+          agEntry = {
+            nome: ag,
+            valorTotal: 0,
+            skusSet: new Set<string>(),
+            industriasSet: new Set<string>(),
+            promotoresSet: new Set<string>(),
+            itens: [],
+          };
+          mapaAg.set(ag, agEntry);
+        }
+
+        if (!agEntry.skusSet.has(it.codigo_interno)) {
+          agEntry.skusSet.add(it.codigo_interno);
+          agEntry.valorTotal += val;
+          agEntry.itens.push(it);
+        }
+
+        for (let inIdx = 0; inIdx < it.industrias_nomes.length; inIdx++) {
+          agEntry.industriasSet.add(it.industrias_nomes[inIdx]);
+        }
+        for (let prIdx = 0; prIdx < it.promotores_nomes.length; prIdx++) {
+          agEntry.promotoresSet.add(it.promotores_nomes[prIdx]);
+        }
+      }
+    }
+
+    // Top 10 Produtos
+    produtosComValor.sort((a, b) => (b.valor_estoque || 0) - (a.valor_estoque || 0));
+    const top10Produtos = produtosComValor.slice(0, 10);
+
+    // Top 10 Indústrias
+    const top10Industrias = Array.from(mapaInd.values())
+      .filter((ind) => ind.valorTotal > 0)
+      .sort((a, b) => b.valorTotal - a.valorTotal)
+      .slice(0, 10);
+
+    // Top 10 Agências
+    const top10Agencias = Array.from(mapaAg.values())
+      .filter((ag) => ag.valorTotal > 0)
+      .sort((a, b) => b.valorTotal - a.valorTotal)
+      .slice(0, 10);
+
+    return {
+      indicadores: {
+        valorTotal: Number(valorTotal.toFixed(2)),
+        totalSkus: itens.length,
+        totalIndustrias: industriasSet.size,
+        totalAgencias: agenciasSet.size,
+      },
+      top10Produtos,
+      top10Industrias,
+      top10Agencias,
+    };
   }
 
   /**

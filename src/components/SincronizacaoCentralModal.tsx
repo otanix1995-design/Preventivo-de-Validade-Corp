@@ -218,7 +218,7 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
               <p className="text-xs font-black text-emerald-700 mt-1">
                 {statusNuvem.produtosCount.toLocaleString('pt-BR')} sincronizados
               </p>
-              <p className="text-[10px] text-slate-500">SMGOI013 + Estoque</p>
+              <p className="text-[10px] text-slate-500">BASE DO RUB + Estoque</p>
             </div>
 
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
@@ -287,7 +287,7 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
                   Sincronizar Base Completa com o Firestore
                 </h4>
                 <p className="text-xs text-blue-700 mt-0.5 font-medium">
-                  Envia a base local (Produtos SMGOI013, Vínculos EAN, Vencimentos e Promotores) em lotes (batches de 300) para a nuvem central.
+                  Envia a base local (Produtos BASE DO RUB, Vínculos EAN, Vencimentos e Promotores) em lotes (batches de 300) para a nuvem central.
                 </p>
               </div>
 

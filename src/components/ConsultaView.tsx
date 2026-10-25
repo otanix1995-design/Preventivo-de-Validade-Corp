@@ -75,12 +75,13 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
   const [gramagemFilter, setGramagemFilter] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const resultsContainerRef = useRef<HTMLDivElement>(null);
+  const searchSeqRef = useRef<number>(0);
 
-  // Debounce search input by 300ms
+  // Debounce search input by 450ms (Exigência Operacional)
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedQuery(inputQuery);
-    }, 300);
+    }, 450);
     return () => clearTimeout(timer);
   }, [inputQuery]);
 
@@ -96,51 +97,32 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
     setCurrentPage(1);
   }, [debouncedQuery, gramagemFilter]);
 
-  // All matching results for current query
+  // Verifica se a busca textual tem menos de 3 caracteres (números e chaves podem pesquisar direto)
+  const isSearchTextShort = useMemo(() => {
+    const q = debouncedQuery.trim();
+    if (!q) return false;
+    const isDigits = /^\d+$/.test(q);
+    const hasSep = q.includes('-') || q.includes('_');
+    return !isDigits && !hasSep && q.length < 3;
+  }, [debouncedQuery]);
+
+  // All matching results for current query com índices O(1) e busca invertida
   const allQueryResults = useMemo(() => {
-    if (!debouncedQuery.trim()) {
+    const q = debouncedQuery.trim();
+    if (!q || isSearchTextShort) {
       return [];
     }
 
-    const smgResults = productRepository.searchProducts(debouncedQuery);
+    const currentSeq = ++searchSeqRef.current;
+    const results = productRepository.searchProducts(debouncedQuery, { limit: 100 });
 
-    // Complementar com registros da nova planilha operacional usando busca indexada rápida (limitada a 50)
-    if (isvService.temPlanilhaIsv()) {
-      const smgKeys = new Set(smgResults.map((p) => `${p.codigo_interno}-${p.digito || ''}`));
-      const opRegistros = isvService.searchRegistrosOperacionais(debouncedQuery, 50);
-
-      const additionalProds: ProdutoSMG[] = [];
-      for (let i = 0; i < opRegistros.length; i++) {
-        const reg = opRegistros[i];
-        const key = `${reg.codigo_interno}-${reg.digito || ''}`;
-        if (smgKeys.has(key)) continue;
-
-        additionalProds.push({
-          id: `op_${reg.codigo_interno}_${reg.digito}`,
-          codigo_original: reg.codigo_original,
-          codigo_completo: reg.codigo_original,
-          codigo_interno: reg.codigo_interno,
-          digito: reg.digito,
-          codigo_exibicao: reg.codigo_exibicao,
-          chave_normalizada: reg.chave_normalizada || `${reg.codigo_interno}-${reg.digito}`,
-          descricao: reg.nome + (reg.complemento ? ` ${reg.complemento}` : ''),
-          embalagem: 'EMBALAGEM PENDENTE',
-          estoque_emb1: 0,
-          estoque_emb9: reg.estoque,
-          estoque_total: reg.estoque,
-          vendas_qtde_30d: reg.venda_30_dias,
-          dias_sem_venda: reg.dias_sem_venda,
-          idade: reg.idade,
-          eans: [],
-          dados_operacionais: reg,
-          atualizado_em: new Date().toISOString(),
-        });
-      }
-      return [...smgResults, ...additionalProds];
+    // Se uma nova busca foi disparada enquanto calculava, cancelar resultado obsoleto
+    if (currentSeq !== searchSeqRef.current) {
+      return [];
     }
 
-    return smgResults;
-  }, [debouncedQuery, produtos]);
+    return results;
+  }, [debouncedQuery, isSearchTextShort]);
 
   // Contextual Gramagem options extracted dynamically from matching query results
   const gramagensDisponiveis = useMemo(() => {
@@ -150,14 +132,14 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
 
   // Filtered results after applying Gramagem filter
   const filteredResults = useMemo(() => {
-    if (!debouncedQuery.trim()) {
+    if (!debouncedQuery.trim() || isSearchTextShort) {
       return [];
     }
     if (!gramagemFilter) {
       return allQueryResults;
     }
-    return productRepository.searchProducts(debouncedQuery, { gramagem: gramagemFilter });
-  }, [debouncedQuery, gramagemFilter, allQueryResults]);
+    return productRepository.searchProducts(debouncedQuery, { gramagem: gramagemFilter, limit: 100 });
+  }, [debouncedQuery, gramagemFilter, allQueryResults, isSearchTextShort]);
 
   // Pagination (10 items per page)
   const totalResults = filteredResults.length;
@@ -1170,6 +1152,20 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               <Camera className="w-4 h-4 stroke-[2.5]" />
               <span>Escanear Código de Barras</span>
             </button>
+          </div>
+        </div>
+      ) : isSearchTextShort ? (
+        <div className="bg-white rounded-2xl p-8 border border-amber-200 text-center space-y-3 shadow-xs">
+          <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto border border-amber-200">
+            <Info className="w-6 h-6 stroke-[2]" />
+          </div>
+          <div className="space-y-1 max-w-md mx-auto">
+            <h3 className="text-sm font-black text-gray-900 uppercase tracking-tight">
+              Mínimo de 3 Caracteres para Descrição
+            </h3>
+            <p className="text-xs text-gray-600 leading-relaxed">
+              Para garantir busca instantânea de alta performance na BASE DO RUB, digite pelo menos <strong>3 caracteres</strong> para buscar por nome (ex: "ARR", "LEI") ou digite diretamente o código interno / EAN numérico.
+            </p>
           </div>
         </div>
       ) : (

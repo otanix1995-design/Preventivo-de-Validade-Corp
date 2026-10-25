@@ -1,23 +1,13 @@
 import * as XLSX from 'xlsx';
 import { ProdutoSMG, ResumoImportacao, VinculoEan } from '../types';
 import {
-  calcularPosicaoEstoque,
   cleanEanCode,
-  isProdutoPesavel,
-  normalizeCodigoSMGO,
-  parseCodigoInternoEan,
-  parseEmbalagem,
-  parseSMGCode
+  normalizeCodigoSMGO
 } from './codeParser';
 import {
   addDivergencia,
   addResumoImportacao,
-  getMetadados,
   getProdutos,
-  getVinculosEan,
-  reprocessarBases,
-  saveMetadados,
-  saveProdutos,
   saveVinculosEan
 } from './storage';
 
@@ -44,11 +34,9 @@ export function parseNumberSafe(val: any, fallback = 0): number {
   if (typeof val === 'number') return isNaN(val) ? fallback : val;
 
   let str = String(val).trim();
-  // Remove currency signs e.g. R$
   str = str.replace(/R\$\s*/gi, '').replace(/\s/g, '');
 
   if (str.includes(',') && str.includes('.')) {
-    // Determine which is thousand separator
     if (str.lastIndexOf(',') > str.lastIndexOf('.')) {
       str = str.replace(/\./g, '').replace(',', '.');
     } else {
@@ -142,7 +130,6 @@ function sheetRowsToObjects(rows: any[][], headerRowIdx: number): Record<string,
     const row = rows[r];
     if (!Array.isArray(row) || row.length === 0) continue;
 
-    // Check if the row has any non-empty cell
     const hasData = row.some((cell) => cell !== null && cell !== undefined && String(cell).trim() !== '');
     if (!hasData) continue;
 
@@ -162,7 +149,6 @@ function sheetRowsToObjects(rows: any[][], headerRowIdx: number): Record<string,
 async function parseWorkbookFromFile(file: File): Promise<XLSX.WorkBook> {
   const buffer = await file.arrayBuffer();
 
-  // Try standard XLSX/XLS binary reading first
   try {
     const workbook = XLSX.read(buffer, {
       type: 'array',
@@ -177,11 +163,9 @@ async function parseWorkbookFromFile(file: File): Promise<XLSX.WorkBook> {
     console.warn('Standard XLSX.read failed, attempting text/CSV fallback...', err);
   }
 
-  // Fallback for CSV or encoded text files
   const decoderUtf8 = new TextDecoder('utf-8');
   let text = decoderUtf8.decode(buffer);
 
-  // If replacement character found, try Windows-1252 (Latin1)
   if (text.includes('\uFFFD')) {
     try {
       const decoderLatin1 = new TextDecoder('iso-8859-1');
@@ -192,644 +176,6 @@ async function parseWorkbookFromFile(file: File): Promise<XLSX.WorkBook> {
   }
 
   return XLSX.read(text, { type: 'string', raw: false });
-}
-
-/**
- * Imports and updates SMGOI013 operational dataset with live 0-100% progress animation.
- */
-export async function processarSMGOI013(
-  file: File,
-  onProgress?: ProgressCallback
-): Promise<ResumoImportacao> {
-  onProgress?.(5, 'Lendo arquivo da planilha...');
-  await new Promise((r) => setTimeout(r, 100));
-
-  const workbook = await parseWorkbookFromFile(file);
-
-  onProgress?.(20, 'Localizando aba de dados...');
-  await new Promise((r) => setTimeout(r, 80));
-
-  if (!workbook.SheetNames || workbook.SheetNames.length === 0) {
-    throw new Error('Nenhuma planilha encontrada no arquivo.');
-  }
-
-  // Prioritize "Page1" if it exists, or sheet with most rows
-  let bestSheetName = workbook.SheetNames[0];
-  let maxRows = 0;
-  let best2DRows: any[][] = [];
-
-  const page1Sheet = workbook.Sheets['Page1'];
-  if (page1Sheet) {
-    const raw2D: any[][] = XLSX.utils.sheet_to_json(page1Sheet, { header: 1, defval: '' });
-    if (raw2D.length > 0) {
-      bestSheetName = 'Page1';
-      maxRows = raw2D.length;
-      best2DRows = raw2D;
-    }
-  }
-
-  if (maxRows === 0) {
-    for (const sheetName of workbook.SheetNames) {
-      const ws = workbook.Sheets[sheetName];
-      if (!ws) continue;
-      const raw2D: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-      if (raw2D.length > maxRows) {
-        maxRows = raw2D.length;
-        bestSheetName = sheetName;
-        best2DRows = raw2D;
-      }
-    }
-  }
-
-  if (best2DRows.length === 0) {
-    throw new Error('A planilha selecionada está vazia ou sem linhas legíveis.');
-  }
-
-  onProgress?.(35, 'Identificando cabeçalhos e colunas da SMGOI013...');
-  await new Promise((r) => setTimeout(r, 80));
-
-  const smgKeywords = [
-    'CODIGO', 'COD', 'MERCADORIA', 'DESCRICAO', 'DESC', 'EMBALAGEM', 'EMB',
-    'ESTOQUE', 'SALDO', 'VENDAS', 'PRECO', 'ENTRADA', 'IDADE', 'COMPRADOR', 'SETOR',
-    'SEMVENDA', 'DIASSEMVENDA', 'CUSTO', 'CUSTOMEDIO', 'CMEDIO', 'PRCUSTO', 'ESTOQUECONVERTIDO'
-  ];
-
-  const headerRowIdx = findHeaderRowIndex(best2DRows, smgKeywords);
-  const rawRows = sheetRowsToObjects(best2DRows, headerRowIdx);
-
-  if (rawRows.length === 0) {
-    throw new Error('Nenhum registro de produto encontrado abaixo da linha de cabeçalho.');
-  }
-
-  // Build header mapping
-  const sample = rawRows[0];
-  const headerMap: Record<string, string> = {};
-
-  const allKeys = Object.keys(sample);
-  const normalizedList = allKeys.map((k) => ({ key: k, norm: normalizeHeader(k) }));
-
-  // 1. Match Dias sem Venda
-  const diasKey = normalizedList.find((item) =>
-    /^(DIASSEMVENDA|DIASSVENDA|SEMVENDA|DIASSEMGIRO|DIASPARADO|DIASSGIRO|SEMGIRO|DSVENDA)$/.test(item.norm) ||
-    item.norm.startsWith('SEMVENDA') ||
-    item.norm.includes('SEMVENDA') ||
-    item.norm.includes('DIASSEMVENDA') ||
-    item.norm.includes('DIASSVENDA') ||
-    item.norm.includes('DIASSEMGIRO') ||
-    item.norm.includes('SEMGIRO') ||
-    item.norm.includes('DIASPARADO') ||
-    (item.norm.includes('SEM') && item.norm.includes('VENDA'))
-  )?.key;
-  if (diasKey) headerMap['dias_sem_venda'] = diasKey;
-
-  // 2. Match Custo Médio Unitário Oficial da SMGOI013
-  // REGRAS OBRIGATÓRIAS (REQUISITO 3 e 5):
-  // - Priorizar estritamente o CUSTO MÉDIO OFICIAL da SMGOI013.
-  // - NUNCA capturar colunas de VALOR TOTAL, VALOR DO ESTOQUE, PREÇO DE VENDA, ENTRADA, COMPRA.
-  // - Não utilizar custo contábil, gerencial, reposição ou fiscal como substitutos sem confirmação.
-  
-  // Nível 1 (Prioridade Absoluta): Custo Médio explícito unitário
-  const custoP1 = normalizedList.find((item) =>
-    !item.norm.includes('ENTRADA') &&
-    !item.norm.includes('COMPRA') &&
-    !item.norm.includes('VENDA') &&
-    !item.norm.includes('TOTAL') &&
-    !item.norm.includes('ESTOQUE') &&
-    !item.norm.includes('VALOR') &&
-    !item.norm.includes('VLR') &&
-    /^(CUSTOMEDIO|CUSTOMED|CMEDIO|CMED|CSTMEDIO|CSTMED|CUSTOUNITARIO|CUSTOUNIT|CUSTOUNID|CUSTOUN|CUSTOUNIDADE|CSTUNIT|CUSTOMEDIOUNITARIO|CUSTOMEDIOUNIT)$/.test(item.norm)
-  )?.key;
-
-  // Nível 2 (Composto Custo + Médio ou Unitário, sem palavras de estoque ou valor financeiro)
-  const custoP2 = !custoP1 ? normalizedList.find((item) =>
-    !item.norm.includes('ENTRADA') &&
-    !item.norm.includes('COMPRA') &&
-    !item.norm.includes('VENDA') &&
-    !item.norm.includes('TOTAL') &&
-    !item.norm.includes('ESTOQUE') &&
-    !item.norm.includes('VALOR') &&
-    !item.norm.includes('VLR') &&
-    !item.norm.includes('CONTABIL') &&
-    !item.norm.includes('GERENCIAL') &&
-    !item.norm.includes('REPOSICAO') &&
-    !item.norm.includes('FISCAL') &&
-    (
-      (item.norm.includes('CUSTO') && item.norm.includes('MED')) ||
-      (item.norm.includes('CST') && item.norm.includes('MED')) ||
-      (item.norm.includes('CUSTO') && item.norm.includes('UNIT')) ||
-      (item.norm.includes('CST') && item.norm.includes('UNIT'))
-    )
-  )?.key : null;
-
-  // Nível 3 (Fallback apenas para 'CUSTO' puro ou 'CST' puro)
-  const custoP3 = (!custoP1 && !custoP2) ? normalizedList.find((item) =>
-    !item.norm.includes('ENTRADA') &&
-    !item.norm.includes('COMPRA') &&
-    !item.norm.includes('VENDA') &&
-    !item.norm.includes('TOTAL') &&
-    !item.norm.includes('ESTOQUE') &&
-    !item.norm.includes('VALOR') &&
-    !item.norm.includes('VLR') &&
-    /^(CUSTO|CST|CUSTOLIQUIDO|CUSTOLIQ|CSTLIQUIDO|CSTLIQ)$/.test(item.norm)
-  )?.key : null;
-
-  const custoFinalKey = custoP1 || custoP2 || custoP3;
-  if (custoFinalKey) headerMap['custo_medio'] = custoFinalKey;
-
-  // 3. Valor do Estoque a Custo direto da Planilha (se presente na SMGOI013)
-  // 3. Valor do Estoque a Custo direto da Planilha (se presente na SMGOI013)
-  // Coluna oficial pré-calculada pelo ERP (ex: VALOR CUSTO, VALOR ESTOQUE, VLR CUSTO EST, VALOR TOTAL)
-  const valorEstoquePlanilhaKey = normalizedList.find((item) =>
-    item.key !== custoFinalKey &&
-    !item.norm.includes('VENDA') &&
-    !item.norm.includes('ENTRADA') &&
-    (
-      /^(VALORESTOQUE|VLRESTOQUE|VALORDOESTOQUE|VALORCUSTOESTOQUE|VLRCUSTOESTOQUE|VALORCUSTO|VLRCUSTO|VLCUSTO|CUSTOESTOQUE|CUSTOTOTAL|VALORTOTALESTOQUE|TOTALCUSTO|VALORTOTAL|VLRTOTAL|VLRSALDO|VALORSALDO|CUSTOSALDO)$/.test(item.norm) ||
-      (item.norm.includes('VALOR') && item.norm.includes('ESTOQUE')) ||
-      (item.norm.includes('VLR') && item.norm.includes('ESTOQUE')) ||
-      (item.norm.includes('VALOR') && item.norm.includes('CUSTO')) ||
-      (item.norm.includes('VLR') && item.norm.includes('CUSTO'))
-    )
-  )?.key;
-  if (valorEstoquePlanilhaKey) headerMap['valor_estoque_planilha'] = valorEstoquePlanilhaKey;
-
-  // 4. Código da Mercadoria
-  const codKey = normalizedList.find((item) =>
-    /^(CODIGO|COD|CODMERCADORIA|MERCADORIA|CODIGOMERCADORIA|CODINTERNO|CODIGOINTERNO|ITEM|PLU|REFERENCIA|REF)$/.test(item.norm) ||
-    item.norm.startsWith('CODIGO') ||
-    item.norm.startsWith('CODMERC')
-  )?.key;
-  if (codKey) headerMap['codigo'] = codKey;
-
-  // 5. Descrição da Mercadoria
-  const descKey = normalizedList.find((item) =>
-    /^(DESCRICAO|DESCRICAOMERCADORIA|DESC|PRODUTO|NOME|DESCRICAODOPRODUTO|ITEMDESC|DENOMINACAO)$/.test(item.norm) ||
-    item.norm.includes('DESCRICAO') ||
-    item.norm.includes('MERCADORIA')
-  )?.key;
-  if (descKey) headerMap['descricao'] = descKey;
-
-  // 6. Embalagem
-  const embKey = normalizedList.find((item) =>
-    /^(EMBALAGEM|EMB|TIPOEMB|UNIDADE|UNID|UN|APRESENTACAO)$/.test(item.norm) || item.norm.includes('EMBALAGEM')
-  )?.key;
-  if (embKey) headerMap['embalagem'] = embKey;
-
-  // 7. Estoque Total Convertido (COLUNA OFICIAL EXPLÍCITA DA SMGOI013)
-  const estTotalKey = normalizedList.find((item) =>
-    /^(ESTOQUETOTALCONVERTIDO|ESTOQUECONVERTIDO|SALDOCONVERTIDO|ESTOQUEGERALCONVERTIDO|SALDOTOTALCONVERTIDO|ESTOQUETOTALUNIDADES|ESTOQUETOTAL|TOTALESTOQUE|ESTOQUEGERAL|SALDOTOTAL)$/.test(item.norm) ||
-    item.norm.includes('ESTOQUECONVERT') ||
-    item.norm.includes('SALDOCONVERT') ||
-    (item.norm.includes('ESTOQUE') && item.norm.includes('TOTAL'))
-  )?.key;
-  if (estTotalKey) headerMap['estoque_total_convertido'] = estTotalKey;
-
-  // 8. Estoque Emb1 (Loja / Físico / Área de Venda - NUNCA SALDO TOTAL)
-  const estEmb1Key = normalizedList.find((item) =>
-    item.key !== estTotalKey &&
-    (
-      /^(ESTOQUEEMB1|ESTOQUE1|ESTOQUELOJA|ESTOQUEDISPONIVEL|SALDOLOJA|ESTOQUEAREAVENDA|ESTOQUEGONDOLA|ESTOQUEFISICO)$/.test(item.norm) ||
-      (item.norm.includes('ESTOQUE') && item.norm.includes('1')) ||
-      (item.norm.includes('ESTOQUE') && item.norm.includes('LOJA')) ||
-      (item.norm.includes('ESTOQUE') && item.norm.includes('FISICO'))
-    )
-  )?.key;
-  if (estEmb1Key) headerMap['estoque_emb1'] = estEmb1Key;
-
-  // 9. Estoque Emb9 (Depósito / Reserva)
-  const estEmb9Key = normalizedList.find((item) =>
-    item.key !== estTotalKey &&
-    item.key !== estEmb1Key &&
-    (
-      /^(ESTOQUEEMB9|ESTOQUE9|ESTOQUEDEPOSITO|SALDODEPOSITO|ESTOQUERESERVA|ESTOQUEALMOXARIFADO)$/.test(item.norm) ||
-      (item.norm.includes('ESTOQUE') && item.norm.includes('9')) ||
-      (item.norm.includes('ESTOQUE') && item.norm.includes('DEP'))
-    )
-  )?.key;
-  if (estEmb9Key) headerMap['estoque_emb9'] = estEmb9Key;
-
-  // 10. Mapeamento dos demais campos operacionais
-  for (const key of allKeys) {
-    const norm = normalizeHeader(key);
-    // 9. Match Vendas Qtde 30d (MUST NOT BE SEMVENDA)
-    if (
-      !norm.includes('SEMVENDA') &&
-      !norm.includes('SEMGIRO') &&
-      !norm.includes('SVENDA') &&
-      (
-        /^(VENDASQTDE|VENDAS30D|QTDEVENDAS|VENDA30DIAS|QTDEVENDIDA|SAIDA30D|CONSUMO30D|GIRO30D|VENDAS)$/.test(norm) ||
-        norm.includes('VENDASQTDE') ||
-        norm.includes('QTDEVEND') ||
-        norm.includes('VENDA30') ||
-        norm.includes('VENDAS30') ||
-        (norm.includes('VENDA') && (norm.includes('QTDE') || norm.includes('QTD'))) ||
-        (norm.includes('VENDA') && (norm.includes('30D') || norm.includes('30DIAS') || norm.includes('ULT30'))) ||
-        (/^VENDAS?Q/.test(norm))
-      )
-    ) {
-      if (!headerMap['vendas_qtde']) headerMap['vendas_qtde'] = key;
-    }
-    // 10. Match Vendas Preço Unitário Estrito (NÃO confundir com faturamento Vendas Valor 30d nem com custo)
-    else if (
-      !norm.includes('SEMVENDA') &&
-      !norm.includes('SEMGIRO') &&
-      !norm.includes('CUSTO') &&
-      !norm.includes('30D') &&
-      !norm.includes('30DIAS') &&
-      !norm.includes('TOTAL') &&
-      !norm.includes('FATURAMENTO') &&
-      (
-        /^(PRECOVENDA|PRVENDA|PRECOUNITARIO|PRUNITARIO|PRECOTABELA|PRTABELA|PRECOCONSUMIDOR|PRCONSUMIDOR|PRECO)$/.test(norm) ||
-        (norm.includes('PRECO') && norm.includes('VENDA')) ||
-        (norm.includes('PR') && norm.includes('VENDA'))
-      )
-    ) {
-      if (!headerMap['vendas_preco']) headerMap['vendas_preco'] = key;
-    }
-    // 10. Match Data Última Entrada
-    else if (
-      /^(DATAULTIMAENTRADA|ULTIMAENTRADA|DTENTRADA|DTULTIMACOMPRA|DATAENTRADA|ULTIMACOMPRA)$/.test(norm) ||
-      (norm.includes('DATA') && norm.includes('ENTRADA')) ||
-      (norm.includes('ULTIMA') && norm.includes('ENTRADA'))
-    ) {
-      if (!headerMap['data_ultima_entrada']) headerMap['data_ultima_entrada'] = key;
-    }
-    // 11. Match Qtde Última Entrada
-    else if (
-      /^(QUANTIDADEULTIMAENTRADA|QTDEULTIMAENTRADA|QTDEENTRADA|ULTIMACOMPRAQTDE|QTDULTIMAENTRADA)$/.test(norm) ||
-      (norm.includes('QTDE') && norm.includes('ENTRADA')) ||
-      (norm.includes('QTD') && norm.includes('ENTRADA'))
-    ) {
-      if (!headerMap['qtde_ultima_entrada']) headerMap['qtde_ultima_entrada'] = key;
-    }
-    // 12. Match Idade (Must NOT be Rentabilidade, Rotatividade, Lucratividade)
-    else if (
-      !norm.includes('RENTABILIDADE') &&
-      !norm.includes('ROTATIVIDADE') &&
-      !norm.includes('LUCRATIVIDADE') &&
-      (
-        /^(IDADE|IDADEMERCADORIA|IDADEESTOQUE|DIASESTOQUE)$/.test(norm) ||
-        norm.startsWith('IDADE') ||
-        norm.includes('IDADEMERC')
-      )
-    ) {
-      if (!headerMap['idade']) headerMap['idade'] = key;
-    }
-    // 13. Match Qtde Ideal
-    else if (/^(QUANTIDADEIDEAL|QTDEIDEAL|ESTOQUEIDEAL|QTDIDEAL|ESTOQUEMINIMO)$/.test(norm) || norm.includes('IDEAL')) {
-      if (!headerMap['qtde_ideal']) headerMap['qtde_ideal'] = key;
-    }
-    // 14. Match Comprador Filial
-    else if (/^(COMPRADORFILIAL|COMPRADOR|COMPRFILIAL)$/.test(norm) || (norm.includes('COMPRADOR') && norm.includes('FILIAL'))) {
-      if (!headerMap['comprador_filial']) headerMap['comprador_filial'] = key;
-    }
-    // 15. Match Comprador Matriz
-    else if (/^(COMPRADORMATRIZ|COMPRMATRIZ)$/.test(norm) || (norm.includes('COMPRADOR') && norm.includes('MATRIZ'))) {
-      if (!headerMap['comprador_matriz']) headerMap['comprador_matriz'] = key;
-    }
-    // 16. Match Setor Físico
-    else if (/^(SETORFISICO|SETOR|SECAO|DEPARTAMENTO|CATEGORIA)$/.test(norm) || norm.includes('SETORFISICO')) {
-      if (!headerMap['setor_fisico']) headerMap['setor_fisico'] = key;
-    }
-    // 17. Match Setor Balanço
-    else if (/^(SETORBALANCO|BALANCO|GRUPO)$/.test(norm) || norm.includes('SETORBALANCO')) {
-      if (!headerMap['setor_balanco']) headerMap['setor_balanco'] = key;
-    }
-    // 18. Match Pedidos Pendentes
-    else if (/^(PEDIDOSPENDENTES|PEDIDOS|PEDIDOPENDENTE|EMPEDIDO|QTDEPEDIDA)$/.test(norm) || norm.includes('PEDIDO')) {
-      if (!headerMap['pedidos_pendentes']) headerMap['pedidos_pendentes'] = key;
-    }
-  }
-
-  // Extra fallback safeguards
-  if (!headerMap['dias_sem_venda']) {
-    const semVendaKey = Object.keys(sample).find((k) => {
-      const n = normalizeHeader(k);
-      return (
-        n.includes('SEMVENDA') ||
-        (n.includes('SEM') && n.includes('VENDA')) ||
-        n.includes('SEMGIRO') ||
-        n.includes('DIASPARADO')
-      );
-    });
-    if (semVendaKey) {
-      headerMap['dias_sem_venda'] = semVendaKey;
-    }
-  }
-
-  // Fallback para Custo Médio caso nenhuma coluna tenha casado na primeira passagem
-  if (!headerMap['custo_medio']) {
-    const custoKey = Object.keys(sample).find((k) => {
-      const n = normalizeHeader(k);
-      return (
-        !n.includes('ENTRADA') &&
-        !n.includes('COMPRA') &&
-        !n.includes('VENDA') &&
-        !n.includes('TOTAL') &&
-        !n.includes('ESTOQUE') &&
-        (
-          n.includes('CUSTOMED') ||
-          (n.includes('CUSTO') && n.includes('MED')) ||
-          (n.includes('CUSTO') && n.includes('UNIT')) ||
-          (n.includes('PR') && n.includes('CUSTO')) ||
-          n.includes('CMED') ||
-          n.includes('VLRCUSTO') ||
-          n === 'CUSTO'
-        )
-      );
-    });
-    if (custoKey) {
-      headerMap['custo_medio'] = custoKey;
-    }
-  }
-
-  // Fallback para Estoque Total Convertido
-  if (!headerMap['estoque_total_convertido'] && !headerMap['estoque_total_direto']) {
-    const estKey = Object.keys(sample).find((k) => {
-      const n = normalizeHeader(k);
-      return (
-        n.includes('ESTOQUECONVERT') ||
-        n.includes('SALDOCONVERT') ||
-        (n.includes('ESTOQUE') && n.includes('TOTAL')) ||
-        (n.includes('SALDO') && n.includes('TOTAL'))
-      );
-    });
-    if (estKey) {
-      headerMap['estoque_total_convertido'] = estKey;
-    }
-  }
-
-  // Fallbacks if not recognized
-  if (!headerMap['codigo']) {
-    const codKey = Object.keys(sample).find((k) => normalizeHeader(k).includes('COD'));
-    if (codKey) headerMap['codigo'] = codKey;
-    else {
-      headerMap['codigo'] = Object.keys(sample)[0];
-    }
-  }
-
-  if (!headerMap['descricao']) {
-    const descKey = Object.keys(sample).find((k) => normalizeHeader(k).includes('DESC') || normalizeHeader(k).includes('MERC') || normalizeHeader(k).includes('PROD'));
-    if (descKey) headerMap['descricao'] = descKey;
-    else if (Object.keys(sample).length > 1) {
-      headerMap['descricao'] = Object.keys(sample)[1];
-    }
-  }
-
-  const existingProdutos = getProdutos();
-  const existingMap = new Map<string, ProdutoSMG>();
-  existingProdutos.forEach((p) => existingMap.set(p.codigo_interno, p));
-
-  const existingVinculos = getVinculosEan();
-  const eanMap = new Map<string, Set<string>>();
-  existingVinculos.forEach((v) => {
-    if (v.status_vinculo === 'VINCULADO') {
-      if (!eanMap.has(v.codigo_interno)) eanMap.set(v.codigo_interno, new Set());
-      eanMap.get(v.codigo_interno)!.add(v.ean);
-    }
-  });
-
-  let total_lidos = 0;
-  let total_atualizados = 0;
-  let total_novos = 0;
-  let total_erros = 0;
-  let total_ignorados = 0;
-  const errosDetalhes: string[] = [];
-
-  const timestamp = new Date().toLocaleString('pt-BR');
-  const updatedProdutos: ProdutoSMG[] = [];
-  const processedKeys = new Set<string>();
-
-  const totalRowsCount = rawRows.length;
-  const chunkSize = Math.max(1, Math.floor(totalRowsCount / 20));
-
-  for (let idx = 0; idx < totalRowsCount; idx++) {
-    const row = rawRows[idx];
-    total_lidos++;
-
-    if (idx % chunkSize === 0 || idx === totalRowsCount - 1) {
-      const progress = Math.min(90, Math.floor(40 + (idx / totalRowsCount) * 50));
-      onProgress?.(progress, `Processando item ${idx + 1} de ${totalRowsCount}...`);
-      // Yield to event loop for smooth UI animation
-      await new Promise((r) => setTimeout(r, 0));
-    }
-
-    const rawCodigo = row[headerMap['codigo']];
-    if (rawCodigo === null || rawCodigo === undefined || String(rawCodigo).trim() === '') {
-      total_ignorados++;
-      continue;
-    }
-
-    const parsedCode = parseSMGCode(rawCodigo);
-    if (!parsedCode.is_valid || !parsedCode.codigo_interno) {
-      total_erros++;
-      const erroMsg = `Linha ${total_lidos}: Código inválido "${rawCodigo}"`;
-      errosDetalhes.push(erroMsg);
-      addDivergencia({
-        tipo: 'CODIGO_INVALIDO',
-        origem: 'SMGOI013',
-        identificador: String(rawCodigo),
-        descricao_problema: 'Formato do código não pôde ser interpretado.',
-        detalhes: erroMsg,
-      });
-      continue;
-    }
-
-    const codigoInterno = parsedCode.codigo_interno;
-    if (processedKeys.has(codigoInterno)) {
-      total_ignorados++;
-      continue;
-    }
-    processedKeys.add(codigoInterno);
-
-    const rawDesc = headerMap['descricao'] ? String(row[headerMap['descricao']] || '').trim() : 'PRODUTO S/ DESCRICAO';
-    const rawEmb = headerMap['embalagem'] ? String(row[headerMap['embalagem']] || '').trim() : 'UN';
-    const embData = parseEmbalagem(rawEmb);
-
-    let estEmb1 = headerMap['estoque_emb1'] ? parseNumberSafe(row[headerMap['estoque_emb1']], 0) : 0;
-    let estEmb9 = headerMap['estoque_emb9'] ? parseNumberSafe(row[headerMap['estoque_emb9']], 0) : 0;
-    
-    // Ler estoque total convertido se presente na planilha
-    const keyTotal = headerMap['estoque_total_convertido'] || headerMap['estoque_total_direto'];
-    const rawTotalConvertido = keyTotal ? row[keyTotal] : undefined;
-    const estTotalPlanilha = (rawTotalConvertido !== undefined && rawTotalConvertido !== null && String(rawTotalConvertido).trim() !== '')
-      ? parseNumberSafe(rawTotalConvertido, NaN)
-      : NaN;
-
-    const isPesavel = isProdutoPesavel(rawEmb);
-    let estTotal = 0;
-
-    // CUSTO MÉDIO e VALOR DE ESTOQUE DA PLANILHA (para verificação cruzada de unidade)
-    const custoMedioRaw = headerMap['custo_medio'] ? row[headerMap['custo_medio']] : undefined;
-    const parsedCustoEarly = (custoMedioRaw !== undefined && custoMedioRaw !== null && String(custoMedioRaw).trim() !== '')
-      ? parseNumberSafe(custoMedioRaw, NaN)
-      : NaN;
-
-    const valorEstoquePlanilhaRaw = headerMap['valor_estoque_planilha'] ? row[headerMap['valor_estoque_planilha']] : undefined;
-    const parsedValorEarly = (valorEstoquePlanilhaRaw !== undefined && valorEstoquePlanilhaRaw !== null && String(valorEstoquePlanilhaRaw).trim() !== '')
-      ? parseNumberSafe(valorEstoquePlanilhaRaw, NaN)
-      : NaN;
-
-    // REGRA FUNDAMENTAL 5: NUNCA RECONVERTER ESTOQUE QUE JÁ ESTÁ CONVERTIDO NA PLANILHA
-    if (!isNaN(estTotalPlanilha)) {
-      estTotal = estTotalPlanilha;
-      if (isPesavel) {
-        estEmb1 = Math.floor(estTotalPlanilha);
-        estEmb9 = Math.round((estTotalPlanilha - estEmb1) * 1000);
-      } else if (embData.fator > 1) {
-        // Se EMB1 informado na planilha for igual ao Estoque Total, EMB1 já estava em UNIDADES!
-        if (Math.abs(estEmb1 - estTotalPlanilha) < 0.01) {
-          estEmb1 = Math.floor(estTotalPlanilha / embData.fator);
-          estEmb9 = Math.round(estTotalPlanilha % embData.fator);
-        } else if (Math.abs((estEmb1 * embData.fator) + estEmb9 - estTotalPlanilha) < 0.01) {
-          // EMB1 estava em caixas e bate com a conversão
-        } else {
-          estEmb1 = Math.floor(estTotalPlanilha / embData.fator);
-          estEmb9 = Math.round(estTotalPlanilha % embData.fator);
-        }
-      } else {
-        estEmb1 = estTotalPlanilha;
-        estEmb9 = 0;
-      }
-    } else if (headerMap['estoque_emb1'] || headerMap['estoque_emb9']) {
-      // Planilha sem coluna explícita de Estoque Total Convertido
-      // Verificar se EMB1 já está em unidades através da relação com o Valor do Estoque e Custo Médio
-      let emb1JaEmUnidades = false;
-      if (!isPesavel && embData.fator > 1 && !isNaN(parsedValorEarly) && parsedValorEarly > 0 && !isNaN(parsedCustoEarly) && parsedCustoEarly > 0) {
-        const unidadesCalculadasPorCusto = parsedValorEarly / parsedCustoEarly;
-        // Se a quantidade indicada pelo valor/custo for próxima de estEmb1 (e não de estEmb1 * fator)
-        if (Math.abs(estEmb1 - unidadesCalculadasPorCusto) < Math.abs((estEmb1 * embData.fator) - unidadesCalculadasPorCusto)) {
-          emb1JaEmUnidades = true;
-        }
-      }
-
-      if (emb1JaEmUnidades) {
-        estTotal = estEmb1 + estEmb9;
-        estEmb1 = Math.floor(estTotal / embData.fator);
-        estEmb9 = Math.round(estTotal % embData.fator);
-      } else {
-        const posEstoque = calcularPosicaoEstoque(estEmb1, estEmb9, rawEmb, embData.fator);
-        estTotal = posEstoque.estoqueTotal;
-      }
-    }
-
-    const vendasQtde = headerMap['vendas_qtde'] ? parseNumberSafe(row[headerMap['vendas_qtde']], 0) : 0;
-    const vendasPreco = headerMap['vendas_preco'] ? parseNumberSafe(row[headerMap['vendas_preco']]) : undefined;
-
-    // CUSTO MÉDIO: Interpretação segura e estrita
-    let custoMedioFinal: number | undefined = undefined;
-    if (!isNaN(parsedCustoEarly) && parsedCustoEarly > 0) {
-      custoMedioFinal = Number(parsedCustoEarly.toFixed(4));
-    }
-
-    // VALOR DE ESTOQUE DA PLANILHA (se pré-calculado pelo ERP da filial)
-    let valorEstoquePlanilhaFinal: number | undefined = undefined;
-    if (!isNaN(parsedValorEarly) && parsedValorEarly > 0) {
-      valorEstoquePlanilhaFinal = Number(parsedValorEarly.toFixed(2));
-    }
-
-    const dataEntrada = headerMap['data_ultima_entrada'] ? parseDateSafe(row[headerMap['data_ultima_entrada']]) : undefined;
-    const qtdeEntrada = headerMap['qtde_ultima_entrada'] ? parseNumberSafe(row[headerMap['qtde_ultima_entrada']]) : undefined;
-    const diasSemVenda = headerMap['dias_sem_venda'] ? Math.max(0, parseNumberSafe(row[headerMap['dias_sem_venda']])) : 0;
-    const idade = headerMap['idade'] ? Math.max(0, parseNumberSafe(row[headerMap['idade']])) : 0;
-    const qtdeIdeal = headerMap['qtde_ideal'] ? parseNumberSafe(row[headerMap['qtde_ideal']]) : undefined;
-
-    const compradorFilial = headerMap['comprador_filial'] ? String(row[headerMap['comprador_filial']] || '').trim() : undefined;
-    const compradorMatriz = headerMap['comprador_matriz'] ? String(row[headerMap['comprador_matriz']] || '').trim() : undefined;
-    const setorFisico = headerMap['setor_fisico'] ? String(row[headerMap['setor_fisico']] || '').trim() : undefined;
-    const setorBalanco = headerMap['setor_balanco'] ? String(row[headerMap['setor_balanco']] || '').trim() : undefined;
-    const pedidosPendentes = headerMap['pedidos_pendentes'] ? String(row[headerMap['pedidos_pendentes']] || '').trim() : undefined;
-
-    // Check for negative stock
-    if (estEmb1 < 0 || estEmb9 < 0) {
-      addDivergencia({
-        tipo: 'ESTOQUE_NEGATIVO',
-        origem: 'SMGOI013',
-        identificador: parsedCode.codigo_exibicao,
-        descricao_problema: `Estoque negativo detectado: Emb1=${estEmb1}, Emb9=${estEmb9}`,
-        detalhes: rawDesc,
-      });
-    }
-
-    // Preserve existing linked EANs
-    const existingProd = existingMap.get(codigoInterno);
-    const existingEans = existingProd?.eans || [];
-    const vinculadosEans = eanMap.get(codigoInterno) ? Array.from(eanMap.get(codigoInterno)!) : [];
-    const allEans = Array.from(new Set([...existingEans, ...vinculadosEans]));
-
-    const produtoAtualizado: ProdutoSMG = {
-      id: codigoInterno,
-      codigo_original: parsedCode.codigo_original,
-      codigo_interno: parsedCode.codigo_interno,
-      digito: parsedCode.digito,
-      codigo_exibicao: parsedCode.codigo_exibicao,
-      chave_normalizada: parsedCode.chave_normalizada,
-      descricao: rawDesc || 'MERCADORIA SEM DESCRICAO',
-      embalagem: rawEmb,
-      fator_embalagem: embData.fator,
-      unidade_medida: embData.tipo,
-      estoque_emb1: estEmb1,
-      estoque_emb9: estEmb9,
-      estoque_total: estTotal,
-      vendas_qtde_30d: Math.max(0, vendasQtde),
-      vendas_preco: vendasPreco,
-      custo_medio: custoMedioFinal !== undefined ? custoMedioFinal : existingProd?.custo_medio,
-      valor_estoque_planilha: valorEstoquePlanilhaFinal !== undefined ? valorEstoquePlanilhaFinal : existingProd?.valor_estoque_planilha,
-      data_ultima_entrada: dataEntrada,
-      qtde_ultima_entrada: qtdeEntrada,
-      dias_sem_venda: diasSemVenda,
-      idade,
-      qtde_ideal: qtdeIdeal,
-      comprador_filial: compradorFilial,
-      comprador_matriz: compradorMatriz,
-      setor_fisico: setorFisico,
-      setor_balanco: setorBalanco,
-      pedidos_pendentes: pedidosPendentes,
-      eans: allEans,
-      atualizado_em: timestamp,
-      is_demo: false,
-    };
-
-    if (existingProd) {
-      total_atualizados++;
-    } else {
-      total_novos++;
-    }
-
-    updatedProdutos.push(produtoAtualizado);
-  }
-
-  if (updatedProdutos.length === 0) {
-    throw new Error('Falha na importação: Nenhum produto válido foi identificado na planilha SMGOI013.');
-  }
-
-  onProgress?.(92, 'Gravando base local e sincronizando com a Nuvem...');
-  await new Promise((r) => setTimeout(r, 80));
-
-  await saveProdutos(updatedProdutos, (cloudPct, cloudMsg) => {
-    const combinedPct = Math.min(98, Math.round(92 + (cloudPct * 0.06)));
-    onProgress?.(combinedPct, cloudMsg || 'Enviando para a Nuvem...');
-  });
-
-  const resumo: ResumoImportacao = {
-    id: `imp-smg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-    tipo: 'SMGOI013',
-    data_hora: timestamp,
-    total_lidos,
-    total_atualizados,
-    total_novos,
-    total_erros,
-    total_ignorados,
-    nome_arquivo: file.name,
-    detalhes_erros: errosDetalhes.slice(0, 10),
-  };
-
-  await addResumoImportacao(resumo);
-
-  onProgress?.(100, 'Importação finalizada com sucesso!');
-  await new Promise((r) => setTimeout(r, 200));
-
-  return resumo;
 }
 
 /**
@@ -885,8 +231,6 @@ export function identifyVinculosHeaders(
   }
 
   // 3. Identify Código Interno Column:
-  // Must NOT be the EAN key or Dígito key, and must NOT contain any barcode keywords!
-  // Priority 3.1: Explicit mentions of INTERNO, SMG, CODMERC, CODPROD, CODITEM
   for (const key of keys) {
     if (key === eanKey || key === digitoKey) continue;
     const norm = normalizeHeader(key);
@@ -914,7 +258,6 @@ export function identifyVinculosHeaders(
       const norm = normalizeHeader(key);
       if (norm.includes('EAN') || norm.includes('BARRA') || norm.includes('GTIN') || norm.includes('BARCODE') || norm.includes('CODBAR')) continue;
       if (norm.startsWith('DIG') || norm === 'DV') continue;
-      // Skip pure description columns (unless prefixed with COD)
       if ((norm.startsWith('DESC') || norm === 'DESCRICAO' || norm === 'NOME' || norm === 'DENOMINACAO') && !norm.includes('COD')) continue;
 
       if (
@@ -949,7 +292,7 @@ export function identifyVinculosHeaders(
     }
   }
 
-  // 5. Data-driven Fallback Heuristics (if column names were unstandardized or missing)
+  // 5. Data-driven Fallback Heuristics
   if ((!eanKey || !codigoInternoKey) && allRows && allRows.length > 0) {
     const rowsToInspect = allRows.slice(0, Math.min(10, allRows.length));
 
@@ -958,7 +301,6 @@ export function identifyVinculosHeaders(
       const samples = rowsToInspect.map((r) => String(r[key] || '').trim()).filter(Boolean);
       if (samples.length === 0) continue;
 
-      // Check if values look like EANs (8 to 14 digits)
       const eanLikeCount = samples.filter((s) => {
         const clean = s.replace(/\D/g, '');
         return clean.length >= 8 && clean.length <= 14;
@@ -969,7 +311,6 @@ export function identifyVinculosHeaders(
         continue;
       }
 
-      // Check if values look like Código Interno (1 to 9 digits, possible hyphen)
       const codeLikeCount = samples.filter((s) => {
         const clean = s.split('-')[0].replace(/\D/g, '');
         return clean.length >= 1 && clean.length <= 9;
@@ -981,9 +322,7 @@ export function identifyVinculosHeaders(
     }
   }
 
-  // Final fallback assignments if still missing
   if (!eanKey && keys.length >= 2) {
-    // If first column is code, second is likely EAN
     eanKey = keys.find((k) => k !== codigoInternoKey) || keys[1];
   }
 
@@ -996,7 +335,7 @@ export function identifyVinculosHeaders(
 
 /**
  * Imports and updates VÍNCULOS EAN spreadsheet with live 0-100% progress animation.
- * Re-processes vínculos and associates EANs exclusively via Código Interno with SMGOI013 products.
+ * Re-processes vínculos and associates EANs exclusively via Código Interno with BASE DO RUB products.
  */
 export async function processarVinculosEAN(
   file: File,
@@ -1047,7 +386,7 @@ export async function processarVinculosEAN(
   const sample = rawRows[0];
   const { eanKey, codigoInternoKey, digitoKey, descricaoKey } = identifyVinculosHeaders(sample, rawRows);
 
-  // Load existing SMGOI013 products as the authoritative source
+  // Load existing products (from BASE DO RUB) as authoritative source
   const produtos = getProdutos();
   const produtosPorCodigoInterno = new Map<string, ProdutoSMG>();
   const produtosPorChaveCompleta = new Map<string, ProdutoSMG>();
@@ -1144,9 +483,6 @@ export async function processarVinculosEAN(
       continue;
     }
 
-    // Regra de Vinculação:
-    // Chave principal: Código Interno.
-    // Dígito: validação adicional quando disponível.
     let produto: ProdutoSMG | undefined;
     if (normVinc.chaveNormalizada && produtosPorChaveCompleta.has(normVinc.chaveNormalizada)) {
       produto = produtosPorChaveCompleta.get(normVinc.chaveNormalizada);
@@ -1175,7 +511,6 @@ export async function processarVinculosEAN(
     eanVistos.add(ean);
 
     if (produtos.length === 0) {
-      // Base SMGOI013 not loaded yet: wait for base
       status_vinculo = 'AGUARDANDO_BASE';
     } else if (!produto) {
       status_vinculo = 'CODIGO_NAO_ENCONTRADO';
@@ -1183,11 +518,10 @@ export async function processarVinculosEAN(
         tipo: 'CODIGO_NAO_ENCONTRADO',
         origem: 'VINCULOS_EAN',
         identificador: `Código Interno ${codigoInterno}${digito ? '-' + digito : ''} (EAN: ${ean})`,
-        descricao_problema: `Código Interno ${codigoInterno} não foi localizado no cadastro da SMGOI013.`,
+        descricao_problema: `Código Interno ${codigoInterno} não foi localizado no cadastro da BASE DO RUB.`,
         detalhes: rawDesc ? `Descrição informada na planilha: ${String(rawDesc).trim()}` : undefined,
       });
     } else {
-      // Product found in SMGOI013!
       if (!digito && produto.digito) {
         digito = produto.digito;
       }

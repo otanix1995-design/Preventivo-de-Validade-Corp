@@ -176,7 +176,7 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
           </p>
           <p className="text-blue-800 leading-relaxed font-medium">
             A hierarquia operacional segue estritamente: <strong>Agência → Promotor → CNPJ da Indústria → Produtos</strong>.
-            Ao vincular uma indústria ao promotor, sua carteira de produtos da filial é calculada automaticamente a partir da base SMGOI013 e SPCOI007.
+            Ao vincular uma indústria ao promotor, sua carteira de produtos da filial é calculada automaticamente a partir da BASE DO RUB e SPCOI007.
           </p>
         </div>
       </div>

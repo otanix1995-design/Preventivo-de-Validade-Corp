@@ -275,7 +275,7 @@ export const EansVinculadosView: React.FC<EansVinculadosViewProps> = ({
                   <div className="flex items-center justify-between text-xs pt-2 mt-2 border-t border-gray-100 text-gray-500 font-medium">
                     <span className="text-[11px] text-amber-800 font-medium">
                       {v.status_vinculo === 'AGUARDANDO_BASE'
-                        ? 'Aguardando importação da planilha SMGOI013'
+                        ? 'Aguardando importação da BASE DO RUB'
                         : 'Código interno não encontrado na base'}
                     </span>
                     {onOpenVincularModal && (

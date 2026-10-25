@@ -613,7 +613,7 @@ export const AnalisePromotorView: React.FC<AnalisePromotorViewProps> = ({
                       </p>
                       {solic.fator_embalagem && solic.fator_embalagem > 1 && (
                         <span className="text-[11px] text-amber-800/80 font-medium block">
-                          Fator SMGOI013: {solic.fator_embalagem} UN / {solic.embalagem || 'CX'}
+                          Fator (BASE DO RUB): {solic.fator_embalagem} UN / {solic.embalagem || 'CX'}
                         </span>
                       )}
                     </div>

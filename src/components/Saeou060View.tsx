@@ -743,7 +743,7 @@ export const Saeou060View: React.FC<Saeou060ViewProps> = ({
               </span>
             </div>
             <p className="text-xs text-slate-500 mt-0.5">
-              Validades apontadas pelos promotores cruzadas com o estoque e giro da SMGOI013.
+              Validades apontadas pelos promotores cruzadas com o estoque e giro da BASE DO RUB.
             </p>
           </div>
         </div>
@@ -1188,11 +1188,11 @@ export const Saeou060View: React.FC<Saeou060ViewProps> = ({
                     {/* Descrição do Produto */}
                     <h3 className="text-sm sm:text-base font-black text-slate-900 leading-snug mt-1.5">
                       <HighlightText
-                        text={prod?.descricao || reg.descricao || 'PRODUTO NÃO ENCONTRADO NA SMGOI013'}
+                        text={prod?.descricao || reg.descricao || 'PRODUTO NÃO ENCONTRADO NA BASE DO RUB'}
                         query={debouncedSearch}
                       />
                     </h3>
-                    {/* Setor Físico e Setor Balanço vinculados via SMGOI013 */}
+                    {/* Setor Físico e Setor Balanço vinculados via BASE DO RUB */}
                     {(setorFisico || setorBalanco || prod?.setor_fisico || prod?.setor_balanco) && (
                       <div className="flex items-center gap-1.5 flex-wrap pt-1">
                         {(setorFisico || prod?.setor_fisico) && (
@@ -1262,7 +1262,7 @@ export const Saeou060View: React.FC<Saeou060ViewProps> = ({
                     <p className="text-xs font-black text-slate-900 mt-0.5">
                       {prod?.estoque_total !== undefined ? `${prod.estoque_total} ${prod.unidade_medida || 'UN'}` : '-'}
                     </p>
-                    <span className="text-[10px] text-slate-400 block mt-0.5">Base SMGOI013</span>
+                    <span className="text-[10px] text-slate-400 block mt-0.5">Base do RUB</span>
                   </div>
 
                   {/* Giro e Dias sem venda */}
@@ -1455,7 +1455,7 @@ export const Saeou060View: React.FC<Saeou060ViewProps> = ({
               </div>
               {importSummaryModal.total_nao_localizados ? (
                 <div className="flex justify-between py-1 border-b border-slate-100">
-                  <span className="text-red-600">Não Localizados na SMG:</span>
+                  <span className="text-red-600">Não Localizados no RUB:</span>
                   <span className="font-bold text-red-600">{importSummaryModal.total_nao_localizados}</span>
                 </div>
               ) : null}

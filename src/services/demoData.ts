@@ -1177,7 +1177,7 @@ export const DEMO_SAEOU060: RegistroSaeou060[] = [
     data_importacao: '31/08/2026',
     hora_importacao: '08:00',
     data_primeira_aparicao: '31/08/2026',
-    observacao: 'Código não localizado no cadastro da SMGOI013',
+    observacao: 'Código não localizado no cadastro da BASE DO RUB',
   }
 ];
 
@@ -1187,7 +1187,7 @@ export const DEMO_DIVERGENCIAS: DivergenciaRegistro[] = [
     tipo: 'CODIGO_NAO_ENCONTRADO',
     origem: 'VINCULOS_EAN',
     identificador: 'Código Interno 99999 (EAN: 7899999999999)',
-    descricao_problema: 'Código Interno presente na planilha de EANs não foi localizado no cadastro da SMGOI013.',
+    descricao_problema: 'Código Interno presente na planilha de EANs não foi localizado no cadastro da BASE DO RUB.',
     data_registro: '2026-08-31 08:00:00',
   },
   {

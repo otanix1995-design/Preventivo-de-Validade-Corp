@@ -75,11 +75,16 @@ export default function App() {
     });
 
     const unsubscribe = subscribeToStore(() => {
-      setProdutos(getProdutos());
-      setVencimentos(getVencimentos());
-      setVinculosEan(getVinculosEan());
-      setDivergencias(getDivergencias());
-      setMetadados(getMetadados());
+      const p = getProdutos();
+      setProdutos((prev) => (prev === p ? prev : p));
+      const v = getVencimentos();
+      setVencimentos((prev) => (prev === v ? prev : v));
+      const eans = getVinculosEan();
+      setVinculosEan((prev) => (prev === eans ? prev : eans));
+      const d = getDivergencias();
+      setDivergencias((prev) => (prev === d ? prev : d));
+      const m = getMetadados();
+      setMetadados((prev) => (prev === m ? prev : m));
     });
 
     return () => unsubscribe();
@@ -264,6 +269,10 @@ export default function App() {
               }}
               onOpenCadastrarModal={handleOpenCadastrarForProduto}
               onBack={() => setActiveTab('dashboard')}
+              onNavigateToImportacao={() => {
+                setActiveTab('mais');
+                setSubView('importacao');
+              }}
             />
           </div>
         )}
@@ -353,6 +362,7 @@ export default function App() {
                   }}
                   onOpenCadastrarModal={handleOpenCadastrarForProduto}
                   onBack={() => setSubView(null)}
+                  onNavigateToImportacao={() => setSubView('importacao')}
                 />
               </div>
             )}

@@ -40,7 +40,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
       iconColor: 'text-indigo-700',
       iconBg: 'bg-indigo-100',
       title: 'Base Central Firestore & Nuvem',
-      desc: 'Sincronizar base SMGOI013 com o Firestore e executar testes de validação central.',
+      desc: 'Sincronizar BASE DO RUB com o Firestore e executar testes de validação central.',
       badge: 'Fase Central',
       onClick: () => setIsNuvemModalOpen(true),
     },
@@ -134,7 +134,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
           </span>
         </div>
         <p className="text-xs text-gray-500 font-medium">
-          Base operacional: <strong className="text-gray-900 font-bold uppercase">{metadados.status_base}</strong> | Última atualização: <strong className="text-gray-900 font-mono font-bold">{metadados.ultima_atualizacao_smgoi013 || 'Nenhuma'}</strong>
+          Base operacional: <strong className="text-gray-900 font-bold uppercase">{metadados.status_base === 'SMGOI013' || metadados.status_base === 'BASE_RUB' ? 'BASE DO RUB' : metadados.status_base}</strong> | Última atualização: <strong className="text-gray-900 font-mono font-bold">{metadados.ultima_atualizacao_base_rub || metadados.ultima_atualizacao_smgoi013 || 'Nenhuma'}</strong>
         </p>
       </div>
 

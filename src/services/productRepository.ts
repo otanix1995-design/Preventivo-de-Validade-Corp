@@ -97,6 +97,8 @@ class ProductRepository {
   private _byOriginalCode = new Map<string, ProdutoSMG>();
   private _byBarcode = new Map<string, ProdutoSMG>();
   private _byNormalizedKey = new Map<string, ProdutoSMG>();
+  private _byFilialCodDig = new Map<string, ProdutoSMG>();
+  private _descriptionWordIndex = new Map<string, ProdutoSMG[]>();
 
   // Sector indexes for high-performance classification
   private _bySectorFisico = new Map<string, ProdutoSMG[]>();
@@ -162,6 +164,25 @@ class ProductRepository {
         ]);
 
         if (produtos.length > 0 || saeou060.length > 0) {
+          // Backup preventivo e recuperável de dados legados antes da migração definitiva para BASE RUB
+          const backupExistente = await dbGetMeta<any>('backup_legado_smgoi013', null);
+          if (!backupExistente && produtos.length > 0) {
+            const backupPayload = {
+              criado_em: new Date().toISOString(),
+              total_produtos: produtos.length,
+              produtos: produtos,
+              origem: 'SMGOI013_LEGADO',
+              descricao: 'Backup de segurança anterior à migração definitiva para BASE DO RUB',
+            };
+            await dbSetMeta('backup_legado_smgoi013', backupPayload);
+            const check = await dbGetMeta<any>('backup_legado_smgoi013', null);
+            if (check && check.total_produtos === produtos.length) {
+              console.log(`[ProductRepository] Backup íntegro de ${produtos.length} registros criado e verificado com sucesso.`);
+            }
+          }
+
+          const statusAtualizado = (metadados.status_base as string) === 'SMGOI013' ? 'BASE_RUB' : metadados.status_base;
+
           this._produtos = produtos;
           this._vinculos = vinculos;
           this._vencimentos = vencimentos;
@@ -170,6 +191,7 @@ class ProductRepository {
           this._historico = historico;
           this._metadados = {
             ...metadados,
+            status_base: statusAtualizado,
             total_produtos: produtos.length,
             total_vencimentos: vencimentos.length,
             total_eans: vinculos.length,
@@ -245,7 +267,7 @@ class ProductRepository {
             this._metadados = {
               ...this._metadados,
               ...meta,
-              status_base: 'SMGOI013',
+              status_base: 'BASE_RUB',
               total_produtos: mergedProdutos.length,
             };
             this.rebuildIndices();
@@ -311,12 +333,15 @@ class ProductRepository {
     this._byOriginalCode.clear();
     this._byBarcode.clear();
     this._byNormalizedKey.clear();
+    this._byFilialCodDig.clear();
+    this._descriptionWordIndex.clear();
     this._bySectorFisico.clear();
     this._bySectorBalanco.clear();
     this._productSectorByCode.clear();
 
     const produtos = this._produtos;
     const isBaseEmpty = produtos.length === 0;
+    const filial = this._metadados?.filial_numero || '172';
     const setFisico = new Set<string>();
     const setBalanco = new Set<string>();
 
@@ -348,15 +373,40 @@ class ProductRepository {
 
       if (norm.codigoInterno) {
         this._byInternalCode.set(norm.codigoInterno, p);
+        if (norm.digito) {
+          this._byFilialCodDig.set(`${filial}_${norm.codigoInterno}_${norm.digito}`, p);
+          this._byFilialCodDig.set(`${norm.codigoInterno}_${norm.digito}`, p);
+          this._byFilialCodDig.set(`${norm.codigoInterno}-${norm.digito}`, p);
+        }
+        this._byFilialCodDig.set(`${filial}_${norm.codigoInterno}`, p);
       }
       if (norm.codigoExibicao) {
         this._byFullCode.set(norm.codigoExibicao, p);
+        this._byFilialCodDig.set(norm.codigoExibicao, p);
       }
       if (p.codigo_original) {
         this._byOriginalCode.set(p.codigo_original.trim(), p);
       }
       if (norm.chaveNormalizada) {
         this._byNormalizedKey.set(norm.chaveNormalizada, p);
+        this._byFilialCodDig.set(norm.chaveNormalizada, p);
+      }
+
+      // Inverted word index for description search
+      if (p.descricaoNormalizada) {
+        const tokens = p.descricaoNormalizada.split(/[^A-Z0-9]+/).filter((w) => w.length >= 3);
+        const seenInProd = new Set<string>();
+        for (let t = 0; t < tokens.length; t++) {
+          const tok = tokens[t];
+          if (seenInProd.has(tok)) continue;
+          seenInProd.add(tok);
+          let wList = this._descriptionWordIndex.get(tok);
+          if (!wList) {
+            wList = [];
+            this._descriptionWordIndex.set(tok, wList);
+          }
+          wList.push(p);
+        }
       }
 
       // Index direct EANs
@@ -579,6 +629,7 @@ class ProductRepository {
   public getProductByFullCode(fullCode: string): ProdutoSMG | undefined {
     if (!fullCode) return undefined;
     return (
+      this._byFilialCodDig.get(fullCode) ||
       this._byFullCode.get(fullCode) ||
       this._byNormalizedKey.get(fullCode) ||
       this._byOriginalCode.get(fullCode)
@@ -621,18 +672,25 @@ class ProductRepository {
     return undefined;
   }
 
+  private _matchesGramagem(p: ProdutoSMG, gramagemFilter: string): boolean {
+    const isFilterPesavel = gramagemFilter === 'PESÁVEL / KG' || gramagemFilter === 'KG' || gramagemFilter === 'PESO';
+    return (
+      p.gramagemTexto === gramagemFilter ||
+      p.gramagemChave === gramagemFilter ||
+      (isFilterPesavel && (p.gramagemChave === 'PESO_KG' || isProdutoPesavel(p.embalagem))) ||
+      Boolean(p.embalagem && p.embalagem.toUpperCase().includes(gramagemFilter.toUpperCase()))
+    );
+  }
+
   /**
-   * High-speed search across all ~11,630 products with precomputed indices,
-   * strict relevance sorting, and presentation/gramagem filtering.
+   * Pesquisa de alto desempenho com índices O(1) em memória e índice invertido
+   * de palavras para descrições. Evita varreduras lineares O(N) nos 11.600+ produtos.
    * 
-   * Relevance Order:
-   * 1. Exact EAN match
-   * 2. Exact Código Interno match
-   * 3. Exact Código Completo match
-   * 4. Description starting with query
-   * 5. Description containing query
-   * 6. Code containing query
-   * 7. Other attributes (sector, buyer)
+   * Ordem de Resolução:
+   * 1. Busca direta por código de barras EAN (8-14 dígitos)
+   * 2. Busca direta por Chave Filial + Código + Dígito ("172_46135_156", "46135-156")
+   * 3. Busca por Código Interno raiz (1-7 dígitos) com correspondência exata e prefixo
+   * 4. Busca por Descrição indexada por palavras (tokens >= 3 caracteres) com interseção de conjuntos
    */
   public searchProducts(
     query: string,
@@ -643,6 +701,7 @@ class ProductRepository {
   ): ProdutoSMG[] {
     const rawQ = (query || '').trim();
     const gramagemFilter = options?.gramagem?.trim();
+    const limit = options?.limit || 50;
 
     if (!rawQ && !gramagemFilter) {
       return [];
@@ -650,107 +709,154 @@ class ProductRepository {
 
     const normQ = normalizeSearchText(rawQ);
     const cleanEanQ = cleanEanCode(rawQ);
-    const normSMG = normalizeCodigoSMGO(rawQ);
-    const cleanCode = normSMG.codigoInterno;
-    const chaveQ = normSMG.chaveNormalizada;
+    const isPureDigits = /^\d+$/.test(rawQ);
 
-    // Direct O(1) optimization: If exact full barcode exists in index and no other search criteria
-    if (cleanEanQ && !gramagemFilter && this._byBarcode.has(cleanEanQ)) {
+    // 1. Busca direta O(1) por EAN (8-14 dígitos)
+    if (cleanEanQ && cleanEanQ.length >= 8 && this._byBarcode.has(cleanEanQ)) {
       const exactProd = this._byBarcode.get(cleanEanQ)!;
-      return [exactProd];
+      if (!gramagemFilter || this._matchesGramagem(exactProd, gramagemFilter)) {
+        return [exactProd];
+      }
     }
 
+    // 2. Busca direta O(1) por Chave Completa (ex: "46135-156", "172_46135_156")
+    if (rawQ.includes('-') || rawQ.includes('_')) {
+      const exactKey =
+        this._byNormalizedKey.get(rawQ) ||
+        this._byFilialCodDig.get(rawQ) ||
+        this._byFullCode.get(rawQ);
+      if (exactKey && (!gramagemFilter || this._matchesGramagem(exactKey, gramagemFilter))) {
+        return [exactKey];
+      }
+    }
+
+    // 3. Busca Numérica por Código Interno (1 a 7 dígitos)
+    if (isPureDigits && rawQ.length <= 7) {
+      const cleanCode = rawQ.replace(/^0+/, '');
+      const results: ProdutoSMG[] = [];
+      const addedIds = new Set<string>();
+
+      // Correspondência exata no código interno
+      const exactProd = this._byInternalCode.get(cleanCode) || this._byInternalCode.get(rawQ);
+      if (exactProd && (!gramagemFilter || this._matchesGramagem(exactProd, gramagemFilter))) {
+        results.push(exactProd);
+        addedIds.add(exactProd.id || exactProd.codigo_interno);
+      }
+
+      // Prefixo numérico (quando usuário digita ex: "4613")
+      if (cleanCode.length >= 2 && results.length < limit) {
+        for (let i = 0; i < this._produtos.length; i++) {
+          if (results.length >= limit) break;
+          const p = this._produtos[i];
+          const cod = p.codigo_interno || '';
+          if (addedIds.has(p.id || cod)) continue;
+          if (cod.startsWith(cleanCode)) {
+            if (!gramagemFilter || this._matchesGramagem(p, gramagemFilter)) {
+              results.push(p);
+              addedIds.add(p.id || cod);
+            }
+          }
+        }
+      }
+
+      return results;
+    }
+
+    // 4. Busca por Descrição: Mínimo de 3 caracteres
+    if (normQ.length < 3) {
+      return [];
+    }
+
+    // Extrair tokens de busca com 3 ou mais caracteres
+    const tokens = normQ.split(/[^A-Z0-9]+/).filter((t) => t.length >= 3);
+    if (tokens.length === 0) {
+      tokens.push(normQ);
+    }
+
+    // Obter candidatos via índice invertido de palavras
+    let candidatePool: ProdutoSMG[] | null = null;
+
+    for (let t = 0; t < tokens.length; t++) {
+      const token = tokens[t];
+      const directMatches = this._descriptionWordIndex.get(token);
+
+      if (directMatches && directMatches.length > 0) {
+        if (candidatePool === null || directMatches.length < candidatePool.length) {
+          candidatePool = directMatches;
+        }
+      } else {
+        // Busca por prefixo no índice de palavras se o termo não for exato
+        const prefixMatches: ProdutoSMG[] = [];
+        const prefixSeen = new Set<string>();
+        for (const [indexedWord, prods] of this._descriptionWordIndex.entries()) {
+          if (indexedWord.startsWith(token)) {
+            for (let pi = 0; pi < prods.length; pi++) {
+              const pid = prods[pi].id || prods[pi].codigo_interno;
+              if (!prefixSeen.has(pid)) {
+                prefixSeen.add(pid);
+                prefixMatches.push(prods[pi]);
+              }
+            }
+          }
+        }
+
+        if (prefixMatches.length > 0) {
+          if (candidatePool === null || prefixMatches.length < candidatePool.length) {
+            candidatePool = prefixMatches;
+          }
+        } else {
+          // Nenhum produto possui esta palavra
+          return [];
+        }
+      }
+    }
+
+    if (!candidatePool || candidatePool.length === 0) {
+      return [];
+    }
+
+    // Pontuar e ordenar apenas o pool de candidatos filtrado
     interface ScoredProduct {
       prod: ProdutoSMG;
       score: number;
     }
+    const scored: ScoredProduct[] = [];
 
-    const matches: ScoredProduct[] = [];
+    for (let i = 0; i < candidatePool.length; i++) {
+      const p = candidatePool[i];
 
-    for (let i = 0; i < this._produtos.length; i++) {
-      const p = this._produtos[i];
-
-      // Filter by Gramagem / Apresentação if specified
-      if (gramagemFilter) {
-        const isFilterPesavel = gramagemFilter === 'PESÁVEL / KG' || gramagemFilter === 'KG' || gramagemFilter === 'PESO';
-        const matchesGramagem =
-          p.gramagemTexto === gramagemFilter ||
-          p.gramagemChave === gramagemFilter ||
-          (isFilterPesavel && (p.gramagemChave === 'PESO_KG' || isProdutoPesavel(p.embalagem))) ||
-          (p.embalagem && p.embalagem.toUpperCase().includes(gramagemFilter.toUpperCase()));
-        if (!matchesGramagem) continue;
-      }
-
-      if (!rawQ) {
-        matches.push({ prod: p, score: 1 });
+      if (gramagemFilter && !this._matchesGramagem(p, gramagemFilter)) {
         continue;
       }
 
-      let score = 0;
-
-      // 1. EAN match
-      if (cleanEanQ && p.eans && p.eans.includes(cleanEanQ)) {
-        score = Math.max(score, 10000);
-      } else if (cleanEanQ && p.eans && p.eans.some((e) => e.includes(cleanEanQ))) {
-        score = Math.max(score, 1500);
-      }
-
-      // 2. Exact Código Interno
-      if (cleanCode && (p.codigo_interno === cleanCode || p.codigoInternoNormalizado === cleanCode)) {
-        score = Math.max(score, 8000);
-      } else if (cleanCode && p.codigo_interno.startsWith(cleanCode)) {
-        score = Math.max(score, 6000);
-      } else if (cleanCode && p.codigo_interno.includes(cleanCode)) {
-        score = Math.max(score, 3000);
-      }
-
-      // 3. Exact Código Completo / Chave
-      if (chaveQ && (p.chave_normalizada === chaveQ || p.codigo_exibicao === chaveQ)) {
-        score = Math.max(score, 7000);
-      } else if (p.codigo_exibicao && p.codigo_exibicao.includes(rawQ)) {
-        score = Math.max(score, 3500);
-      }
-
-      // 4. Descrição Normalizada
       const descNorm = p.descricaoNormalizada || normalizeSearchText(p.descricao);
-      if (descNorm) {
-        if (descNorm === normQ) {
-          score = Math.max(score, 5000);
-        } else if (descNorm.startsWith(normQ)) {
-          score = Math.max(score, 4000);
-        } else if (descNorm.includes(normQ)) {
-          // Bonus for earlier position in description
-          const pos = descNorm.indexOf(normQ);
-          score = Math.max(score, 2000 - Math.min(pos, 500));
+
+      // Garantir que todos os tokens estão contidos na descrição
+      let allTokensMatch = true;
+      for (let t = 0; t < tokens.length; t++) {
+        if (!descNorm.includes(tokens[t])) {
+          allTokensMatch = false;
+          break;
         }
       }
 
-      // 5. Original Code / Setor / Comprador fallback
-      if (score === 0) {
-        if (p.codigo_original && p.codigo_original.includes(rawQ)) {
-          score = 1000;
-        } else if (p.setor_fisico && normalizeSearchText(p.setor_fisico).includes(normQ)) {
-          score = 500;
-        } else if (p.setor_balanco && normalizeSearchText(p.setor_balanco).includes(normQ)) {
-          score = 400;
-        } else if (p.comprador_filial && normalizeSearchText(p.comprador_filial).includes(normQ)) {
-          score = 300;
-        }
+      if (!allTokensMatch) continue;
+
+      let score = 0;
+      if (descNorm === normQ) {
+        score = 5000;
+      } else if (descNorm.startsWith(normQ)) {
+        score = 4000;
+      } else {
+        const pos = descNorm.indexOf(tokens[0]);
+        score = 2000 - Math.min(pos, 500);
       }
 
-      if (score > 0) {
-        matches.push({ prod: p, score });
-      }
+      scored.push({ prod: p, score });
     }
 
-    // Sort strictly by relevance score descending
-    matches.sort((a, b) => b.score - a.score);
-
-    const result = matches.map((m) => m.prod);
-    if (options?.limit && options.limit > 0) {
-      return result.slice(0, options.limit);
-    }
-    return result;
+    scored.sort((a, b) => b.score - a.score);
+    return scored.slice(0, limit).map((s) => s.prod);
   }
 
   /**
@@ -801,12 +907,14 @@ class ProductRepository {
     await dbPutAll(STORES.VINCULOS_EAN, this._vinculos, true);
 
     const newVersion = Date.now();
+    const agora = new Date().toLocaleString('pt-BR');
     const meta = {
       ...this._metadados,
-      status_base: novosProdutos.length > 0 ? ('SMGOI013' as const) : ('VAZIA' as const),
+      status_base: novosProdutos.length > 0 ? ('BASE_RUB' as const) : ('VAZIA' as const),
       total_produtos: novosProdutos.length,
       total_eans: this._vinculos.length,
-      ultima_atualizacao_smgoi013: new Date().toLocaleString('pt-BR'),
+      ultima_atualizacao_base_rub: agora,
+      ultima_atualizacao_smgoi013: agora,
       catalogo_version: newVersion,
     };
     this._metadados = meta;
@@ -1707,7 +1815,6 @@ class ProductRepository {
     reg.desconsiderado_em = new Date().toLocaleString('pt-BR');
 
     await dbPut(STORES.SAEOU060, reg);
-    this.rebuildIndices();
     this.notify();
     return true;
   }
@@ -1721,7 +1828,6 @@ class ProductRepository {
     reg.desconsiderado_em = undefined;
 
     await dbPut(STORES.SAEOU060, reg);
-    this.rebuildIndices();
     this.notify();
     return true;
   }
@@ -1767,7 +1873,6 @@ class ProductRepository {
     reg.trabalhado_em = new Date().toLocaleString('pt-BR');
 
     await dbPut(STORES.SAEOU060, reg);
-    this.rebuildIndices();
     this.notify();
     return reg;
   }
@@ -1816,7 +1921,6 @@ class ProductRepository {
         dbPut(STORES.SAEOU060, reg),
       ]);
 
-      this.rebuildIndices();
       this.notify();
       return existingLote;
     }
@@ -1884,7 +1988,6 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    this.rebuildIndices();
     this.notify();
     return novoLote;
   }
@@ -1965,7 +2068,6 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    this.rebuildIndices();
     this.notify();
     return addedCount;
   }
@@ -1984,7 +2086,6 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    this.rebuildIndices();
     this.notify();
     return true;
   }
@@ -2172,6 +2273,7 @@ class ProductRepository {
     this._metadados = {
       filial_numero: '172',
       filial_nome: 'CASCAVEL',
+      ultima_atualizacao_base_rub: '31/08/2026 08:00',
       ultima_atualizacao_smgoi013: '31/08/2026 08:00',
       ultima_atualizacao_eans: '31/08/2026 08:00',
       ultima_atualizacao_saeou060: '31/08/2026 08:00',

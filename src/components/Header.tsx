@@ -80,9 +80,9 @@ export const Header: React.FC<HeaderProps> = ({
   };
 
   const totalProdutos = metadados?.total_produtos ?? 0;
-  const currentStatus = totalProdutos === 0 ? 'VAZIA' : (statusBase || metadados?.status_base || 'DEMO');
+  const currentStatus = totalProdutos === 0 ? 'VAZIA' : (statusBase || metadados?.status_base || 'BASE_RUB');
   const isDemo = currentStatus === 'DEMO' && totalProdutos > 0;
-  const ultimaAtualizacao = metadados?.ultima_atualizacao_smgoi013;
+  const ultimaAtualizacao = metadados?.ultima_atualizacao_base_rub || metadados?.ultima_atualizacao_smgoi013;
 
   const isSyncing = syncStatus.state === 'syncing' || isManualSyncing;
 
@@ -222,7 +222,7 @@ export const Header: React.FC<HeaderProps> = ({
           <Database className="w-3.5 h-3.5 text-orange-200 shrink-0" />
           <span className="truncate">
             <strong className="text-white font-black">
-              {currentStatus === 'SMGOI013' ? 'BASE DO RUB' : `BASE: ${currentStatus}`}
+              {currentStatus === 'SMGOI013' || currentStatus === 'BASE_RUB' ? 'BASE DO RUB' : `BASE: ${currentStatus}`}
             </strong>
             {ultimaAtualizacao && (
               <span className="text-orange-200 ml-1.5 font-mono text-[10px]">

@@ -1,5 +1,5 @@
 import * as XLSX from 'xlsx';
-import { ProdutoSMG, RegistroPlanilhaIsv, ResumoImportacaoIsv } from '../types';
+import { extrairSetorOperacionalIsv, ProdutoSMG, RegistroPlanilhaIsv, ResumoImportacaoIsv } from '../types';
 import { normalizeCodigoSMGO } from './codeParser';
 
 export type IsvPlanilhaProgressCallback = (percent: number, statusText: string) => void;
@@ -916,13 +916,78 @@ export async function processarPlanilhaOperacionalIsv(
     avisos: avisos.slice(0, 30),
   };
 
-  onProgress?.(100, 'Importação da Planilha Operacional de 36 colunas concluída com sucesso!');
+  onProgress?.(100, 'Importação da BASE DO RUB (36 colunas) concluída com sucesso!');
 
   return {
     registros,
     resumo,
   };
 }
+
+/**
+ * Converte um registro oficial da BASE DO RUB (36 colunas) em ProdutoSMG unificado,
+ * garantindo compatibilidade total e imediata com todos os módulos do aplicativo
+ * (Consulta, Validades, ISV, Cartazes, Vencimentos, SAEOU060).
+ */
+export function converterRegistroRubParaProduto(
+  reg: RegistroPlanilhaIsv,
+  eans: string[] = []
+): ProdutoSMG {
+  const setorOp = extrairSetorOperacionalIsv(reg.nome || reg.complemento || '');
+  return {
+    id: reg.codigo_interno,
+    codigo_original: reg.codigo_original || reg.codigo_interno,
+    codigo_completo: reg.codigo_exibicao,
+    codigo_interno: reg.codigo_interno,
+    digito: reg.digito,
+    codigo_exibicao: reg.codigo_exibicao,
+    chave_normalizada: reg.codigo_exibicao,
+    descricao: reg.nome,
+    embalagem: reg.complemento || 'UN',
+    unidade_medida: 'UN',
+    estoque_emb1: reg.estoque,
+    estoque_emb9: 0,
+    estoque_total: reg.estoque,
+    vendas_qtde_30d: reg.venda_30_dias || 0,
+    custo_medio: reg.valor_disponivel !== null && reg.estoque > 0 ? Number((reg.valor_disponivel / reg.estoque).toFixed(4)) : undefined,
+    valor_estoque_planilha: reg.valor_disponivel,
+    dias_sem_venda: reg.dias_sem_venda,
+    idade: reg.idade,
+    setor_fisico: reg.setor || reg.setor_save,
+    setor_balanco: reg.setor_herdado || reg.classe_produto,
+    pedidos_pendentes: reg.pedidos_pendentes,
+    eans: eans,
+    setor_operacional: setorOp,
+    dados_operacionais: reg,
+    estoque_disponivel_texto: reg.estoque_formatado_extenso,
+    estoque_original_erp: reg.estoque_original_texto,
+    valor_indisponivel: reg.valor_indisponivel,
+    bloqueio: reg.bloqueio,
+    transito_entrada: reg.transito_entrada,
+    estoque_indisponivel: reg.estoque_indisponivel,
+    ultima_venda_formatada: reg.ultima_venda_formatada,
+    ultima_compra_formatada: reg.ultima_compra_formatada,
+    classe_produto: reg.classe_produto,
+    classe_produto_raiz: reg.classe_produto_raiz,
+    setor_save: reg.setor_save,
+    cadeia: reg.cadeia,
+    setor_planilha: reg.setor,
+    setor_herdado: reg.setor_herdado,
+    fornecedor_planilha: reg.fornecedor_planilha,
+    gerenciado: reg.gerenciado,
+    ativo: reg.ativo,
+    residuo: reg.residuo,
+    peso_variavel: reg.peso_variavel,
+    alteracao_preco_formatada: reg.alteracao_preco_formatada,
+    verificador: reg.verificador,
+    autonomia: reg.autonomia,
+    autonomia_pedido: reg.autonomia_pedido,
+    atualizado_em: new Date().toISOString(),
+  };
+}
+
+export const processarBaseRub = processarPlanilhaOperacionalIsv;
+export const gerarExemploBaseRub = gerarExemploPlanilhaISV;
 
 /**
  * Gera um arquivo modelo .XLSX com todas as 36 colunas oficiais na ordem exata do ERP.

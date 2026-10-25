@@ -27,7 +27,7 @@ export const ModalRegistrarAjusteIsv: React.FC<ModalRegistrarAjusteIsvProps> = (
 }) => {
   const [responsavel, setResponsavel] = useState('Prevenção de Perdas');
   const [observacao, setObservacao] = useState(
-    'Produto consta em estoque no sistema SMGOI013, porém não foi localizado fisicamente na área de vendas nem no depósito.'
+    'Produto consta em estoque no sistema BASE DO RUB, porém não foi localizado fisicamente na área de vendas nem no depósito.'
   );
   const [isSaving, setIsSaving] = useState(false);
   const [feedbackSuccess, setFeedbackSuccess] = useState<string | null>(null);
@@ -121,7 +121,7 @@ export const ModalRegistrarAjusteIsv: React.FC<ModalRegistrarAjusteIsvProps> = (
               {item.descricao}
             </h4>
             <div className="flex items-center justify-between pt-1 border-t border-slate-200 text-xs">
-              <span className="text-slate-500">Estoque Registrado SMGOI013:</span>
+              <span className="text-slate-500">Estoque Registrado (BASE DO RUB):</span>
               <span className="font-mono font-black text-slate-800">
                 {item.estoque_formatado}
               </span>
@@ -138,7 +138,7 @@ export const ModalRegistrarAjusteIsv: React.FC<ModalRegistrarAjusteIsvProps> = (
           <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl flex items-start gap-2.5 text-amber-900 text-xs">
             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
             <p className="leading-relaxed">
-              <strong>Atenção:</strong> Este registro é interno para auditoria e conferência da equipe de prevenção. Ele <strong>não altera</strong> as quantidades da SMGOI013 e não realiza exclusão de produtos.
+              <strong>Atenção:</strong> Este registro é interno para auditoria e conferência da equipe de prevenção. Ele <strong>não altera</strong> as quantidades da BASE DO RUB e não realiza exclusão de produtos.
             </p>
           </div>
 

@@ -95,7 +95,7 @@ export const VincularEanModal: React.FC<VincularEanModalProps> = ({
     }
 
     if (!selectedProduto) {
-      setErrorMessage('Por favor, selecione a mercadoria da base SMGOI013 para vincular.');
+      setErrorMessage('Por favor, selecione a mercadoria da BASE DO RUB para vincular.');
       return;
     }
 
@@ -144,7 +144,7 @@ export const VincularEanModal: React.FC<VincularEanModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-black uppercase tracking-wider">Vincular Código EAN</h2>
-              <p className="text-[11px] text-slate-300 font-medium">Associe um código de barras (via câmera ou digitação) à base SMGOI013</p>
+              <p className="text-[11px] text-slate-300 font-medium">Associe um código de barras (via câmera ou digitação) à BASE DO RUB</p>
             </div>
           </div>
           <button
@@ -250,12 +250,12 @@ export const VincularEanModal: React.FC<VincularEanModalProps> = ({
             )}
           </div>
 
-          {/* 2. Seleção de Produto SMGOI013 */}
+          {/* 2. Seleção de Produto BASE DO RUB */}
           <div className="space-y-1.5">
             <label className="block text-[11px] font-black uppercase tracking-wider text-gray-700 flex items-center justify-between">
               <span className="flex items-center gap-1.5">
-                <Package className="w-3.5 h-3.5 text-blue-700" />
-                2. Selecionar Mercadoria SMGOI013
+                <Package className="w-3.5 h-3.5 text-orange-600" />
+                2. Selecionar Mercadoria (BASE DO RUB)
               </span>
               <span className="text-[10px] text-blue-700 font-bold">
                 {todosProdutos.length.toLocaleString('pt-BR')} produtos na base
@@ -358,7 +358,7 @@ export const VincularEanModal: React.FC<VincularEanModalProps> = ({
                 </div>
 
                 <div className="bg-white p-2.5 rounded-lg border border-blue-100">
-                  <span className="text-[10px] text-gray-500 uppercase block font-bold">Mercadoria SMGOI013</span>
+                  <span className="text-[10px] text-gray-500 uppercase block font-bold">Mercadoria (BASE DO RUB)</span>
                   <strong className="text-gray-900 font-mono text-xs block font-black">{selectedProduto.codigo_exibicao}</strong>
                   <span className="text-[10px] text-gray-600 truncate block font-bold uppercase">{selectedProduto.descricao}</span>
                 </div>

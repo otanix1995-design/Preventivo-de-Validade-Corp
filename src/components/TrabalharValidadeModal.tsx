@@ -260,7 +260,7 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
                 </span>
               </div>
               <p className="text-xs text-blue-100 line-clamp-1 mt-0.5">
-                {produto?.descricao || registro.descricao || 'Produto do Cadastro SMGOI013'}
+                {produto?.descricao || registro.descricao || 'Produto da BASE DO RUB'}
               </p>
             </div>
           </div>
@@ -310,14 +310,14 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
           <div className="space-y-2.5">
             <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
               <Package className="w-3.5 h-3.5 text-blue-600" />
-              <span>1. Dados Oficiais do Produto (SMGOI013)</span>
+              <span>1. Dados Oficiais do Produto (BASE DO RUB)</span>
             </div>
 
             <div className="bg-slate-50 rounded-xl p-4 border border-slate-200 space-y-3 text-xs">
               <div>
                 <span className="text-slate-500 font-medium">Descrição da Mercadoria:</span>
                 <p className="text-sm font-bold text-slate-900 mt-0.5">
-                  {produto?.descricao || registro.descricao || 'DESCRIÇÃO NÃO ENCONTRADA NA SMGOI013'}
+                  {produto?.descricao || registro.descricao || 'DESCRIÇÃO NÃO ENCONTRADA NA BASE DO RUB'}
                 </p>
               </div>
 
@@ -362,11 +362,11 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
             </div>
           </div>
 
-          {/* SEÇÃO 2: INFORMAÇÕES OPERACIONAIS SMGOI013 */}
+          {/* SEÇÃO 2: INFORMAÇÕES OPERACIONAIS BASE DO RUB */}
           <div className="space-y-2.5">
             <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
               <Store className="w-3.5 h-3.5 text-blue-600" />
-              <span>2. Informações Operacionais da Loja (SMGOI013)</span>
+              <span>2. Informações Operacionais da Loja (BASE DO RUB)</span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">

@@ -398,7 +398,7 @@ export const LimparDadosAntigosModal: React.FC<LimparDadosAntigosModalProps> = (
                         </span>
                       </div>
                       <p className="text-[11px] text-gray-500 mt-0.5 font-medium">
-                        Remove códigos de barras importados sem mercadoria correspondente na SMGOI013.
+                        Remove códigos de barras importados sem mercadoria correspondente na BASE DO RUB.
                       </p>
                     </div>
                   </label>

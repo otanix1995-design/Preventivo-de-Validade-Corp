@@ -29,7 +29,6 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { formatarMoedaBR } from '../services/deviceId';
-import { processarSMGOI013 } from '../services/excelParser';
 import { gerarRelatorioIsvA3Pdf } from '../services/isvPdfService';
 import { isvService } from '../services/isvService';
 import { productRepository } from '../services/productRepository';
@@ -52,6 +51,7 @@ interface IsvViewProps {
   onSelectProduto?: (produto: ProdutoSMG) => void;
   onOpenCadastrarModal?: (produto: ProdutoSMG) => void;
   onBack?: () => void;
+  onNavigateToImportacao?: () => void;
 }
 
 export const IsvView: React.FC<IsvViewProps> = ({
@@ -59,6 +59,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
   onSelectProduto,
   onOpenCadastrarModal,
   onBack,
+  onNavigateToImportacao,
 }) => {
   const [subAba, setSubAba] = useState<'geral' | 'ajustes' | 'ocorrencias'>('geral');
   const [industrias, setIndustrias] = useState<Industria[]>([]);
@@ -85,33 +86,6 @@ export const IsvView: React.FC<IsvViewProps> = ({
   const [isProcessandoArquivo, setIsProcessandoArquivo] = useState(false);
   const [mensagemProgresso, setMensagemProgresso] = useState('');
 
-  const handleImportarSmgoi013Direto = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsProcessandoArquivo(true);
-    setMensagemProgresso('Iniciando processamento da SMGOI013...');
-
-    try {
-      const res = await processarSMGOI013(file, (pct, msg) => {
-        setMensagemProgresso(`${pct}% - ${msg}`);
-      });
-      alert(
-        `Importação da SMGOI013 concluída com sucesso!\n\n` +
-        `Total de produtos: ${res.total_lidos}\n` +
-        `Atualizados: ${res.total_atualizados}\n` +
-        `Novos: ${res.total_novos}\n\n` +
-        `O Custo Médio e Estoque Convertido foram recalculados e persistidos no IndexedDB.`
-      );
-    } catch (err: any) {
-      console.error('Erro na importação direta da SMGOI013:', err);
-      alert(`Falha ao importar planilha: ${err.message || 'Formato inválido ou corrompido'}`);
-    } finally {
-      setIsProcessandoArquivo(false);
-      setMensagemProgresso('');
-      e.target.value = '';
-    }
-  };
 
   const handleRestaurarBaseReferencia = async () => {
     const confirmar = window.confirm(
@@ -913,11 +887,11 @@ export const IsvView: React.FC<IsvViewProps> = ({
           </div>
 
           {/* Banner Resumo Financeiro Oficial do Conjunto Filtrado */}
-          <div className="bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 text-white rounded-xl p-4 border border-blue-900/60 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="bg-gradient-to-r from-slate-900 via-orange-950 to-slate-900 text-white rounded-xl p-4 border border-orange-900/60 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-1">
               <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-[10px] font-black uppercase tracking-wider text-blue-300 bg-blue-900/60 px-2 py-0.5 rounded border border-blue-700/50">
-                  Classificação Financeira SMGOI013
+                <span className="text-[10px] font-black uppercase tracking-wider text-orange-200 bg-orange-900/60 px-2 py-0.5 rounded border border-orange-700/50">
+                  CLASSIFICAÇÃO FINANCEIRA — BASE DO RUB
                 </span>
                 <span className="text-xs text-slate-400 font-mono">
                   {itensFiltrados.length} {itensFiltrados.length === 1 ? 'produto filtrado' : 'produtos filtrados'}
@@ -933,13 +907,13 @@ export const IsvView: React.FC<IsvViewProps> = ({
 
             <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
               <div className="bg-white/10 px-3 py-1.5 rounded-lg border border-white/10 text-xs">
-                <span className="text-slate-400 text-[10px] block uppercase font-bold">Com Custo Médio</span>
+                <span className="text-slate-400 text-[10px] block uppercase font-bold">Com Valor Disponível</span>
                 <span className="text-white font-mono font-black">{qtdComValor}</span>
                 <span className="text-slate-400 text-[10px] ml-1">itens</span>
               </div>
               {qtdSemValor > 0 && (
                 <div className="bg-amber-500/15 px-3 py-1.5 rounded-lg border border-amber-500/30 text-xs text-amber-200">
-                  <span className="text-amber-300 text-[10px] block uppercase font-bold">Sem Custo</span>
+                  <span className="text-amber-300 text-[10px] block uppercase font-bold">Sem Valor Oficial</span>
                   <span className="text-white font-mono font-black">{qtdSemValor}</span>
                   <span className="text-amber-300 text-[10px] ml-1">indisponíveis</span>
                 </div>
@@ -947,7 +921,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
               <button
                 type="button"
                 onClick={() => setIsModalAuditoriaOpen(true)}
-                className="px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-black text-xs flex items-center gap-1.5 transition-colors shadow-xs"
+                className="px-3 py-2 rounded-lg bg-orange-600 hover:bg-orange-500 text-white font-black text-xs flex items-center gap-1.5 transition-colors shadow-xs"
                 title="Auditar integridade de custo, estoque e cálculo financeiro do catálogo"
               >
                 <Search className="w-3.5 h-3.5" />
@@ -958,11 +932,11 @@ export const IsvView: React.FC<IsvViewProps> = ({
 
           {/* Alerta de Carregamento / Processamento de Planilha */}
           {isProcessandoArquivo && (
-            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex items-center gap-3 text-blue-900 animate-pulse">
-              <RefreshCw className="w-5 h-5 text-blue-600 animate-spin shrink-0" />
+            <div className="bg-orange-50 border border-orange-200 rounded-xl p-4 flex items-center gap-3 text-orange-950 animate-pulse">
+              <RefreshCw className="w-5 h-5 text-orange-600 animate-spin shrink-0" />
               <div>
-                <span className="font-black text-xs uppercase tracking-wide block">Processando Catálogo SMGOI013...</span>
-                <span className="text-[11px] text-blue-700">{mensagemProgresso || 'Aguarde um momento...'}</span>
+                <span className="font-black text-xs uppercase tracking-wide block">Processando BASE DO RUB...</span>
+                <span className="text-[11px] text-orange-700">{mensagemProgresso || 'Aguarde um momento...'}</span>
               </div>
             </div>
           )}
@@ -977,29 +951,29 @@ export const IsvView: React.FC<IsvViewProps> = ({
                     Por que todos os {itensFiltrados.length} produtos exibem "VALOR INDISPONÍVEL"?
                   </p>
                   <p className="text-amber-900/90 text-[11px] leading-relaxed max-w-2xl">
-                    Os produtos atualmente carregados no navegador foram importados anteriormente, momento em que a coluna <strong>Custo Médio</strong> ainda não era persistida no banco local IndexedDB. Conforme a regra de proteção contra números fictícios, valores ausentes <strong>não</strong> são substituídos por estimativas.
+                    Os produtos atualmente carregados no navegador não possuem a coluna oficial <strong>Valor Disponível</strong> preenchida. Conforme a regra de proteção contra números fictícios, valores ausentes <strong>não</strong> são substituídos por estimativas.
                   </p>
                   <p className="text-amber-800 text-[11px] font-semibold">
-                    Para calcular o valor financeiro real (Estoque × Custo Médio), escolha uma das opções:
+                    Para carregar os valores oficiais da Filial 172:
                   </p>
                 </div>
               </div>
 
               <div className="flex items-center gap-2 shrink-0 flex-wrap w-full md:w-auto">
-                <label className="cursor-pointer px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs rounded-xl uppercase tracking-wider shadow-xs flex items-center gap-1.5 active:scale-95 transition-all">
-                  <FileSpreadsheet className="w-4 h-4" />
-                  <span>Atualizar Planilha SMGOI013</span>
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls,.csv"
-                    className="hidden"
-                    onChange={handleImportarSmgoi013Direto}
-                  />
-                </label>
+                {onNavigateToImportacao && (
+                  <button
+                    type="button"
+                    onClick={onNavigateToImportacao}
+                    className="px-3.5 py-2 bg-orange-600 hover:bg-orange-500 text-white font-black text-xs rounded-xl uppercase tracking-wider shadow-xs flex items-center gap-1.5 active:scale-95 transition-all"
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    <span>Importar BASE DO RUB</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={handleRestaurarBaseReferencia}
-                  className="px-3.5 py-2 bg-blue-700 hover:bg-blue-600 text-white font-black text-xs rounded-xl uppercase tracking-wider shadow-xs flex items-center gap-1.5 active:scale-95 transition-all"
+                  className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-white font-black text-xs rounded-xl uppercase tracking-wider shadow-xs flex items-center gap-1.5 active:scale-95 transition-all"
                   title="Carregar a base de referência oficial com os 5 produtos de teste"
                 >
                   <RefreshCw className="w-4 h-4" />
@@ -1012,17 +986,8 @@ export const IsvView: React.FC<IsvViewProps> = ({
           {qtdComValor > 0 && qtdSemValor > 0 && (
             <div className="bg-slate-100 border border-slate-200 rounded-xl px-3 py-2 text-[11px] text-slate-600 flex items-center justify-between gap-2">
               <span>
-                <strong>{qtdComValor}</strong> produtos com valor financeiro calculado. <strong>{qtdSemValor}</strong> produtos sem custo cadastrado na SMGOI013 exibem <em>VALOR INDISPONÍVEL</em> e ficam posicionados ao final da classificação.
+                <strong>{qtdComValor}</strong> produtos com valor financeiro oficial. <strong>{qtdSemValor}</strong> produtos sem valor na BASE DO RUB exibem <em>VALOR INDISPONÍVEL</em> e ficam posicionados ao final da classificação.
               </span>
-              <label className="cursor-pointer text-blue-700 hover:underline font-bold text-[10px] uppercase shrink-0">
-                Atualizar SMGOI013
-                <input
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={handleImportarSmgoi013Direto}
-                />
-              </label>
             </div>
           )}
 
@@ -1273,7 +1238,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                             ) : (
                               <span
                                 className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded border border-slate-200 inline-block"
-                                title="Custo médio não informado na planilha SMGOI013 para este item"
+                                title="Valor Disponível não informado na BASE DO RUB para este item"
                               >
                                 VALOR INDISPONÍVEL
                               </span>
@@ -1637,27 +1602,15 @@ export const IsvView: React.FC<IsvViewProps> = ({
                     className="w-full bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-xs font-mono font-bold text-slate-900 focus:outline-hidden focus:border-blue-600"
                   />
                 </div>
-                <div className="flex items-center gap-2 self-end sm:self-center">
-                  <label className="cursor-pointer px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs rounded-lg uppercase tracking-wider flex items-center gap-1 shadow-2xs">
-                    <FileSpreadsheet className="w-3.5 h-3.5" />
-                    <span>Upload SMGOI013</span>
-                    <input
-                      type="file"
-                      accept=".xlsx,.xls,.csv"
-                      className="hidden"
-                      onChange={handleImportarSmgoi013Direto}
-                    />
-                  </label>
                   <button
                     type="button"
                     onClick={handleRestaurarBaseReferencia}
-                    className="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white font-black text-xs rounded-lg uppercase tracking-wider flex items-center gap-1 shadow-2xs"
+                    className="px-3 py-1.5 bg-orange-600 hover:bg-orange-700 text-white font-black text-xs rounded-lg uppercase tracking-wider flex items-center gap-1 shadow-2xs"
                     title="Carregar base de teste com os 5 produtos de referência"
                   >
                     <RefreshCw className="w-3.5 h-3.5" />
                     <span>Carregar Demo</span>
                   </button>
-                </div>
               </div>
 
               {/* Tabela de Auditoria dos Códigos */}
@@ -1810,7 +1763,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                           <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-red-700 text-[11px] flex items-center gap-2">
                             <AlertTriangle className="w-4 h-4 shrink-0" />
                             <span>
-                              Este produto não consta no arquivo <strong>SMGOI013</strong> importado atualmente no navegador. O sistema não fabrica dados fictícios para produtos ausentes.
+                              Este produto não consta na <strong>BASE DO RUB</strong> importada atualmente no navegador. O sistema não fabrica dados fictícios para produtos ausentes.
                             </span>
                           </div>
                         )}
