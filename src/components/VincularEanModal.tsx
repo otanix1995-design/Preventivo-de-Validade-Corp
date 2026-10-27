@@ -321,8 +321,14 @@ export const VincularEanModal: React.FC<VincularEanModalProps> = ({
                       </div>
 
                       <div className="shrink-0 flex items-center gap-2">
-                        <span className="text-[10px] font-mono text-slate-500 font-bold">
-                          Est: {prod.estoque_total} UN
+                        <span className="text-[10px] font-mono text-slate-600 font-bold">
+                          Estoque: {prod.estoque_original_erp ||
+                            prod.estoque_disponivel_texto ||
+                            (prod.estoque_total !== undefined
+                              ? (Number.isInteger(prod.estoque_total)
+                                  ? String(prod.estoque_total)
+                                  : String(prod.estoque_total).replace('.', ','))
+                              : '-')}
                         </span>
                         {isSelected ? (
                           <div className="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center">

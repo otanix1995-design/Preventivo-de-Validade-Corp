@@ -371,15 +371,17 @@ export const TrabalharValidadeModal: React.FC<TrabalharValidadeModalProps> = ({
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
               <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
-                <span className="text-[11px] text-slate-500 font-medium">Estoque Atual</span>
-                <p className="text-base font-bold text-slate-900 mt-0.5">
-                  {produto?.estoque_total !== undefined ? produto.estoque_total : '-'} {produto?.unidade_medida || 'UN'}
+                <span className="text-[11px] text-slate-500 font-medium">Estoque (BASE RUB)</span>
+                <p className="text-base font-bold text-slate-900 mt-0.5 font-mono">
+                  {produto?.estoque_original_erp ||
+                    produto?.estoque_disponivel_texto ||
+                    (produto?.estoque_total !== undefined
+                      ? (Number.isInteger(produto.estoque_total)
+                          ? String(produto.estoque_total)
+                          : String(produto.estoque_total).replace('.', ','))
+                      : '-')}
                 </p>
-                {produto?.estoque_total !== undefined && fator > 1 && (
-                  <span className="text-[10px] text-slate-500">
-                    ≈ {(produto.estoque_total / fator).toFixed(1)} CXA
-                  </span>
-                )}
+                <span className="text-[10px] text-slate-400">Valor oficial BASE RUB</span>
               </div>
 
               <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">

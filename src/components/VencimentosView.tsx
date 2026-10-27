@@ -717,11 +717,17 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                       </div>
 
                       <div className="bg-gray-50 p-2.5 rounded-xl border border-gray-100">
-                        <span className="text-[11px] text-gray-500 font-medium">Estoque Atual:</span>
-                        <p className="font-bold text-gray-900 mt-0.5">
-                          {produto?.estoque_total !== undefined ? `${produto.estoque_total} ${produto.unidade_medida || 'UN'}` : '-'}
+                        <span className="text-[11px] text-gray-500 font-medium">Estoque (BASE RUB):</span>
+                        <p className="font-bold text-gray-900 mt-0.5 font-mono">
+                          {produto?.estoque_original_erp ||
+                            produto?.estoque_disponivel_texto ||
+                            (produto?.estoque_total !== undefined
+                              ? (Number.isInteger(produto.estoque_total)
+                                  ? String(produto.estoque_total)
+                                  : String(produto.estoque_total).replace('.', ','))
+                              : '-')}
                         </p>
-                        <span className="text-[10px] text-gray-400 block mt-0.5">Base do RUB</span>
+                        <span className="text-[10px] text-gray-400 block mt-0.5">Base RUB Oficial</span>
                       </div>
 
                       <div className="bg-gray-50 p-2.5 rounded-xl border border-gray-100">

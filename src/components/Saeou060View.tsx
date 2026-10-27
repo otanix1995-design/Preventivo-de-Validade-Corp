@@ -1256,13 +1256,19 @@ export const Saeou060View: React.FC<Saeou060ViewProps> = ({
                     </span>
                   </div>
 
-                  {/* Estoque Atual SMGOI013 */}
+                  {/* Estoque Atual BASE RUB */}
                   <div className="bg-slate-50/80 p-2.5 rounded-xl border border-slate-200/60">
-                    <span className="text-[11px] text-slate-500 font-medium block">Estoque Atual:</span>
-                    <p className="text-xs font-black text-slate-900 mt-0.5">
-                      {prod?.estoque_total !== undefined ? `${prod.estoque_total} ${prod.unidade_medida || 'UN'}` : '-'}
+                    <span className="text-[11px] text-slate-500 font-medium block">Estoque (BASE RUB):</span>
+                    <p className="text-xs font-black text-slate-900 mt-0.5 font-mono">
+                      {prod?.estoque_original_erp ||
+                        prod?.estoque_disponivel_texto ||
+                        (prod?.estoque_total !== undefined
+                          ? (Number.isInteger(prod.estoque_total)
+                              ? String(prod.estoque_total)
+                              : String(prod.estoque_total).replace('.', ','))
+                          : '-')}
                     </p>
-                    <span className="text-[10px] text-slate-400 block mt-0.5">Base do RUB</span>
+                    <span className="text-[10px] text-slate-400 block mt-0.5">Base RUB Oficial</span>
                   </div>
 
                   {/* Giro e Dias sem venda */}

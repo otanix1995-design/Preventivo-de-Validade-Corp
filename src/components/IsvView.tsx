@@ -1710,9 +1710,16 @@ export const IsvView: React.FC<IsvViewProps> = ({
                             </div>
 
                             <div className="bg-slate-50 p-2 rounded-lg border border-slate-100">
-                              <span className="text-slate-400 block text-[9px] uppercase font-bold">Estoque Convertido</span>
+                              <span className="text-slate-400 block text-[9px] uppercase font-bold">Estoque (BASE RUB)</span>
                               <span className="font-mono font-bold text-slate-800">
-                                {itemIsv?.estoque_formatado || `${prod.estoque_total} UN`}
+                                {itemIsv?.estoque_formatado ||
+                                  prod.estoque_original_erp ||
+                                  prod.estoque_disponivel_texto ||
+                                  (prod.estoque_total !== undefined
+                                    ? (Number.isInteger(prod.estoque_total)
+                                        ? String(prod.estoque_total)
+                                        : String(prod.estoque_total).replace('.', ','))
+                                    : '-')}
                               </span>
                             </div>
 

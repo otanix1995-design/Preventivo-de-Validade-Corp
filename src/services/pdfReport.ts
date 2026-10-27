@@ -15,6 +15,7 @@ export interface PreventivoItem {
   quantidadeCadastrada?: number; // Qtd do lote que está vencendo (apontada/cadastrada)
   emb1: number | string;
   emb9: number | string;
+  estoque_original?: string;
   vencimento: string; // DD/MM/YYYY or YYYY-MM-DD
   preco?: number | string | null;
   diasRestantes?: number;
@@ -109,61 +110,38 @@ export function formatarQtdCadastradaPdf(
 }
 
 /**
- * Formata os valores de estoque EMB1 e EMB9 em uma única string comercial legível.
- * - Produtos pesáveis (KG): EMB1 = Quilos, EMB9 = Gramas (ex: "158 KG + 795 G", "158 KG", "795 G")
- * - Produtos unitários/caixas: EMB1 = Caixas (CX), EMB9 = Unidades avulsas (UN) (ex: "5 CX + 10 UN", "79 CX + 1 UN", "5 CX", "10 UN")
- * - Omite componentes zerados/vazios
- * - Não soma caixas com unidades nem quilos com gramas
+ * Retorna a apresentação oficial do estoque para relatórios PDF:
+ * REGRA OBRIGATÓRIA DA BASE RUB:
+ * - Não converter estoque em caixas e unidades.
+ * - Não converter estoque em quilos e gramas.
+ * - Não utilizar embalagem comercial para calcular ou formatar o estoque.
+ * - Preservar o valor original da BASE RUB (ex: "158,795" ou "10").
  */
 export function formatarEstoquePdf(
   emb1Raw: number | string | undefined | null,
-  emb9Raw: number | string | undefined | null,
+  emb9Raw?: number | string | undefined | null,
   embalagem?: string | null,
-  unidadeMedida?: string | null
+  unidadeMedida?: string | null,
+  estoqueOriginal?: string | null
 ): string {
-  const parseNum = (val: number | string | undefined | null): number => {
-    if (val === null || val === undefined || val === '') return 0;
-    if (typeof val === 'number') return isNaN(val) ? 0 : Math.round(val);
-    const clean = String(val).trim().replace(',', '.');
-    const n = parseFloat(clean);
-    return isNaN(n) ? 0 : Math.round(n);
-  };
-
-  const numEmb1 = parseNum(emb1Raw);
-  const numEmb9 = parseNum(emb9Raw);
-
-  const isPeso =
-    (unidadeMedida && unidadeMedida.trim().toUpperCase() === 'KG') ||
-    isProdutoPesavel(embalagem) ||
-    /^(KG|QUILO|KILO|PESAVEL|PESO)\b/i.test((embalagem || '').trim());
-
-  if (isPeso) {
-    // CASO 2: PRODUTOS CONTROLADOS EM QUILOS E GRAMAS
-    const parts: string[] = [];
-    if (numEmb1 !== 0) {
-      parts.push(`${numEmb1} KG`);
-    }
-    if (numEmb9 !== 0) {
-      parts.push(`${numEmb9} G`);
-    }
-    if (parts.length === 0) {
-      return '0 KG';
-    }
-    return parts.join(' + ');
-  } else {
-    // CASO 1: PRODUTOS CONTROLADOS EM CAIXAS E UNIDADES (CX + UN)
-    const parts: string[] = [];
-    if (numEmb1 !== 0) {
-      parts.push(`${numEmb1} CX`);
-    }
-    if (numEmb9 !== 0) {
-      parts.push(`${numEmb9} UN`);
-    }
-    if (parts.length === 0) {
-      return '0';
-    }
-    return parts.join(' + ');
+  if (estoqueOriginal && estoqueOriginal.trim() !== '' && estoqueOriginal !== '-') {
+    return estoqueOriginal.trim();
   }
+
+  if (emb1Raw === null || emb1Raw === undefined || emb1Raw === '') {
+    return '0';
+  }
+
+  if (typeof emb1Raw === 'string') {
+    const s = emb1Raw.trim();
+    return s || '0';
+  }
+
+  if (typeof emb1Raw === 'number') {
+    return Number.isInteger(emb1Raw) ? String(emb1Raw) : String(emb1Raw).replace('.', ',');
+  }
+
+  return '0';
 }
 
 /**
@@ -241,6 +219,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
             linkedLote?.enviar_ao_comprador || linkedLote?.status_customizado === 'ENVIAR_AO_COMPRADOR'
           );
 
+          const estoqueOriginal = prod?.estoque_original_erp || prod?.estoque_disponivel_texto;
+
           return {
             codigo: reg.codigo_interno,
             digito: reg.digito || prod?.digito || '',
@@ -248,8 +228,9 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
             embalagem: reg.embalagem || prod?.embalagem || 'UN',
             comprador: compradorStr,
             quantidadeCadastrada: reg.quantidade,
-            emb1: prod?.estoque_emb1 ?? 0,
-            emb9: prod?.estoque_emb9 ?? 0,
+            emb1: estoqueOriginal || prod?.estoque_total || prod?.estoque_emb1 || 0,
+            emb9: 0,
+            estoque_original: estoqueOriginal,
             vencimento: formatarDataBR(reg.data_vencimento),
             preco: reg.preco_trabalhado || prod?.vendas_preco || null,
             diasRestantes: diasRest,
@@ -272,6 +253,7 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
         const isEnviarComprador = Boolean(
           lote.enviar_ao_comprador || lote.status_customizado === 'ENVIAR_AO_COMPRADOR'
         );
+        const estoqueOriginal = prod?.estoque_original_erp || prod?.estoque_disponivel_texto;
 
         return {
           codigo: lote.codigo_interno,
@@ -280,8 +262,9 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
           embalagem: lote.embalagem || prod?.embalagem || 'UN',
           comprador: compradorStr,
           quantidadeCadastrada: lote.quantidade_total_unidades,
-          emb1: prod?.estoque_emb1 ?? 0,
-          emb9: prod?.estoque_emb9 ?? 0,
+          emb1: estoqueOriginal || prod?.estoque_total || prod?.estoque_emb1 || 0,
+          emb9: 0,
+          estoque_original: estoqueOriginal,
           vencimento: formatarDataBR(lote.data_validade),
           preco: lote.preco_trabalhado || prod?.vendas_preco || null,
           diasRestantes: diasRest,
@@ -358,8 +341,8 @@ export function gerarPdfPreventivo(options: PreventivoPdfOptions = {}) {
         ? formatarQtdCadastradaPdf(it.quantidadeCadastrada, it.embalagem, it.unidade_medida)
         : '-';
 
-    // 2. Estoque completo da loja (base SMGOI013 / EMB1 + EMB9)
-    const estoqueCompletoFormatado = formatarEstoquePdf(it.emb1, it.emb9, it.embalagem, it.unidade_medida);
+    // 2. Estoque completo da loja (BASE RUB oficial soberana)
+    const estoqueCompletoFormatado = it.estoque_original || formatarEstoquePdf(it.emb1, it.emb9, it.embalagem, it.unidade_medida, it.estoque_original);
 
     // Produto crítico: "CRÍTICO" (com ícone triangular vetorizado desenhado via didDrawCell)
     // Produto normal: vazio para manter o relatório limpo

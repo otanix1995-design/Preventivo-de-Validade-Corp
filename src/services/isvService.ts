@@ -1018,61 +1018,33 @@ class IsvService {
   // ==========================================
 
   /**
-   * Formata a quantidade em estoque no padrão operacional:
-   * - CX/UN: "10 CX + 4 UN" ou "14 UN"
-   * - KG/G: "12 KG + 500 G" ou "500 G"
+   * Retorna a apresentação oficial do estoque conforme a BASE RUB:
+   * REGRA OBRIGATÓRIA:
+   * - Não converter estoque em caixas e unidades.
+   * - Não converter estoque em quilos e gramas.
+   * - Não utilizar a embalagem comercial para calcular ou formatar o estoque.
+   * - Não decompor quantidades em múltiplas unidades.
+   * - Não aplicar fórmulas de conversão de estoque.
+   * - Preservar o valor soberano original fornecido pela BASE RUB (ex: "158,795" ou "10").
    */
   public formatarEstoqueIsv(produto: ProdutoSMG): string {
-    const isPeso =
-      (produto.unidade_medida && produto.unidade_medida.toUpperCase() === 'KG') ||
-      isProdutoPesavel(produto.embalagem);
-
-    const est = produto.estoque_total || 0;
-    if (est <= 0) return isPeso ? '0 KG' : '0 UN';
-
-    if (isPeso) {
-      const kg =
-        produto.estoque_emb1 !== undefined && produto.estoque_emb1 > 0
-          ? Math.floor(produto.estoque_emb1)
-          : Math.floor(est);
-      const gramas =
-        produto.estoque_emb9 !== undefined && produto.estoque_emb9 > 0
-          ? Math.round(produto.estoque_emb9)
-          : Math.round((est - Math.floor(est)) * 1000);
-
-      const parts: string[] = [];
-      if (kg > 0) parts.push(`${kg} KG`);
-      if (gramas > 0) parts.push(`${gramas} G`);
-      if (parts.length === 0) return '0 KG';
-      return parts.join(' + ');
+    if (produto.estoque_original_erp && produto.estoque_original_erp !== '-' && produto.estoque_original_erp.trim() !== '') {
+      return produto.estoque_original_erp.trim();
     }
-
-    const embData = parseEmbalagem(produto.embalagem || '');
-    const fator =
-      produto.fator_embalagem && produto.fator_embalagem > 1
-        ? produto.fator_embalagem
-        : embData.fator && embData.fator > 1
-        ? embData.fator
-        : 1;
-
-    if (fator > 1) {
-      const cx =
-        produto.estoque_emb1 !== undefined && produto.estoque_emb1 > 0
-          ? produto.estoque_emb1
-          : Math.floor(est / fator);
-      const un =
-        produto.estoque_emb9 !== undefined && produto.estoque_emb9 > 0
-          ? produto.estoque_emb9
-          : est % fator;
-
-      const parts: string[] = [];
-      if (cx > 0) parts.push(`${cx} CX`);
-      if (un > 0) parts.push(`${un} UN`);
-      if (parts.length === 0) return '0 UN';
-      return parts.join(' + ');
+    if (produto.estoque_disponivel_texto && produto.estoque_disponivel_texto !== '-' && produto.estoque_disponivel_texto.trim() !== '') {
+      return produto.estoque_disponivel_texto.trim();
     }
-
-    return `${est} UN`;
+    if (produto.dados_operacionais?.estoque_original_texto && produto.dados_operacionais.estoque_original_texto !== '-') {
+      return produto.dados_operacionais.estoque_original_texto.trim();
+    }
+    if (produto.dados_operacionais?.estoque_formatado_extenso && produto.dados_operacionais.estoque_formatado_extenso !== '-') {
+      return produto.dados_operacionais.estoque_formatado_extenso.trim();
+    }
+    if (produto.estoque_total !== undefined && produto.estoque_total !== null) {
+      const val = produto.estoque_total;
+      return Number.isInteger(val) ? String(val) : String(val).replace('.', ',');
+    }
+    return '0';
   }
 
   /**
@@ -1252,7 +1224,16 @@ class IsvService {
           p?.embalagem || reg.complemento || 'UN'
         );
 
-        // Enriquecer produto preservando dados completos da SMGOI013
+        // Enriquecer produto preservando dados completos da BASE RUB
+        const estoqueApresentacao =
+          reg.estoque_original_texto && reg.estoque_original_texto !== '-'
+            ? reg.estoque_original_texto
+            : reg.estoque_formatado_extenso && reg.estoque_formatado_extenso !== '-'
+            ? reg.estoque_formatado_extenso
+            : reg.estoque !== undefined
+            ? (Number.isInteger(reg.estoque) ? String(reg.estoque) : String(reg.estoque).replace('.', ','))
+            : '0';
+
         const prodItem: ProdutoSMG = p
           ? {
               ...p,
@@ -1261,9 +1242,12 @@ class IsvService {
               embalagem_divergente: embRes.divergente,
               embalagens_divergentes: embRes.embalagensDistintas,
               estoque_total: reg.estoque,
+              estoque_original_erp: estoqueApresentacao,
+              estoque_disponivel_texto: estoqueApresentacao,
               dias_sem_venda: reg.dias_sem_venda,
               idade: reg.idade,
               valor_estoque_planilha: reg.valor_disponivel !== null ? reg.valor_disponivel : undefined,
+              dados_operacionais: reg,
             }
           : {
               id: reg.codigo_interno,
@@ -1281,15 +1265,18 @@ class IsvService {
               estoque_emb1: reg.estoque,
               estoque_emb9: 0,
               estoque_total: reg.estoque,
+              estoque_original_erp: estoqueApresentacao,
+              estoque_disponivel_texto: estoqueApresentacao,
               vendas_qtde_30d: 0,
               dias_sem_venda: reg.dias_sem_venda,
               idade: reg.idade,
               valor_estoque_planilha: reg.valor_disponivel !== null ? reg.valor_disponivel : undefined,
               eans: [],
+              dados_operacionais: reg,
               atualizado_em: new Date().toISOString(),
             };
 
-        const estoqueFormatado = this.formatarEstoqueIsv(prodItem);
+        const estoqueFormatado = estoqueApresentacao;
         const valorEstoque = reg.valor_disponivel;
         const valorEstoqueFormatado =
           valorEstoque !== null ? formatarMoedaBR(valorEstoque) : 'VALOR INDISPONÍVEL';

@@ -10,7 +10,6 @@ import {
   X
 } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { formatarEstoquePdf } from '../services/pdfReport';
 import { productRepository } from '../services/productRepository';
 import { findProdutoByCodeOrEan, searchProdutos } from '../services/storage';
 import { ProdutoSMG } from '../types';
@@ -230,12 +229,14 @@ export const SelecionarProdutoCadastroModal: React.FC<SelecionarProdutoCadastroM
                 <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
                   {searchResults.map((prod) => {
                     const isExact = exactMatch?.codigo_interno === prod.codigo_interno;
-                    const estoqueTexto = formatarEstoquePdf(
-                      prod.estoque_emb1,
-                      prod.estoque_emb9,
-                      prod.embalagem,
-                      prod.unidade_medida
-                    );
+                    const estoqueTexto =
+                      prod.estoque_original_erp ||
+                      prod.estoque_disponivel_texto ||
+                      (prod.estoque_total !== undefined
+                        ? (Number.isInteger(prod.estoque_total)
+                            ? String(prod.estoque_total)
+                            : String(prod.estoque_total).replace('.', ','))
+                        : '-');
 
                     return (
                       <div

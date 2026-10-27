@@ -89,12 +89,14 @@ export function parseValorDisponivelOficial(val: any): ResultadoParseValorDispon
 }
 
 /**
- * Converte e formata o campo de estoque operacional para a apresentação unificada exigida:
- * - 10 CXA (240) + 10 → 10 CAIXAS + 10 UNIDADES
- * - 285 CXA (24) + 14 → 285 CAIXAS + 14 UNIDADES
- * - 249 BDJ (6) + 2 → 249 BANDEJAS + 2 UNIDADES
- * - 714 KG + 882 G → 714 KG + 882 G
- * - 242 UND → 242 UNIDADES
+ * Preserva o campo de estoque operacional original da BASE RUB:
+ * REGRA OBRIGATÓRIA DA BASE RUB:
+ * - Não converter estoque em caixas e unidades.
+ * - Não converter estoque em quilos e gramas.
+ * - Não utilizar embalagem comercial para calcular ou formatar o estoque.
+ * - Não decompor quantidades em múltiplas unidades.
+ * - Não arredondar ou alterar o valor original.
+ * - Preservar o valor conforme fornecido pela BASE RUB (ex: "158,795" ou "10").
  */
 export function formatarEstoqueOperacionalExtenso(raw: any): {
   textoExtenso: string;
@@ -103,110 +105,52 @@ export function formatarEstoqueOperacionalExtenso(raw: any): {
 } {
   if (raw === undefined || raw === null || raw === '') {
     return {
-      textoExtenso: '0 UNIDADES',
-      textoOriginal: '-',
+      textoExtenso: '0',
+      textoOriginal: '0',
       quantidadeNumerica: 0,
     };
   }
 
+  // Se já for numérico puro (vindo diretamente do parser de planilhas)
+  if (typeof raw === 'number') {
+    const num = isNaN(raw) ? 0 : raw;
+    const str = Number.isInteger(num) ? String(num) : String(num).replace('.', ',');
+    return {
+      textoExtenso: str,
+      textoOriginal: str,
+      quantidadeNumerica: num,
+    };
+  }
+
   const str = String(raw).trim();
+  if (!str || str === '-') {
+    return {
+      textoExtenso: str || '0',
+      textoOriginal: str || '0',
+      quantidadeNumerica: 0,
+    };
+  }
+
+  // Preservação estrita do texto original da BASE RUB para exibição
   const textoOriginal = str;
+  const textoExtenso = str;
 
-  // 1. Padrão Caixa com fator e resto (ex: 10 CXA (240) + 10 ou 285 CXA (24) + 14 ou 5 CX + 2)
-  const matchCx = str.match(/^(\d+)\s*(?:CXA|CX|CAIXAS?)(?:\s*\(\s*(\d+)\s*\))?\s*\+\s*(\d+)(?:\s*(?:UN|UND|UNIDADES?))?/i);
-  if (matchCx) {
-    const cx = parseInt(matchCx[1], 10);
-    const un = parseInt(matchCx[3], 10);
-    const cxNome = cx === 1 ? '1 CAIXA' : `${cx} CAIXAS`;
-    const unNome = un === 1 ? '1 UNIDADE' : `${un} UNIDADES`;
-    const totalCalc = matchCx[2] ? parseInt(matchCx[2], 10) + un : cx * 24 + un;
-    return {
-      textoExtenso: `${cxNome} + ${unNome}`,
-      textoOriginal,
-      quantidadeNumerica: totalCalc,
-    };
+  // Extração estritamente interna da quantidade numérica para cálculos/filtros (sem modificar a exibição)
+  let quantidadeNumerica = 0;
+  const cleanForNum = str.replace(/\s+/g, '');
+  if (/^-?\d+(?:[.,]\d+)?$/.test(cleanForNum)) {
+    quantidadeNumerica = parseFloat(cleanForNum.replace(',', '.'));
+  } else {
+    const match = cleanForNum.match(/-?\d+(?:[.,]\d+)?/);
+    if (match) {
+      quantidadeNumerica = parseFloat(match[0].replace(',', '.'));
+    }
   }
 
-  // 2. Padrão Bandeja (ex: 249 BDJ (6) + 2)
-  const matchBdj = str.match(/^(\d+)\s*(?:BDJ|BANDEJAS?)(?:\s*\(\s*(\d+)\s*\))?\s*\+\s*(\d+)/i);
-  if (matchBdj) {
-    const bdj = parseInt(matchBdj[1], 10);
-    const un = parseInt(matchBdj[3], 10);
-    const bdjNome = bdj === 1 ? '1 BANDEJA' : `${bdj} BANDEJAS`;
-    const unNome = un === 1 ? '1 UNIDADE' : `${un} UNIDADES`;
-    return {
-      textoExtenso: `${bdjNome} + ${unNome}`,
-      textoOriginal,
-      quantidadeNumerica: bdj * 6 + un,
-    };
-  }
-
-  // 3. Padrão Fardo (ex: 5 FD (100) + 2)
-  const matchFd = str.match(/^(\d+)\s*(?:FD|FARDOS?)(?:\s*\(\s*(\d+)\s*\))?\s*\+\s*(\d+)/i);
-  if (matchFd) {
-    const fd = parseInt(matchFd[1], 10);
-    const un = parseInt(matchFd[3], 10);
-    const fdNome = fd === 1 ? '1 FARDO' : `${fd} FARDOS`;
-    const unNome = un === 1 ? '1 UNIDADE' : `${un} UNIDADES`;
-    return {
-      textoExtenso: `${fdNome} + ${unNome}`,
-      textoOriginal,
-      quantidadeNumerica: fd * 12 + un,
-    };
-  }
-
-  // 4. Padrão Quilo e Gramas (ex: 714 KG + 882 G)
-  const matchKgG = str.match(/^(\d+)\s*(?:KG|QUILOS?)\s*\+\s*(\d+)\s*(?:G|GRAMAS?)?/i);
-  if (matchKgG) {
-    const kg = parseInt(matchKgG[1], 10);
-    const g = parseInt(matchKgG[2], 10);
-    return {
-      textoExtenso: `${kg} KG + ${g} G`,
-      textoOriginal,
-      quantidadeNumerica: Number(`${kg}.${g}`),
-    };
-  }
-
-  // 5. Padrão Unidade avulsa explícita (ex: 242 UND ou 242 UN)
-  const matchUnd = str.match(/^(\d+)\s*(?:UND|UN|UNIDADES?)$/i);
-  if (matchUnd) {
-    const un = parseInt(matchUnd[1], 10);
-    const unNome = un === 1 ? '1 UNIDADE' : `${un} UNIDADES`;
-    return {
-      textoExtenso: unNome,
-      textoOriginal,
-      quantidadeNumerica: un,
-    };
-  }
-
-  // 6. Número decimal (ex: 714.882 ou 714,882)
-  if (/^\d+[.,]\d+$/.test(str.replace(/\s/g, ''))) {
-    const num = parseFloat(str.replace(',', '.'));
-    const kg = Math.floor(num);
-    const g = Math.round((num - kg) * 1000);
-    return {
-      textoExtenso: `${kg} KG + ${g} G`,
-      textoOriginal,
-      quantidadeNumerica: num,
-    };
-  }
-
-  // 7. Número inteiro puro (ex: 242)
-  if (/^\d+$/.test(str.replace(/\s/g, ''))) {
-    const num = parseInt(str, 10);
-    const unNome = num === 1 ? '1 UNIDADE' : `${num} UNIDADES`;
-    return {
-      textoExtenso: unNome,
-      textoOriginal,
-      quantidadeNumerica: num,
-    };
-  }
-
-  // Fallback geral
   return {
-    textoExtenso: str.toUpperCase(),
+    textoExtenso,
     textoOriginal,
-    quantidadeNumerica: parseFloat(str.replace(/[^\d.,]/g, '').replace(',', '.')) || 0,
+    quantidadeNumerica: isNaN(quantidadeNumerica) ? 0 : quantidadeNumerica,
   };
 }
 
@@ -934,6 +878,15 @@ export function converterRegistroRubParaProduto(
   eans: string[] = []
 ): ProdutoSMG {
   const setorOp = extrairSetorOperacionalIsv(reg.nome || reg.complemento || '');
+  const estoqueOriginalApresentacao =
+    reg.estoque_original_texto && reg.estoque_original_texto !== '-'
+      ? reg.estoque_original_texto
+      : reg.estoque_formatado_extenso && reg.estoque_formatado_extenso !== '-'
+      ? reg.estoque_formatado_extenso
+      : reg.estoque !== undefined
+      ? (Number.isInteger(reg.estoque) ? String(reg.estoque) : String(reg.estoque).replace('.', ','))
+      : '0';
+
   return {
     id: reg.codigo_interno,
     codigo_original: reg.codigo_original || reg.codigo_interno,
@@ -959,8 +912,8 @@ export function converterRegistroRubParaProduto(
     eans: eans,
     setor_operacional: setorOp,
     dados_operacionais: reg,
-    estoque_disponivel_texto: reg.estoque_formatado_extenso,
-    estoque_original_erp: reg.estoque_original_texto,
+    estoque_disponivel_texto: estoqueOriginalApresentacao,
+    estoque_original_erp: estoqueOriginalApresentacao,
     valor_indisponivel: reg.valor_indisponivel,
     bloqueio: reg.bloqueio,
     transito_entrada: reg.transito_entrada,
@@ -991,12 +944,12 @@ export const gerarExemploBaseRub = gerarExemploPlanilhaISV;
 
 /**
  * Gera um arquivo modelo .XLSX com todas as 36 colunas oficiais na ordem exata do ERP.
- * Inclui os produtos reais de teste obrigatório da Filial 172:
- * - 16337-160 CONFEITO M M TUBE: R$ 890,09 (242 UND)
- * - 17231-110 CHOC. NESTLÉ SUFLAIR: R$ 10.533,29 (45 CXA (24) + 0)
- * - 85327-177 AC. BOV. BUCHO: R$ 16.168,49 (714 KG + 882 G)
- * - 7922-130 REF. SUKITA LARANJA PET: R$ 8.521,55 (200 CXA (6) + 0)
- * - 84282-160 DET.LIQ.VIDA LIMAO: R$ 8.436,20 (150 CXA (24) + 0)
+ * Inclui os produtos reais da BASE RUB da Filial 172 com valores originais de estoque:
+ * - 16337-160 CONFEITO M M TUBE: R$ 890,09 (242)
+ * - 17231-110 CHOC. NESTLÉ SUFLAIR: R$ 10.533,29 (45)
+ * - 85327-177 AC. BOV. BUCHO: R$ 16.168,49 (714,882)
+ * - 7922-130 REF. SUKITA LARANJA PET: R$ 8.521,55 (200)
+ * - 84282-160 DET.LIQ.VIDA LIMAO: R$ 8.436,20 (150)
  */
 export function gerarExemploPlanilhaISV(): void {
   const cabecalhos = [
@@ -1041,7 +994,7 @@ export function gerarExemploPlanilhaISV(): void {
   const linhasExemplo = [
     [
       '85327', '177', 'AC. BOV. BUCHO RESERVA CONG MAE', 'KG 1 X 1', 16168.49,
-      '714 KG + 882 G', 0, 'NÃO', 0, 0, 22, '10/08/2026', '14:25', '28/07/2026', '09:15',
+      '714,882', 0, 'NÃO', 0, 0, 22, '10/08/2026', '14:25', '28/07/2026', '09:15',
       'CARNES BOVINAS', 'ACOUGUE', 60, '0', 180, '03 - CARNES',
       '30/11/2026', '15/12/2026', 'CADEIA FRIA', 'ACOUGUE', 'PERECIVEIS',
       '03.555.444/0001-33 BRF S.A.', 'SIM', 'SIM', '0', 'SIM',
@@ -1049,7 +1002,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '16337', '160', 'CONFEITO M M TUBE', 'CXA 24 X 12 X 30G', 890.09,
-      '242 UND', 0, 'NÃO', 0, 0, 45, '15/07/2026', '16:40', '10/06/2026', '11:00',
+      '242', 0, 'NÃO', 0, 0, 45, '15/07/2026', '16:40', '10/06/2026', '11:00',
       'CONFEITOS & CHOCOLATES', 'MERCEARIA DOCE', 120, '0', 36, '02 - MERCEARIA',
       '28/02/2027', '15/03/2027', 'MERCEARIA', 'MERCEARIA DOCE', 'SECOS',
       '02.987.654/0001-22 NESTLE BRASIL LTDA', 'SIM', 'SIM', '0', 'NÃO',
@@ -1057,7 +1010,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '17231', '110', 'CHOC. NESTLÉ SUFLAIR AO LEITE', 'CXA 1 X 24 X 50G', 10533.29,
-      '45 CXA (24) + 0', 0, 'NÃO', 0, 0, 38, '20/07/2026', '18:10', '18/06/2026', '14:30',
+      '45', 0, 'NÃO', 0, 0, 38, '20/07/2026', '18:10', '18/06/2026', '14:30',
       'CHOCOLATES TABLETES', 'MERCEARIA DOCE', 95, '0', 60, '02 - MERCEARIA',
       '30/01/2027', '15/02/2027', 'MERCEARIA', 'MERCEARIA DOCE', 'SECOS',
       '02.987.654/0001-22 NESTLE BRASIL LTDA', 'SIM', 'SIM', '0', 'NÃO',
@@ -1065,7 +1018,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '7922', '130', 'REF. SUKITA LARANJA PET', 'CXA 1 X 6', 8521.55,
-      '200 CXA (6) + 0', 0, 'NÃO', 0, 0, 30, '25/07/2026', '11:20', '02/07/2026', '10:00',
+      '200', 0, 'NÃO', 0, 0, 30, '25/07/2026', '11:20', '02/07/2026', '10:00',
       'REFRIGERANTES PET', 'BEBIDAS', 85, '0', 95, '06 - BEBIDAS',
       '15/12/2026', '30/12/2026', 'BEBIDAS', 'BEBIDAS', 'LIQUIDOS',
       '00.000.000/0001-91 AMBEV S/A', 'SIM', 'SIM', '0', 'NÃO',
@@ -1073,7 +1026,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '84282', '160', 'DET.LIQ.VIDA LIMAO', 'CXA 1 X 24', 8436.20,
-      '150 CXA (24) + 0', 0, 'NÃO', 0, 0, 42, '18/07/2026', '10:15', '20/06/2026', '15:45',
+      '150', 0, 'NÃO', 0, 0, 42, '18/07/2026', '10:15', '20/06/2026', '15:45',
       'DETERGENTES LIQUIDOS', 'LIMPEZA', 110, '0', 240, '05 - HIGIENE E LIMPEZA',
       '30/06/2028', '30/07/2028', 'LIMPEZA', 'LIMPEZA', 'QUIMICOS',
       '04.111.222/0001-44 VIDA QUIMICA LTDA', 'SIM', 'SIM', '0', 'NÃO',
@@ -1081,7 +1034,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '60662', '120', 'CHOCOLATE CHARGE NESTLE', 'CXA 1 X 30', 2145.80,
-      '24 CXA (24) + 5', 0, 'NÃO', 0, 0, 28, '02/08/2026', '17:05', '12/07/2026', '13:20',
+      '24', 0, 'NÃO', 0, 0, 28, '02/08/2026', '17:05', '12/07/2026', '13:20',
       'BOMBONS & BARRAS', 'MERCEARIA DOCE', 70, '0', 85, '02 - MERCEARIA',
       '15/04/2027', '30/04/2027', 'MERCEARIA', 'MERCEARIA DOCE', 'SECOS',
       '02.987.654/0001-22 NESTLE BRASIL LTDA', 'SIM', 'SIM', '0', 'NÃO',
@@ -1089,7 +1042,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '43708', '134', 'SACOLA PLAST EXTRUSA PACK 30X40', 'FD 1 X 1000', 3420.50,
-      '45 FD (1000) + 0', 0, 'NÃO', 0, 0, 65, '12/06/2026', '09:50', '15/05/2026', '11:10',
+      '45', 0, 'NÃO', 0, 0, 65, '12/06/2026', '09:50', '15/05/2026', '11:10',
       'DESCARTAVEIS & EMBALAGENS', 'UTILIDADES', 180, '0', 12, '09 - BAZAR',
       '31/12/2030', '31/12/2030', 'BAZAR', 'BAZAR', 'NAO PERECIVEIS',
       '05.666.777/0001-88 EXTRUSA PACK IND LTDA', 'SIM', 'SIM', '0', 'NÃO',
@@ -1097,7 +1050,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '11285', '151', 'RF.IOG.DANONE 5X ZERO MORANGO', 'CXA 1 X 8 X 1200G', 1240.18,
-      '12 CXA (8) + 0', 0, 'NÃO', 0, 0, 18, '12/08/2026', '16:00', '02/08/2026', '08:30',
+      '12', 0, 'NÃO', 0, 0, 18, '12/08/2026', '16:00', '02/08/2026', '08:30',
       'IOGURTES LIQUIDOS', 'LATICINIOS', 40, '0', 75, '04 - FRIOS E LATICINIOS',
       '25/09/2026', '10/10/2026', 'CADEIA FRIA', 'LATICINIOS', 'PERECIVEIS',
       '01.123.456/0001-88 DANONE LTDA', 'SIM', 'SIM', '0', 'NÃO',
@@ -1105,7 +1058,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '46135', '156', 'RF.MARG.QUALY C/SAL 500G', 'CXA 1 X 24', 1890.40,
-      '10 CXA (24) + 0', 0, 'NÃO', 0, 0, 15, '15/08/2026', '14:40', '05/08/2026', '09:00',
+      '10', 0, 'NÃO', 0, 0, 15, '15/08/2026', '14:40', '05/08/2026', '09:00',
       'MARGARINAS', 'LATICINIOS', 35, '0', 120, '04 - FRIOS E LATICINIOS',
       '15/11/2026', '30/11/2026', 'CADEIA FRIA', 'LATICINIOS', 'PERECIVEIS',
       '03.555.444/0001-33 BRF S.A.', 'SIM', 'SIM', '0', 'NÃO',
@@ -1113,7 +1066,7 @@ export function gerarExemploPlanilhaISV(): void {
     ],
     [
       '76916', '185', 'CHOCOLATE NESTLE CLASSIC 90G', 'CXA 1 X 20', 2650.00,
-      '20 CXA (20) + 0', 0, 'NÃO', 0, 0, 25, '05/08/2026', '12:30', '15/07/2026', '14:00',
+      '20', 0, 'NÃO', 0, 0, 25, '05/08/2026', '12:30', '15/07/2026', '14:00',
       'CHOCOLATES TABLETES', 'MERCEARIA DOCE', 60, '0', 90, '02 - MERCEARIA',
       '15/02/2027', '28/02/2027', 'MERCEARIA', 'MERCEARIA DOCE', 'SECOS',
       '02.987.654/0001-22 NESTLE BRASIL LTDA', 'SIM', 'SIM', '0', 'NÃO',

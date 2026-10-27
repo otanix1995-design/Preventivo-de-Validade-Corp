@@ -39,7 +39,6 @@ import {
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { calcularPosicaoEstoque, cleanEanCode, isProdutoPesavel, parseEmbalagem } from '../services/codeParser';
 import { formatarMoedaBR } from '../services/deviceId';
-import { formatarEstoqueOperacionalExtenso } from '../services/isvPlanilhaParser';
 import { isvService } from '../services/isvService';
 import { productRepository } from '../services/productRepository';
 import { calcularProjecaoVencimento, formatarDataBR, formatarDiasRestantes } from '../services/projection';
@@ -207,21 +206,22 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
       selectedProduto.fator_embalagem || embData.fator
     );
 
-    // Cálculo do estoque unificado formatado por extenso
-    let estoqueTextoExtenso = '';
-    let estoqueTextoOriginal = '';
+    // Apresentação do estoque original da BASE RUB (soberano)
+    let estoqueTexto = '';
     let estoqueTotalNumerico = selectedProduto.estoque_total || 0;
 
     if (regOp) {
-      estoqueTextoExtenso = regOp.estoque_formatado_extenso;
-      estoqueTextoOriginal = regOp.estoque_original_texto;
+      estoqueTexto = regOp.estoque_original_texto || regOp.estoque_formatado_extenso || String(regOp.estoque);
       estoqueTotalNumerico = regOp.estoque;
     } else {
-      const parsed = formatarEstoqueOperacionalExtenso(
-        selectedProduto.estoque_original_erp || posEstoque.conversaoTexto
-      );
-      estoqueTextoExtenso = parsed.textoExtenso;
-      estoqueTextoOriginal = parsed.textoOriginal;
+      estoqueTexto =
+        selectedProduto.estoque_original_erp ||
+        selectedProduto.estoque_disponivel_texto ||
+        (selectedProduto.estoque_total !== undefined
+          ? (Number.isInteger(selectedProduto.estoque_total)
+              ? String(selectedProduto.estoque_total)
+              : String(selectedProduto.estoque_total).replace('.', ','))
+          : '-');
       estoqueTotalNumerico = selectedProduto.estoque_total || 0;
     }
 
@@ -359,16 +359,16 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         </div>
 
         {/* =================================================================== */}
-        {/* SEÇÃO 2: ESTOQUE DISPONÍVEL EM DESTAQUE (UNIFICADO, SEM EMB1/EMB9) */}
+        {/* SEÇÃO 2: ESTOQUE DA BASE RUB (ORIGINAL SOBERANO, SEM CONVERSÕES) */}
         {/* =================================================================== */}
         <div className="bg-white rounded-xl p-5 border border-orange-200 shadow-sm space-y-3 relative overflow-hidden bg-gradient-to-br from-white via-white to-orange-50/40">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-black text-orange-950 uppercase tracking-wider flex items-center gap-2">
               <Boxes className="w-4 h-4 text-[#F36B0B] stroke-[2.5]" />
-              ESTOQUE DISPONÍVEL
+              ESTOQUE DA BASE RUB
             </h3>
             <span className="text-xs font-black text-[#C94F00] bg-orange-100/80 px-2.5 py-1 rounded-md border border-orange-300 uppercase font-mono">
-              Total: {estoqueTotalNumerico} {isPesavel ? 'KG' : 'UN'}
+              VALOR OFICIAL
             </span>
           </div>
 
@@ -377,18 +377,12 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               Posição Operacional da Mercadoria
             </span>
             <div className="text-2xl sm:text-3xl font-black font-mono text-orange-950 tracking-tight">
-              {estoqueTextoExtenso}
+              {estoqueTexto}
             </div>
-            {estoqueTextoOriginal && estoqueTextoOriginal !== estoqueTextoExtenso && (
-              <div className="pt-1.5 flex items-center justify-center gap-1.5 text-xs text-[#C94F00] font-semibold">
-                <FileSpreadsheet className="w-3.5 h-3.5 text-[#F36B0B]" />
-                <span>Original ERP: <strong className="font-mono">{estoqueTextoOriginal}</strong></span>
-              </div>
-            )}
           </div>
 
           <p className="text-[11px] text-gray-500 italic text-center">
-            * Apresentação operacional unificada conforme nova planilha operacional da Filial 172.
+            * Valor original soberano conforme fornecido pela BASE RUB, sem fórmulas de conversão ou decomposição.
           </p>
         </div>
 
@@ -1242,21 +1236,17 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                   prod.embalagem || regOpItem?.complemento
                 );
 
-                // Estoque unificado por extenso
-                let estoqueExtenso = '';
-                if (regOpItem) {
-                  estoqueExtenso = regOpItem.estoque_formatado_extenso;
-                } else {
-                  const posEstoqueItem = calcularPosicaoEstoque(
-                    prod.estoque_emb1,
-                    prod.estoque_emb9,
-                    resEmbItem.embalagem,
-                    prod.fator_embalagem
-                  );
-                  estoqueExtenso = formatarEstoqueOperacionalExtenso(
-                    prod.estoque_original_erp || posEstoqueItem.conversaoTexto
-                  ).textoExtenso;
-                }
+                // Estoque oficial da BASE RUB (soberano)
+                const estoqueOriginal =
+                  regOpItem?.estoque_original_texto ||
+                  regOpItem?.estoque_formatado_extenso ||
+                  prod.estoque_original_erp ||
+                  prod.estoque_disponivel_texto ||
+                  (prod.estoque_total !== undefined
+                    ? (Number.isInteger(prod.estoque_total)
+                        ? String(prod.estoque_total)
+                        : String(prod.estoque_total).replace('.', ','))
+                    : '-');
 
                 // Valor Disponível Oficial
                 const valorDisponivel =
@@ -1313,10 +1303,10 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                         </h4>
                       </div>
 
-                      {/* ESTOQUE DISPONÍVEL UNIFICADO (SEM EMB1/EMB9) */}
+                      {/* ESTOQUE BASE RUB (ORIGINAL SOBERANO) */}
                       <div className="text-right shrink-0">
                         <span className="text-xs font-black font-mono text-orange-950 bg-orange-50/80 px-2 py-0.5 rounded border border-orange-200 block">
-                          ESTOQUE: {estoqueExtenso}
+                          ESTOQUE: {estoqueOriginal}
                         </span>
                         {valorDisponivel !== null && valorDisponivel !== undefined && (
                           <span className="text-[11px] font-mono font-black text-emerald-700 block mt-1">
