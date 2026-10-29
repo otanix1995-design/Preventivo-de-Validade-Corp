@@ -34,6 +34,7 @@ import {
 import { cloudSyncService } from './cloudSyncService';
 import { centralFirestoreService } from './centralFirestoreService';
 import { syncQueueService } from './syncQueueService';
+import { nuvemSyncEngine } from './nuvemSyncEngine';
 import { promotorService } from './promotorService';
 import {
   buildVencimentoKey,
@@ -594,6 +595,10 @@ class ProductRepository {
     return this._produtos;
   }
 
+  public getProdutos(): ProdutoSMG[] {
+    return this._produtos;
+  }
+
   public getProdutosCount(): number {
     return this._produtos.length;
   }
@@ -1085,6 +1090,22 @@ class ProductRepository {
     this.notify();
   }
 
+  public async importarBaseRubDireto(produtos: ProdutoSMG[], meta: MetadadosBase): Promise<void> {
+    this._produtos = produtos;
+    this._metadados = {
+      ...this._metadados,
+      ...meta,
+      status_base: 'BASE_RUB',
+      total_produtos: produtos.length,
+    };
+    this.rebuildIndices();
+    await Promise.all([
+      dbPutAll(STORES.PRODUTOS, produtos, true),
+      dbSetMeta('metadados_gerais', this._metadados),
+    ]);
+    this.notify();
+  }
+
   // --- VENCIMENTOS ---
 
   public getVencimentos(): LoteVencimento[] {
@@ -1164,12 +1185,16 @@ class ProductRepository {
       );
       const isLocalTombstoned =
         syncQueueService.isTombstoned(remote.id) ||
-        syncQueueService.isTombstoned(remoteKey);
+        syncQueueService.isTombstoned(remoteKey) ||
+        nuvemSyncEngine.isTombstoned(remote.id) ||
+        nuvemSyncEngine.isTombstoned(remoteKey);
 
       if (isRemoteDeleted || isLocalTombstoned) {
-        // Assegurar tombstone localmente
+        // Assegurar tombstone em ambos os mecanismos locais
         syncQueueService.addTombstone(remote.id);
         syncQueueService.addTombstone(remoteKey);
+        nuvemSyncEngine.adicionarTombstone(remote.id, 'Tombstone confirmado — exclusão intencional', 'Sistema');
+        nuvemSyncEngine.adicionarTombstone(remoteKey, 'Tombstone confirmado — exclusão intencional', 'Sistema');
 
         // Se existir na lista local, remover imediatamente
         const beforeCount = this._vencimentos.length;
@@ -1359,6 +1384,7 @@ class ProductRepository {
 
       // Enfileirar sincronização com a nuvem em segundo plano
       syncQueueService.enqueue('CREATE_VENCIMENTO', loteCriado.id, loteCriado);
+      nuvemSyncEngine.registrarCriacao(loteCriado).catch(() => {});
 
       return loteCriado;
     } finally {
@@ -1494,11 +1520,12 @@ class ProductRepository {
 
     // Enfileirar sincronização com a nuvem em segundo plano
     syncQueueService.enqueue(opType, loteAtualizado.id, loteAtualizado);
+    nuvemSyncEngine.registrarAtualizacao(loteAtualizado).catch(() => {});
 
     return loteAtualizado;
   }
 
-  public async deleteVencimento(id: string): Promise<boolean> {
+  public async deleteVencimento(id: string, motivo?: string): Promise<boolean> {
     const loteIndex = this._vencimentos.findIndex((l) => l.id === id);
     if (loteIndex === -1) return false;
 
@@ -1568,6 +1595,7 @@ class ProductRepository {
       operationId: deleteOpId,
       deviceId: getDeviceId(),
     });
+    nuvemSyncEngine.registrarExclusaoLogica(id, motivo || 'Exclusão pelo usuário', loteRemovido).catch(() => {});
 
     return true;
   }

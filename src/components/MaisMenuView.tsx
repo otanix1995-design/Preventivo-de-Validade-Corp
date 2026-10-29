@@ -19,6 +19,8 @@ import { MetadadosBase } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 import { SincronizacaoCentralModal } from './SincronizacaoCentralModal';
 
+import { NuvemV3PreparacaoModal } from './NuvemV3PreparacaoModal';
+
 interface MaisMenuViewProps {
   metadados: MetadadosBase;
   onNavigateSub: (subView: string) => void;
@@ -32,8 +34,19 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
 }) => {
   const [isLimparModalOpen, setIsLimparModalOpen] = useState(false);
   const [isNuvemModalOpen, setIsNuvemModalOpen] = useState(false);
+  const [isNuvemV3PrepModalOpen, setIsNuvemV3PrepModalOpen] = useState(false);
 
   const menuItems = [
+    {
+      id: 'nuvem_v3_prep',
+      icon: ShieldCheck,
+      iconColor: 'text-blue-700',
+      iconBg: 'bg-blue-100',
+      title: 'Nuvem V3 — Fase 1 Preparatória',
+      desc: 'Backup 18 tabelas, auditoria de lotes locais/offline, validação isolada de segurança e concorrência BASE RUB.',
+      badge: 'Fase 1 Segura',
+      onClick: () => setIsNuvemV3PrepModalOpen(true),
+    },
     {
       id: 'nuvem',
       icon: Cloud,
@@ -286,6 +299,15 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
         }}
         metadados={metadados}
         onRefreshData={onRefreshData}
+      />
+
+      {/* Modal Nuvem V3 Preparação e Diagnóstico */}
+      <NuvemV3PreparacaoModal
+        isOpen={isNuvemV3PrepModalOpen}
+        onClose={() => {
+          setIsNuvemV3PrepModalOpen(false);
+          onRefreshData();
+        }}
       />
     </div>
   );

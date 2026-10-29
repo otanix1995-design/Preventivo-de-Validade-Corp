@@ -7,6 +7,9 @@ import {
   VinculoEan
 } from '../types';
 import { productRepository } from './productRepository';
+import { syncQueueService } from './syncQueueService';
+import { nuvemSyncEngine } from './nuvemSyncEngine';
+import { buildVencimentoKey } from './deviceId';
 
 export function subscribeToStore(cb: () => void): () => void {
   return productRepository.subscribe(cb);
@@ -92,8 +95,8 @@ export function updateVencimento(
   return productRepository.updateVencimento(id, updates);
 }
 
-export function deleteVencimento(id: string): Promise<boolean> | boolean {
-  return productRepository.deleteVencimento(id);
+export function deleteVencimento(id: string, motivo?: string): Promise<boolean> | boolean {
+  return productRepository.deleteVencimento(id, motivo);
 }
 
 export function getVencimentosByCodigoInterno(codigo_interno: string): LoteVencimento[] {
@@ -180,7 +183,7 @@ export function clearHistoricoImportacoes(): Promise<void> {
 }
 
 /**
- * Remove lotes de vencimento antigos/expirados.
+ * Remove lotes de vencimento antigos/expirados, registrando tombstones e exclusão lógica para nunca ressuscitarem.
  */
 export async function clearLotesVencidos(diasMargem: number = 0): Promise<{ removidos: number; restantes: number }> {
   const lotes = productRepository.getVencimentos();
@@ -197,16 +200,17 @@ export async function clearLotesVencidos(diasMargem: number = 0): Promise<{ remo
   let mantidos: LoteVencimento[] = [];
   let removidosCount = 0;
 
-  if (diasMargem === -1) {
-    removidosCount = lotes.length;
-    mantidos = [];
-  } else {
-    for (const lote of lotes) {
-      if (lote.data_validade < limiteStr) {
-        removidosCount++;
-      } else {
-        mantidos.push(lote);
-      }
+  for (const lote of lotes) {
+    if (diasMargem === -1 || lote.data_validade < limiteStr) {
+      removidosCount++;
+      const lKey = buildVencimentoKey(lote.filialId || '172', lote.codigo_interno, lote.digito, lote.data_validade);
+      syncQueueService.addTombstone(lote.id);
+      syncQueueService.addTombstone(lKey);
+      nuvemSyncEngine.adicionarTombstone(lote.id, 'Limpeza de dados antigos confirmada no aplicativo', 'Usuário');
+      nuvemSyncEngine.adicionarTombstone(lKey, 'Limpeza de dados antigos confirmada no aplicativo', 'Usuário');
+      nuvemSyncEngine.registrarExclusaoLogica(lote.id, 'Limpeza de lote antigo confirmada pelo usuário', lote).catch(() => {});
+    } else {
+      mantidos.push(lote);
     }
   }
 

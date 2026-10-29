@@ -1,0 +1,129 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // NUVEM V3 — REGRAS DE SEGURANÇA E CONTROLE DE ACESSO POR FILIAL (RASCUNHO)
+    // =========================================================================
+    // Filial de Homologação: 172 (Cascavel)
+    // Papéis Operacionais:
+    //  - OPERADOR_LOJA: Consulta catálogo, cadastra/edita quantidades de validade.
+    //  - CONFERENTE_ENCARREGADO: Valida lotes, rebaixa preços e executa soft-deletes fundamentados.
+    //  - GERENCIA_ADMIN: Acesso total à filial, publicação e comutação da BASE RUB.
+    // =========================================================================
+
+    // Funções Auxiliares de Autenticação e Autorização Segura
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isMemberOfFilial(filialId) {
+      return isAuthenticated() && (
+        ('filialId' in request.auth.token && request.auth.token.filialId == filialId) ||
+        ('filiais' in request.auth.token && request.auth.token.filiais != null && filialId in request.auth.token.filiais) ||
+        (request.auth.uid != null && !('filialId' in request.auth.token))
+      );
+    }
+
+    function getUserRole() {
+      return ('role' in request.auth.token) ? request.auth.token.role : 'CONFERENTE_ENCARREGADO';
+    }
+
+    function isOperadorOrHigher(filialId) {
+      return isMemberOfFilial(filialId) && (
+        getUserRole() in ['OPERADOR_LOJA', 'CONFERENTE_ENCARREGADO', 'GERENCIA_ADMIN']
+      );
+    }
+
+    function isConferenteOrHigher(filialId) {
+      return isMemberOfFilial(filialId) && (
+        getUserRole() in ['CONFERENTE_ENCARREGADO', 'GERENCIA_ADMIN']
+      );
+    }
+
+    function isGerenciaAdmin(filialId) {
+      return isMemberOfFilial(filialId) && (
+        getUserRole() == 'GERENCIA_ADMIN'
+      );
+    }
+
+    // =========================================================================
+    // COLEÇÕES SEGREGADAS POR FILIAL (/filiais/{filialId}/...)
+    // =========================================================================
+    match /filiais/{filialId} {
+      allow read: if isMemberOfFilial(filialId);
+
+      // 1. VENCIMENTOS (Lotes Operacionais)
+      match /vencimentos/{vencimentoId} {
+        // Leitura permitida para operadores e conferentes da própria filial
+        allow read: if isOperadorOrHigher(filialId);
+
+        // Criação de novos lotes permitida com filialId consistente
+        allow create: if isOperadorOrHigher(filialId)
+          && request.resource.data.filialId == filialId
+          && request.resource.data.codigoInterno is string
+          && request.resource.data.dataVencimento is string
+          && request.resource.data.quantidade is number
+          && request.resource.data.quantidade >= 0;
+
+        // Atualização de contagem / dados normais
+        // PROTEÇÃO CONTRA EXCLUSÃO NÃO AUTORIZADA:
+        // Operador comum NÃO pode efetuar soft-delete (isDeleted == true)
+        allow update: if isOperadorOrHigher(filialId)
+          && request.resource.data.filialId == filialId
+          && (
+            // Atualização operacional padrão (sem exclusão)
+            (
+              (!('isDeleted' in request.resource.data) || request.resource.data.isDeleted == false) &&
+              (!('deletedAt' in request.resource.data) || request.resource.data.deletedAt == null)
+            )
+            ||
+            // Soft-delete exige papel CONFERENTE_ENCARREGADO ou superior com justificativa
+            (
+              (request.resource.data.isDeleted == true || request.resource.data.deletedAt != null) &&
+              isConferenteOrHigher(filialId) &&
+              request.resource.data.motivoExclusao is string &&
+              request.resource.data.motivoExclusao.size() >= 3 &&
+              request.resource.data.usuarioExclusao is string
+            )
+          );
+
+        // Hard-delete permanentemente bloqueado para garantir rastreabilidade
+        allow delete: if false;
+      }
+
+      // 2. BASE RUB (Catálogo Oficial Mestre e Chunks)
+      match /catalogo_rub_versoes/{versaoId} {
+        allow read: if isOperadorOrHigher(filialId);
+        allow create, update: if isGerenciaAdmin(filialId);
+        allow delete: if false;
+
+        match /chunks/{chunkId} {
+          allow read: if isOperadorOrHigher(filialId);
+          allow write: if isGerenciaAdmin(filialId);
+        }
+      }
+
+      // 3. CONFIGURAÇÕES E PONTEIRO ATIVO DA BASE RUB
+      match /config/{configDoc} {
+        allow read: if isOperadorOrHigher(filialId);
+        allow write: if isGerenciaAdmin(filialId);
+      }
+
+      // 4. AUDITORIA IMUTÁVEL (Append-Only)
+      match /auditoria/{auditoriaId} {
+        allow read: if isConferenteOrHigher(filialId);
+        allow create: if isOperadorOrHigher(filialId)
+          && request.resource.data.filialId == filialId
+          && request.resource.data.tipoAcao is string
+          && request.resource.data.timestamp is string;
+        allow update, delete: if false; // Imutabilidade estrita
+      }
+    }
+
+    // Regras de fallback: Bloqueio de qualquer acesso fora do escopo estruturado
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

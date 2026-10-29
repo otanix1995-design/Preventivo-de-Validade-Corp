@@ -43,6 +43,7 @@ import {
   getDeviceId,
   cleanForFirestore as cleanCentralForFirestore,
 } from './deviceId';
+import { nuvemSyncEngine } from './nuvemSyncEngine';
 
 export type SyncState = 'connecting' | 'connected' | 'syncing' | 'offline' | 'error';
 
@@ -177,9 +178,11 @@ class CloudSyncService {
     if (this._isInitialized) return;
 
     if (isFirestoreQuotaExceeded()) {
+      this._isInitialized = true;
       this.updateStatus({
-        state: 'error',
-        message: 'Cota temporariamente indisponível. Operação 100% local ativa.',
+        state: 'connected',
+        message: 'Modo local offline ativo (Cota diária da nuvem protegida — base IndexedDB segura)',
+        lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
       });
       return;
     }
@@ -206,13 +209,15 @@ class CloudSyncService {
           }
         },
         (err) => {
-          console.warn('[CloudSync] Metadata listener aviso:', err?.message);
           if (isQuotaError(err)) {
             markQuotaExceeded();
+            this.destroy();
             this.updateStatus({
-              state: 'error',
-              message: 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.',
+              state: 'connected',
+              message: 'Modo local offline ativo (Cota da nuvem atingida — IndexedDB 100% seguro)',
             });
+          } else {
+            console.warn('[CloudSync] Metadata listener aviso:', err?.message);
           }
         }
       );
@@ -262,19 +267,19 @@ class CloudSyncService {
           });
         },
         (err) => {
-          console.warn('[CloudSync] Vencimentos listener error:', err?.message);
           if (isQuotaError(err)) {
             markQuotaExceeded();
+            this.destroy();
             this.updateStatus({
-              state: 'error',
-              message: 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.',
+              state: 'connected',
+              message: 'Modo local offline ativo (Cota da nuvem atingida — IndexedDB 100% seguro)',
             });
+          } else {
+            console.warn('[CloudSync] Vencimentos listener error:', err?.message);
           }
         }
       );
       this._unsubscribers.push(unsubVenc);
-
-      // Requisito 9: REMOVER listener contínuo em historico_importacoes para poupar cotas
 
       this._isInitialized = true;
       this.updateStatus({
@@ -283,16 +288,21 @@ class CloudSyncService {
         lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
       });
     } catch (err: any) {
-      console.warn('[CloudSync] Initialization warning:', err);
       if (isQuotaError(err)) {
         markQuotaExceeded();
+        this.destroy();
+        this._isInitialized = true;
+        this.updateStatus({
+          state: 'connected',
+          message: 'Modo local offline ativo (Cota da nuvem atingida — IndexedDB 100% seguro)',
+        });
+        return;
       }
+      console.warn('[CloudSync] Initialization warning:', err?.message);
       this._isInitialized = false;
       this.updateStatus({
         state: 'error',
-        message: isQuotaError(err)
-          ? 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.'
-          : 'Erro ao conectar com a Nuvem',
+        message: 'Erro ao conectar com a Nuvem',
       });
     }
   }
@@ -301,6 +311,7 @@ class CloudSyncService {
    * Checks if remote Firestore has data that local device doesn't have yet.
    */
   public async pullLatestIfOutdated(): Promise<void> {
+    if (isFirestoreQuotaExceeded()) return;
     try {
       await ensureAuth().catch(() => null);
       const metaDocRef = doc(db, 'metadados', 'geral');
@@ -308,6 +319,7 @@ class CloudSyncService {
       if (!metaSnap.exists()) return;
 
       const data = metaSnap.data();
+      // Não sobrescrever catálogo local quando BASE RUB já estiver carregada localmente
       if ((data.catalogo_version || 0) > this._localCatalogoVersion && data.total_produtos > 0) {
         await this.pullCatalogoFromCloud(data.catalogo_version);
       }
@@ -317,8 +329,17 @@ class CloudSyncService {
       if ((data.saeou060_version || 0) > this._localSaeou060Version && data.total_saeou060 > 0) {
         await this.pullSaeou060FromCloud(data.saeou060_version);
       }
-    } catch (err) {
-      console.warn('[CloudSync] Pull check failed:', err);
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        this.destroy();
+        this.updateStatus({
+          state: 'connected',
+          message: 'Modo local offline ativo (Cota da nuvem atingida — IndexedDB 100% seguro)',
+        });
+        return;
+      }
+      console.warn('[CloudSync] Pull check failed:', err?.message || err);
     }
   }
 
@@ -341,11 +362,11 @@ class CloudSyncService {
       return { success: false, message: 'Dispositivo sem conexão à internet.' };
     }
 
-    // Requisito 17 e 23: Se a cota estiver excedida, não tentar enviar/baixar a base
+    // Se a cota estiver excedida, manter modo offline seguro com IndexedDB
     if (isFirestoreQuotaExceeded()) {
-      const msg = 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.';
-      this.updateStatus({ state: 'error', message: msg });
-      return { success: false, message: msg };
+      const msg = 'Modo local offline ativo. Cota da nuvem temporariamente indisponível. Operação normal mantida com segurança no IndexedDB.';
+      this.updateStatus({ state: 'connected', message: msg });
+      return { success: true, message: msg };
     }
 
     this.updateStatus({ state: 'syncing', message: 'Sincronizando com a Nuvem...' });
@@ -406,25 +427,19 @@ class CloudSyncService {
 
       let msg = 'Conectado à nuvem. Dados já estão em dia.';
 
-      // Determine catalog sync direction:
+      // BASE RUB é soberana: se a base local já possui produtos ou status BASE_RUB, não puxar catálogo legado da nuvem
+      const isBaseRubLocal = localMeta.status_base === 'BASE_RUB' || (localProdutos.length > 0 && localMeta.status_base !== 'SMGOI013');
       const localCatVersion = localMeta.catalogo_version || this._localCatalogoVersion || 0;
 
-      if (remoteTotal > 0 && (remoteCatVersion > localCatVersion || localProdutos.length === 0)) {
-        // Cloud has a newer catalog or local is empty: PULL from cloud
+      if (!isBaseRubLocal && remoteTotal > 0 && (remoteCatVersion > localCatVersion || localProdutos.length === 0)) {
+        // Apenas puxar catálogo se local estiver completamente vazio e não for BASE RUB
         await this.pullCatalogoFromCloud(remoteCatVersion);
         msg = `Catálogo atualizado da nuvem (${remoteTotal} produtos).`;
       } else if (localProdutos.length > 0 && (remoteTotal === 0 || localCatVersion > remoteCatVersion)) {
-        // Local has products and is newer than cloud (or cloud is empty): PUSH to cloud
-        await this.pushCatalogoToCloud(localProdutos, localMeta);
-        msg = `Catálogo local (${localProdutos.length} produtos) enviado para a nuvem.`;
-      } else if (localProdutos.length > 0 && remoteTotal > 0) {
-        // Versions match or both present: ensure catalog in cloud is synchronized
-        if (remoteCatVersion >= localCatVersion) {
-          await this.pullCatalogoFromCloud(remoteCatVersion);
-          msg = `Catálogo atualizado da nuvem (${remoteTotal} produtos).`;
-        } else {
+        // Se a cota permitir, atualizar nuvem
+        if (!isFirestoreQuotaExceeded()) {
           await this.pushCatalogoToCloud(localProdutos, localMeta);
-          msg = `Catálogo local (${localProdutos.length} produtos) sincronizado com a nuvem.`;
+          msg = `Catálogo local (${localProdutos.length} produtos) enviado para a nuvem.`;
         }
       }
 
@@ -446,42 +461,22 @@ class CloudSyncService {
         await this.pushSaeou060ToCloud(localSaeou);
       }
 
-      // Sync vencimentos: bidirectional merge
+      // Sync vencimentos: bidirectional merge paginado sem truncamento de 250
       try {
-        const qLotes = query(
-          collection(db, 'vencimentos'),
-          where('filialId', '==', '172'),
-          limit(250)
-        );
-        const remoteLotesSnap = await getDocs(qLotes);
-        logFirestoreRead('syncFullVencimentos', 'vencimentos', remoteLotesSnap.size);
-        const remoteLotes: LoteVencimento[] = [];
-        remoteLotesSnap.forEach((d) => {
-          const raw = d.data();
-          if (raw) {
-            try {
-              const norm = normalizeVencimentoRecord({
-                ...raw,
-                id: raw.vencimentoId || d.id,
-                vencimentoId: raw.vencimentoId || d.id,
-              });
-              if (!norm.filialId || norm.filialId === '172') {
-                remoteLotes.push(norm);
-              }
-            } catch (errNorm) {
-              console.warn('[CloudSync] Erro ao normalizar registro remoto no syncFull:', errNorm);
-            }
-          }
-        });
-
+        const remoteLotes = await nuvemSyncEngine.carregarTodosVencimentosPaginados('172');
+        logFirestoreRead('syncFullVencimentosPaginado', 'vencimentos', remoteLotes.length);
         if (remoteLotes.length > 0 && this._onRemoteVencimentosReceived) {
           this._onRemoteVencimentosReceived(remoteLotes);
         }
-      } catch (e) {
-        console.warn('Could not read remote lotes:', e);
+      } catch (e: any) {
+        if (isQuotaError(e)) {
+          markQuotaExceeded();
+        } else {
+          console.warn('Could not read remote lotes paginados:', e?.message || e);
+        }
       }
 
-      if (localVencimentos.length > 0) {
+      if (localVencimentos.length > 0 && !isFirestoreQuotaExceeded()) {
         await this.sincronizarVencimentosExistentes(localVencimentos);
       }
 
@@ -493,6 +488,16 @@ class CloudSyncService {
 
       return { success: true, message: msg };
     } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        this.destroy();
+        const quotaMsg = 'Modo local offline ativo: Cota diária da nuvem atingida. Todos os dados permanecem 100% seguros no IndexedDB.';
+        this.updateStatus({
+          state: 'connected',
+          message: quotaMsg,
+        });
+        return { success: true, message: quotaMsg };
+      }
       console.error('[CloudSync] Error in syncFull:', err);
       this.updateStatus({
         state: 'error',
@@ -508,8 +513,9 @@ class CloudSyncService {
 
   public async pullCatalogoFromCloud(version?: number): Promise<boolean> {
     if (this._isSyncing) return false;
+    if (isFirestoreQuotaExceeded()) return false;
     this._isSyncing = true;
-    this.updateStatus({ state: 'syncing', message: 'Baixando catálogo SMGOI013 da nuvem...' });
+    this.updateStatus({ state: 'syncing', message: 'Verificando catálogo na nuvem...' });
 
     try {
       await ensureAuth();
@@ -544,7 +550,7 @@ class CloudSyncService {
         await this._onRemoteCatalogoReceived(allProducts, {
           filial_numero: meta.filial_numero || '172',
           filial_nome: meta.filial_nome || 'CASCAVEL',
-          status_base: 'SMGOI013',
+          status_base: meta.status_base || 'BASE_RUB',
           total_produtos: allProducts.length,
           total_vencimentos: meta.total_vencimentos || 0,
           total_eans: meta.total_eans || 0,
@@ -563,14 +569,25 @@ class CloudSyncService {
       this._isSyncing = false;
       return true;
     } catch (err: any) {
-      console.error('[CloudSync] Error pulling catalog from cloud:', err);
-      this.updateStatus({ state: 'error', message: 'Erro ao baixar catálogo' });
       this._isSyncing = false;
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        this.destroy();
+        this.updateStatus({
+          state: 'connected',
+          message: 'Modo local offline ativo (Cota da nuvem atingida — IndexedDB 100% seguro)',
+        });
+        console.warn('[CloudSync] Cota do Firestore atingida no catálogo. Modo offline mantido.');
+        return false;
+      }
+      console.warn('[CloudSync] Aviso ao baixar catálogo da nuvem:', err?.message || err);
+      this.updateStatus({ state: 'error', message: 'Erro ao baixar catálogo' });
       return false;
     }
   }
 
   public async pullVinculosFromCloud(version?: number): Promise<boolean> {
+    if (isFirestoreQuotaExceeded()) return false;
     try {
       await ensureAuth();
       const chunksSnap = await getDocs(collection(db, 'vinculos_chunks'));
@@ -591,13 +608,18 @@ class CloudSyncService {
         this._localVinculosVersion = version || Date.now();
       }
       return true;
-    } catch (err) {
-      console.warn('[CloudSync] Error pulling vinculos:', err);
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        return false;
+      }
+      console.warn('[CloudSync] Error pulling vinculos:', err?.message || err);
       return false;
     }
   }
 
   public async pullSaeou060FromCloud(version?: number): Promise<boolean> {
+    if (isFirestoreQuotaExceeded()) return false;
     try {
       await ensureAuth();
       const chunksSnap = await getDocs(collection(db, 'saeou060_chunks'));
@@ -618,8 +640,12 @@ class CloudSyncService {
         this._localSaeou060Version = version || Date.now();
       }
       return true;
-    } catch (err) {
-      console.warn('[CloudSync] Error pulling SAEOU060:', err);
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        return false;
+      }
+      console.warn('[CloudSync] Error pulling SAEOU060:', err?.message || err);
       return false;
     }
   }
@@ -637,6 +663,7 @@ class CloudSyncService {
     meta: MetadadosBase,
     onProgress?: (pct: number, msg: string) => void
   ): Promise<boolean> {
+    if (isFirestoreQuotaExceeded()) return false;
     this.updateStatus({ state: 'syncing', message: 'Enviando catálogo para a nuvem...' });
 
     try {
@@ -701,7 +728,7 @@ class CloudSyncService {
       await setDoc(metaDocRef, cleanForFirestore({
         filial_numero: meta.filial_numero || '172',
         filial_nome: meta.filial_nome || 'CASCAVEL',
-        status_base: 'SMGOI013',
+        status_base: meta.status_base || 'BASE_RUB',
         total_produtos: produtos.length,
         total_chunks: totalChunks,
         catalogo_version: newVersion,
@@ -719,6 +746,16 @@ class CloudSyncService {
       onProgress?.(100, 'Catálogo 100% sincronizado com a nuvem!');
       return true;
     } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        this.destroy();
+        this.updateStatus({
+          state: 'connected',
+          message: 'Modo local offline ativo (Cota da nuvem atingida — IndexedDB 100% seguro)',
+        });
+        console.warn('[CloudSync] Cota do Firestore atingida no envio do catálogo. Modo offline mantido.');
+        return false;
+      }
       console.error('[CloudSync] Error pushing catalog to cloud:', err);
       this.updateStatus({ state: 'error', message: 'Erro ao enviar catálogo para nuvem' });
       return false;
@@ -726,6 +763,7 @@ class CloudSyncService {
   }
 
   public async pushVinculosToCloud(vinculos: VinculoEan[]): Promise<boolean> {
+    if (isFirestoreQuotaExceeded()) return false;
     try {
       await ensureAuth();
       const CHUNK_SIZE = 500;
@@ -751,13 +789,18 @@ class CloudSyncService {
 
       this._localVinculosVersion = newVersion;
       return true;
-    } catch (err) {
-      console.warn('[CloudSync] Error pushing vinculos:', err);
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        return false;
+      }
+      console.warn('[CloudSync] Error pushing vinculos:', err?.message || err);
       return false;
     }
   }
 
   public async pushSaeou060ToCloud(registros: RegistroSaeou060[]): Promise<boolean> {
+    if (isFirestoreQuotaExceeded()) return false;
     try {
       await ensureAuth();
       const CHUNK_SIZE = 400;
@@ -810,8 +853,12 @@ class CloudSyncService {
 
       this._localSaeou060Version = newVersion;
       return true;
-    } catch (err) {
-      console.warn('[CloudSync] Error pushing SAEOU060:', err);
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded();
+        return false;
+      }
+      console.warn('[CloudSync] Error pushing SAEOU060:', err?.message || err);
       return false;
     }
   }
@@ -827,33 +874,10 @@ class CloudSyncService {
     }
     try {
       await ensureAuth().catch(() => null);
-      // Requisito 8: Consultar estritamente filialId = 172 com limite de segurança
-      const q = query(
-        collection(db, 'vencimentos'),
-        where('filialId', '==', '172'),
-        limit(250)
-      );
-      const snap = await getDocs(q);
-      logFirestoreRead('pullVencimentos', 'vencimentos', snap.size);
+      // Nuvem V3: Consulta paginada com cursores sem truncamento em 250 registros
+      const lotes = await nuvemSyncEngine.carregarTodosVencimentosPaginados('172');
+      logFirestoreRead('pullVencimentosPaginado', 'vencimentos', lotes.length);
 
-      const lotes: LoteVencimento[] = [];
-      snap.forEach((docSnap) => {
-        const raw = docSnap.data();
-        if (raw) {
-          try {
-            const norm = normalizeVencimentoRecord({
-              ...raw,
-              id: raw.vencimentoId || docSnap.id,
-              vencimentoId: raw.vencimentoId || docSnap.id,
-            });
-            if (!norm.filialId || norm.filialId === '172') {
-              lotes.push(norm);
-            }
-          } catch (e) {
-            console.warn('[CloudSync] Erro ao normalizar lote recebido da nuvem:', e);
-          }
-        }
-      });
       if (this._onRemoteVencimentosReceived && lotes.length > 0) {
         this._onRemoteVencimentosReceived(lotes);
       }

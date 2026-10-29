@@ -30,6 +30,8 @@ import { LoteVencimento, ProdutoSMG } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 import { GerarCartazesModal } from './GerarCartazesModal';
 import { StatusBadge } from './StatusBadge';
+import { VencimentosSyncBadge } from './VencimentosSyncBadge';
+import { authRoleService } from '../services/authRoleService';
 import { Saeou060View } from './Saeou060View';
 import { AnalisePromotorView } from './AnalisePromotorView';
 import { analisePromotorService } from '../services/analisePromotorService';
@@ -175,9 +177,18 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
 
   const handleDeleteLote = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (confirm('Deseja realmente remover este lote de vencimento?')) {
-      await deleteVencimento(id);
+    const user = authRoleService.getUsuarioAtual();
+    if (user.papel === 'OPERADOR_LOJA') {
+      alert('Operadores de Loja não possuem permissão para exclusão de lotes. A exclusão lógica é reservada a Conferentes ou Gerência.');
+      return;
     }
+    const motivo = prompt('Informe a justificativa/motivo do cancelamento/exclusão deste lote (mínimo 3 caracteres):');
+    if (motivo === null) return;
+    if (motivo.trim().length < 3) {
+      alert('É obrigatório informar uma justificativa com no mínimo 3 caracteres para registrar a exclusão lógica.');
+      return;
+    }
+    await deleteVencimento(id, motivo.trim());
   };
 
   const handleToggleEnviarComprador = async (lote: LoteVencimento, e: React.MouseEvent) => {
@@ -667,7 +678,8 @@ export const VencimentosView: React.FC<VencimentosViewProps> = ({
                         </h3>
                       </div>
 
-                      <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+                        <VencimentosSyncBadge lote={lote} />
                         <StatusBadge status={projecao.status} />
                         <button
                           onClick={(e) => {

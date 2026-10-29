@@ -14,6 +14,7 @@ import { cloudSyncService, SyncStatusInfo } from '../services/cloudSyncService';
 import { syncQueueService } from '../services/syncQueueService';
 import { productRepository } from '../services/productRepository';
 import { isFirestoreQuotaExceeded } from '../services/firebase';
+import { nuvemSyncEngine } from '../services/nuvemSyncEngine';
 import { MetadadosBase } from '../types';
 
 interface HeaderProps {
@@ -37,6 +38,7 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
   const [pendingCount, setPendingCount] = useState<number>(() => syncQueueService.getPendingCount());
+  const [nuvemContadores, setNuvemContadores] = useState(() => nuvemSyncEngine.getContadores());
   const [hasErrors, setHasErrors] = useState<boolean>(() => syncQueueService.hasErrors());
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
@@ -47,9 +49,13 @@ export const Header: React.FC<HeaderProps> = ({
       setPendingCount(syncQueueService.getPendingCount());
       setHasErrors(syncQueueService.hasErrors());
     });
+    const unsubNuvem = nuvemSyncEngine.subscribe(() => {
+      setNuvemContadores(nuvemSyncEngine.getContadores());
+    });
     return () => {
       unsubCloud();
       unsubQueue();
+      unsubNuvem();
     };
   }, []);
 
@@ -153,50 +159,56 @@ export const Header: React.FC<HeaderProps> = ({
             title={
               isSyncing
                 ? 'Sincronizando dados com a nuvem...'
-                : hasErrors
+                : isFirestoreQuotaExceeded()
+                ? 'Cota diária da nuvem atingida. Modo local ativo com IndexedDB 100% seguro.'
+                : hasErrors || nuvemContadores.erros > 0
                 ? 'Erro de sincronização. Clique para tentar novamente.'
-                : pendingCount > 0
-                ? `${pendingCount} alteraç${pendingCount > 1 ? 'ões pendentes' : 'ão pendente'} na fila local. Clique para sincronizar.`
+                : (pendingCount + nuvemContadores.pendentes) > 0
+                ? `${pendingCount + nuvemContadores.pendentes} alteraç${(pendingCount + nuvemContadores.pendentes) > 1 ? 'ões pendentes' : 'ão pendente'} na fila local.`
                 : syncStatus.state === 'connected'
-                ? `Nuvem conectada e sincronizada. Última checagem: ${syncStatus.lastSyncTime || 'agora'}. Clique para forçar sincronização.`
-                : syncStatus.state === 'offline'
-                ? 'Sem conexão com a nuvem. Modo offline ativo.'
-                : syncStatus.message || 'Clique para sincronizar com a nuvem'
+                ? `Nuvem conectada e sincronizada (${syncStatus.lastSyncTime || 'recente'}).`
+                : 'Sem conexão com a nuvem. Modo offline ativo.'
             }
             className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-xs uppercase tracking-wide transition-all border shrink-0 cursor-pointer ${
               isSyncing
                 ? 'bg-amber-500/25 text-amber-100 border-amber-300/50 animate-pulse'
-                : hasErrors
+                : isFirestoreQuotaExceeded()
+                ? 'bg-cyan-900/40 hover:bg-cyan-900/50 text-cyan-100 border-cyan-400/40'
+                : hasErrors || nuvemContadores.erros > 0
                 ? 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-100 border-rose-300/50'
-                : pendingCount > 0
+                : (pendingCount + nuvemContadores.pendentes) > 0
                 ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-100 border-amber-300/40'
                 : syncStatus.state === 'connected'
                 ? 'bg-emerald-600/30 hover:bg-emerald-600/40 text-emerald-100 border-emerald-300/50 hover:border-emerald-200 shadow-xs'
                 : syncStatus.state === 'connecting'
                 ? 'bg-white/20 text-orange-100 border-white/30'
-                : 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-100 border-rose-300/50'
+                : 'bg-slate-700/40 hover:bg-slate-700/50 text-slate-200 border-slate-500/40'
             }`}
           >
             {isSyncing ? (
               <RefreshCw className="w-4 h-4 animate-spin text-amber-300" />
-            ) : hasErrors ? (
+            ) : isFirestoreQuotaExceeded() ? (
+              <Database className="w-4 h-4 text-cyan-300" />
+            ) : hasErrors || nuvemContadores.erros > 0 ? (
               <CloudOff className="w-4 h-4 text-rose-300" />
-            ) : pendingCount > 0 ? (
+            ) : (pendingCount + nuvemContadores.pendentes) > 0 ? (
               <RefreshCw className="w-4 h-4 text-amber-300" />
             ) : syncStatus.state === 'connected' ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-300" />
             ) : syncStatus.state === 'connecting' ? (
               <RefreshCw className="w-4 h-4 animate-spin text-white" />
             ) : (
-              <CloudOff className="w-4 h-4 text-rose-300" />
+              <CloudOff className="w-4 h-4 text-slate-300" />
             )}
             <span className="inline">
               {isSyncing
                 ? 'Sincronizando...'
-                : hasErrors
+                : isFirestoreQuotaExceeded()
+                ? 'Modo Local (Cota)'
+                : hasErrors || nuvemContadores.erros > 0
                 ? 'Erro Nuvem'
-                : pendingCount > 0
-                ? `${pendingCount} pendência${pendingCount > 1 ? 's' : ''}`
+                : (pendingCount + nuvemContadores.pendentes) > 0
+                ? `${pendingCount + nuvemContadores.pendentes} pendência${(pendingCount + nuvemContadores.pendentes) > 1 ? 's' : ''}`
                 : syncStatus.state === 'connected'
                 ? '✓ Sincronizado'
                 : syncStatus.state === 'connecting'

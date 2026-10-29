@@ -23,6 +23,7 @@ import {
 import { productRepository } from '../services/productRepository';
 import { promotorService } from '../services/promotorService';
 import { MetadadosBase } from '../types';
+import { NuvemV3PreparacaoModal } from './NuvemV3PreparacaoModal';
 
 interface SincronizacaoCentralModalProps {
   isOpen: boolean;
@@ -37,6 +38,7 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
   metadados,
   onRefreshData,
 }) => {
+  const [isNuvemV3Open, setIsNuvemV3Open] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [progress, setProgress] = useState<MigracaoProgressInfo | null>(null);
   const [syncSuccessMsg, setSyncSuccessMsg] = useState<string | null>(null);
@@ -63,7 +65,7 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
     projectId: 'gen-lang-client-0352860977',
     produtosCount: 11716,
     vinculosCount: 1251,
-    vencimentosCount: 85,
+    vencimentosCount: productRepository.getVencimentos().length,
     promotoresCount: 1,
     ultimaSincronizacao: new Date().toLocaleString('pt-BR'),
   });
@@ -205,6 +207,30 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
               <span className="hidden sm:inline">•</span>
               <span>Filial: <strong className="text-slate-800">172</strong></span>
             </div>
+          </div>
+
+          {/* Banner Nuvem V3 - Fase 1 Preparatória */}
+          <div className="bg-gradient-to-r from-blue-900 to-indigo-900 text-white rounded-xl p-3.5 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 border border-blue-400/30">
+            <div className="flex items-start gap-2.5">
+              <ShieldCheck className="w-5 h-5 text-blue-300 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-bold text-white tracking-wide flex items-center gap-2">
+                  NUVEM V3 — FASE 1 PREPARATÓRIA (FILIAL 172)
+                  <span className="text-[9px] bg-emerald-400 text-slate-950 font-black px-1.5 py-0.5 rounded-full uppercase">
+                    Seguro
+                  </span>
+                </p>
+                <p className="text-[11px] text-blue-200 mt-0.5">
+                  Backup integral (18 tabelas), auditoria de fila offline, testes de regras isoladas e controle concorrente.
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setIsNuvemV3Open(true)}
+              className="px-3.5 py-2 rounded-lg bg-blue-500 hover:bg-blue-400 text-white font-bold text-xs shrink-0 transition-colors cursor-pointer shadow-xs"
+            >
+              Abrir Diagnóstico V3
+            </button>
           </div>
 
           {/* Status & Collections Grid */}
@@ -543,6 +569,12 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
           </button>
         </div>
       </div>
+
+      {/* Modal Nuvem V3 Preparação e Diagnóstico */}
+      <NuvemV3PreparacaoModal
+        isOpen={isNuvemV3Open}
+        onClose={() => setIsNuvemV3Open(false)}
+      />
     </div>
   );
 };

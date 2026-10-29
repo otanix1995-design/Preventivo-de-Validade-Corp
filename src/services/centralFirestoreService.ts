@@ -668,6 +668,7 @@ export class CentralFirestoreService {
 
       const produtosCount = Number(metaData?.produtosSincronizados || 11716);
       const vinculosCount = Number(metaData?.vinculosEanSincronizados || 1251);
+      const vencimentosCount = Number(metaData?.vencimentosSincronizados || 0);
       const ultimaSincronizacao = metaData?.ultimaSincronizacao
         ? new Date(metaData.ultimaSincronizacao).toLocaleString('pt-BR')
         : new Date().toLocaleString('pt-BR');
@@ -677,7 +678,7 @@ export class CentralFirestoreService {
         projectId: 'gen-lang-client-0352860977',
         produtosCount,
         vinculosCount,
-        vencimentosCount: 85,
+        vencimentosCount,
         promotoresCount: 1,
         ultimaSincronizacao,
       };
@@ -687,7 +688,7 @@ export class CentralFirestoreService {
         projectId: 'gen-lang-client-0352860977',
         produtosCount: 11716,
         vinculosCount: 1251,
-        vencimentosCount: 85,
+        vencimentosCount: 0,
         promotoresCount: 1,
         ultimaSincronizacao: new Date().toLocaleString('pt-BR'),
       };

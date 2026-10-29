@@ -47,8 +47,22 @@ try {
 // CONTROLE DE COTA DO FIRESTORE & LOGS DE LEITURA (REQUISITO 17 E 20)
 // ============================================================================
 
+const STORAGE_KEY_QUOTA = 'firestore_quota_exceeded_until';
+
 let _quotaExceededUntil = 0;
-const QUOTA_BACKOFF_MS = 15 * 60 * 1000; // 15 minutos de proteção para evitar loops
+if (typeof window !== 'undefined') {
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY_QUOTA);
+    if (saved) {
+      const parsed = Number(saved);
+      if (parsed && Date.now() < parsed) {
+        _quotaExceededUntil = parsed;
+      }
+    }
+  } catch {}
+}
+
+const QUOTA_BACKOFF_MS = 60 * 60 * 1000; // 60 minutos de proteção após cota excedida
 
 export function isFirestoreQuotaExceeded(): boolean {
   return Date.now() < _quotaExceededUntil;
@@ -56,13 +70,23 @@ export function isFirestoreQuotaExceeded(): boolean {
 
 export function markQuotaExceeded(): void {
   _quotaExceededUntil = Date.now() + QUOTA_BACKOFF_MS;
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(STORAGE_KEY_QUOTA, String(_quotaExceededUntil));
+    } catch {}
+  }
   console.warn(
-    `[Firestore] COTA EXCEDIDA detectada (Free daily read/write limit). Pausando tentativas de rede por 15 minutos. Operação 100% local.`
+    `[Firestore] COTA EXCEDIDA detectada (Free daily read units). Pausando tentativas de rede por 60 minutos. Operação 100% local com IndexedDB.`
   );
 }
 
 export function resetQuotaExceeded(): void {
   _quotaExceededUntil = 0;
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.removeItem(STORAGE_KEY_QUOTA);
+    } catch {}
+  }
 }
 
 export function isQuotaError(err: any): boolean {

@@ -16,6 +16,9 @@ import { Saeou060View } from './components/Saeou060View';
 import { SelecionarProdutoCadastroModal } from './components/SelecionarProdutoCadastroModal';
 import { SemVendaView } from './components/SemVendaView';
 import { SincronizacaoCentralModal } from './components/SincronizacaoCentralModal';
+import { NuvemV3ControlCenterModal } from './components/NuvemV3ControlCenterModal';
+import { NuvemV3ConflictModal } from './components/NuvemV3ConflictModal';
+import { nuvemSyncEngine, ConflitoSincronizacao } from './services/nuvemSyncEngine';
 import { VencimentosView } from './components/VencimentosView';
 import { VincularEanModal } from './components/VincularEanModal';
 import {
@@ -57,6 +60,7 @@ export default function App() {
 
   // Modal Central de Sincronização e Homologação (Requisito 7 e 22)
   const [isCentralSyncModalOpen, setIsCentralSyncModalOpen] = useState(false);
+  const [conflitosPendentes, setConflitosPendentes] = useState<ConflitoSincronizacao[]>([]);
 
   // Selected product detail view state
   const [selectedProduto, setSelectedProduto] = useState<ProdutoSMG | null>(null);
@@ -87,7 +91,12 @@ export default function App() {
       setMetadados((prev) => (prev === m ? prev : m));
     });
 
-    return () => unsubscribe();
+    const unsubConflitos = nuvemSyncEngine.subscribeConflitos(setConflitosPendentes);
+
+    return () => {
+      unsubscribe();
+      unsubConflitos();
+    };
   }, []);
 
   // Handle Bottom Nav or Action Card Navigation
@@ -522,18 +531,19 @@ export default function App() {
         }}
       />
 
-      {/* 8. Modal Central de Sincronização e Homologação */}
-      <SincronizacaoCentralModal
+      {/* 8. Central de Controle Nuvem V3 (Sincronização, BASE RUB e Governança) */}
+      <NuvemV3ControlCenterModal
         isOpen={isCentralSyncModalOpen}
         onClose={() => setIsCentralSyncModalOpen(false)}
-        metadados={metadados}
-        onRefreshData={() => {
-          setProdutos(getProdutos());
-          setVencimentos(getVencimentos());
-          setVinculosEan(getVinculosEan());
-          setMetadados(getMetadados());
-        }}
       />
+
+      {/* 9. Modal de Resolução de Conflitos Concorrentes */}
+      {conflitosPendentes.length > 0 && (
+        <NuvemV3ConflictModal
+          conflitos={conflitosPendentes}
+          onClose={() => setConflitosPendentes([])}
+        />
+      )}
     </div>
   );
 }
