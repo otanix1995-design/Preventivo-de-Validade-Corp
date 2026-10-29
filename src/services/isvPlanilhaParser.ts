@@ -860,7 +860,7 @@ export async function processarPlanilhaOperacionalIsv(
     avisos: avisos.slice(0, 30),
   };
 
-  onProgress?.(100, 'Importação da BASE DO RUB (36 colunas) concluída com sucesso!');
+  onProgress?.(100, 'Processamento e mapeamento da planilha concluídos!');
 
   return {
     registros,

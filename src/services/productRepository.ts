@@ -36,6 +36,7 @@ import { centralFirestoreService } from './centralFirestoreService';
 import { syncQueueService } from './syncQueueService';
 import { nuvemSyncEngine } from './nuvemSyncEngine';
 import { promotorService } from './promotorService';
+import { isFirestoreQuotaExceeded } from './firebase';
 import {
   buildVencimentoKey,
   normalizeVencimentoRecord,
@@ -898,7 +899,8 @@ class ProductRepository {
   }
 
   /**
-   * Persists products to IndexedDB and rebuilds indices.
+   * Persiste o catálogo no IndexedDB e reconstrói índices de busca locais.
+   * Confirma a gravação local imediatamente, sem bloquear no Firestore ou na rede.
    */
   public async saveProducts(
     novosProdutos: ProdutoSMG[],
@@ -907,7 +909,7 @@ class ProductRepository {
     this._produtos = novosProdutos;
     this.rebuildIndices();
 
-    // Persist to IndexedDB
+    // 1. Persistência imediata e garantida no IndexedDB local
     await dbPutAll(STORES.PRODUTOS, novosProdutos, true);
     await dbPutAll(STORES.VINCULOS_EAN, this._vinculos, true);
 
@@ -925,19 +927,22 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    // Track locally
+    // Registra versão local
     cloudSyncService.setLocalVersions({ catalogoVersion: newVersion });
 
-    // Push catalog to Cloud (Firestore)
-    let pushed = false;
-    try {
-      pushed = await cloudSyncService.pushCatalogoToCloud(novosProdutos, meta, onProgress);
-    } catch (e) {
-      console.warn('Erro ao sincronizar catálogo na nuvem:', e);
+    // Notifica listeners locais imediatamente (IndexedDB 100% gravado)
+    this.notify();
+
+    // 2. Sincronização em nuvem desacoplada e NÃO-BLOQUEANTE:
+    // Nunca bloqueia a conclusão do salvamento local nem retém a tela aberta.
+    // Se a cota estiver excedida ou o dispositivo estiver offline, mantém a sincronização pendente.
+    if (!isFirestoreQuotaExceeded() && typeof navigator !== 'undefined' && navigator.onLine) {
+      cloudSyncService.pushCatalogoToCloud(novosProdutos, meta).catch((e) => {
+        console.warn('[ProductRepository] Sincronização em background do catálogo pendente:', e?.message || e);
+      });
     }
 
-    this.notify();
-    return pushed;
+    return true;
   }
 
   // --- VINCULOS EAN ---

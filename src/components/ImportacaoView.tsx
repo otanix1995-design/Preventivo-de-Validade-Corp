@@ -248,12 +248,20 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         produtosAtuais,
         fornecedoresAtuais,
         (percent, status) => {
-          setProgressPercent(percent);
-          setProgressStatus(status);
+          // Mapeia o progresso do parser da planilha para 0% a 70%
+          const pct = Math.min(70, Math.round((percent / 100) * 70));
+          setProgressPercent(pct);
+          setProgressStatus(
+            status.includes('concluída com sucesso')
+              ? 'Planilha analisada com sucesso! Preparando catálogo...'
+              : status
+          );
         }
       );
 
       // 1. Salvar registros operacionais no isvService
+      setProgressPercent(75);
+      setProgressStatus('Gravando registros operacionais da BASE RUB localmente...');
       await isvService.salvarImportacaoPlanilhaIsv(
         resultado.registros,
         resultado.resumo
@@ -283,18 +291,36 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
           produtosConvertidos.push(converterRegistroRubParaProduto(reg, eans));
         }
 
-        const pct = Math.round(90 + (i / totalRegistros) * 8);
+        const pct = Math.round(75 + (i / totalRegistros) * 15);
         setProgressPercent(pct);
         setProgressStatus(`Indexando catálogo da BASE DO RUB (${Math.min(i + CHUNK_SIZE, totalRegistros)} de ${totalRegistros})...`);
         // Libera o event loop do navegador para fluidez da UI
         await new Promise((r) => setTimeout(r, 0));
       }
 
-      setProgressStatus('Gravando catálogo indexado no armazenamento seguro...');
+      // 3. Gravar catálogo indexado no IndexedDB (local-first, não bloqueia em nuvem)
+      setProgressPercent(95);
+      setProgressStatus('Confirmando gravação local no IndexedDB...');
       await productRepository.saveProducts(produtosConvertidos);
 
+      // 4. Conclusão confirmada no dispositivo
+      setProgressPercent(100);
+      setProgressStatus('Importação concluída com sucesso!');
+
+      // Pequena pausa para confirmar 100% visualmente
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Garante encerramento imediato do modal local
+      setIsProcessing(false);
       setUltimoResumoIsv(resultado.resumo);
-      if (onImportComplete) onImportComplete();
+
+      if (onImportComplete) {
+        try {
+          onImportComplete();
+        } catch (cbErr) {
+          console.warn('[ImportacaoView] Aviso ao notificar onImportComplete:', cbErr);
+        }
+      }
     } catch (err: any) {
       console.error('Erro ao importar BASE DO RUB:', err);
       setErroGlobal(
@@ -458,10 +484,17 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
               </div>
             </div>
 
-            <div className="bg-blue-50 border border-blue-100 rounded-xl p-2.5 text-[11px] text-blue-900 font-medium flex items-center justify-center gap-2">
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-700 shrink-0" />
-              <span>Por favor, aguarde a conclusão sem fechar a tela.</span>
-            </div>
+            {progressPercent >= 100 ? (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900 font-semibold flex items-center justify-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>Importação concluída com sucesso no dispositivo! Fechando...</span>
+              </div>
+            ) : (
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-2.5 text-[11px] text-blue-900 font-medium flex items-center justify-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-700 shrink-0" />
+                <span>Por favor, aguarde a conclusão sem fechar a tela.</span>
+              </div>
+            )}
           </div>
         </div>
       )}
