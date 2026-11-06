@@ -29,17 +29,19 @@ import {
 interface NuvemV3PreparacaoModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: TabType;
 }
 
 type TabType = 'visao_geral' | 'backup' | 'inventario' | 'seguranca' | 'concorrencia_rub';
 
-export const NuvemV3PreparacaoModal: React.FC<NuvemV3PreparacaoModalProps> = ({ isOpen, onClose }) => {
-  const [activeTab, setActiveTab] = useState<TabType>('visao_geral');
+export const NuvemV3PreparacaoModal: React.FC<NuvemV3PreparacaoModalProps> = ({ isOpen, onClose, initialTab }) => {
+  const [activeTab, setActiveTab] = useState<TabType>(() => initialTab || 'visao_geral');
 
   // Estados do Backup
   const [isGeneratingBackup, setIsGeneratingBackup] = useState(false);
   const [backupGerado, setBackupGerado] = useState<SnapshotCompletoIndexedDB | null>(null);
   const [validacaoBackup, setValidacaoBackup] = useState<ValidacaoBackupResultado | null>(null);
+  const [erroBackup, setErroBackup] = useState<string | null>(null);
 
   // Estados do Inventário
   const [isAnalyzingInventory, setIsAnalyzingInventory] = useState(false);
@@ -53,18 +55,26 @@ export const NuvemV3PreparacaoModal: React.FC<NuvemV3PreparacaoModalProps> = ({ 
   const [resultadoConcorrenciaSucesso, setResultadoConcorrenciaSucesso] = useState<ResultadoPublicacaoRub | null>(null);
   const [resultadoConcorrenciaConflito, setResultadoConcorrenciaConflito] = useState<ResultadoPublicacaoRub | null>(null);
 
+  React.useEffect(() => {
+    if (isOpen && initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [isOpen, initialTab]);
+
   if (!isOpen) return null;
 
   // Ações do Backup
   const handleGerarEBaixarBackup = async () => {
     setIsGeneratingBackup(true);
+    setErroBackup(null);
     try {
       const snap = await backupService.baixarBackupJson('172');
       setBackupGerado(snap);
       const val = backupService.validarIntegridade(snap);
       setValidacaoBackup(val);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Falha no backup:', err);
+      setErroBackup(err?.message || 'Erro ao gerar ou baixar arquivo de backup');
     } finally {
       setIsGeneratingBackup(false);
     }
@@ -352,6 +362,17 @@ export const NuvemV3PreparacaoModal: React.FC<NuvemV3PreparacaoModalProps> = ({ 
                   {isGeneratingBackup ? 'Gerando Snapshot...' : 'Gerar & Baixar Arquivo JSON'}
                 </button>
               </div>
+
+              {/* Alerta de Erro no Backup */}
+              {erroBackup && (
+                <div className="p-4 rounded-xl border border-rose-200 bg-rose-50 text-rose-900 flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold">Falha ao processar download do backup:</p>
+                    <p className="text-xs font-mono">{erroBackup}</p>
+                  </div>
+                </div>
+              )}
 
               {/* Status de Validação da Integridade */}
               {validacaoBackup && (

@@ -17,7 +17,7 @@ import {
   VinculoPromotorIndustria,
 } from '../types';
 import { calcularPosicaoEstoque, isProdutoPesavel, parseEmbalagem } from './codeParser';
-import { dbClear, dbGetAll, dbPut, dbPutAll, STORES } from './db';
+import { dbClear, dbGetAll, dbGetMeta, dbPut, dbPutAll, STORES } from './db';
 import { formatarMoedaBR } from './deviceId';
 import { productRepository } from './productRepository';
 import { promotorService } from './promotorService';
@@ -422,9 +422,14 @@ class IsvService {
       this._registrosIsvOperacional = regIsv || [];
       this._historicoIsv = histIsv || [];
 
-      // Se a base de indústrias estiver vazia, inicializar com semente de teste operacional
+      // Se a base de indústrias estiver vazia, verificar se não foi limpa intencionalmente antes de semear
       if (this._industrias.length === 0 && this._fornecedores.length === 0) {
-        await this._seedInitialData();
+        const metaSpcoi = await dbGetMeta<any>('meta_spcoi_sync', null);
+        if (metaSpcoi?.status === 'LIMPA_AGUARDANDO_IMPORTACAO') {
+          console.log('[IsvService] Base SPCOI007 está limpa aguardando importação. Não injetando dados de demonstração.');
+        } else {
+          await this._seedInitialData();
+        }
       }
 
       this._rebuildIndices();
@@ -1905,6 +1910,23 @@ class IsvService {
 
     this._solicitacoesAjuste[idx] = item;
     await dbPut(STORES.ISV_SOLICITACOES_AJUSTE, item);
+    this._notify();
+  }
+
+  /**
+   * Redefine os dados de fornecedores e indústrias em memória após a limpeza das bases operacionais.
+   * Não afeta solicitações de ajuste ou vínculos operacionais intactos.
+   */
+  public redefinirSpcoiAposLimpeza(): void {
+    this._fornecedores = [];
+    this._industrias = [];
+    this._fornecedoresByCod.clear();
+    this._fornecedoresByCodDig.clear();
+    this._industriasMap.clear();
+    this._registrosIsvOperacional = [];
+    this._historicoSpcoi = [];
+    this._historicoIsv = [];
+    this._rebuildIndices();
     this._notify();
   }
 }

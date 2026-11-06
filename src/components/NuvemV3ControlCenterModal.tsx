@@ -7,6 +7,7 @@ import {
   Clock,
   Cloud,
   CloudOff,
+  Database,
   Download,
   FileJson,
   Layers,
@@ -18,6 +19,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Trash2,
   Upload,
   UserCheck,
   Users,
@@ -33,20 +35,40 @@ import { cloudSyncService } from '../services/cloudSyncService';
 import { VersaoAtivaInfo } from '../services/concurrentRubPublicationService';
 import { reorganizacaoNuvemService, RelatorioReorganizacaoNuvem } from '../services/reorganizacaoNuvemService';
 import { isFirestoreQuotaExceeded } from '../services/firebase';
+import { BasesSyncStatusCard } from './BasesSyncStatusCard';
+import { firebaseAuthService, EstadoAuthServidor } from '../services/firebaseAuthService';
+import { securityRulesValidator, RelatorioDiagnosticoSeguranca } from '../services/securityRulesValidator';
+import {
+  limpezaTresBasesService,
+  DiagnosticoLimpezaBases,
+  ResultadoLimpezaBases,
+} from '../services/limpezaTresBasesService';
+
+export type TabSecao = 'REORGANIZACAO' | 'SINCRONIZACAO' | 'BASE_RUB' | 'BACKUP' | 'DIAGNOSTICO' | 'PAPEIS' | 'LIMPEZA_BASES';
 
 interface NuvemV3ControlCenterModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialTab?: TabSecao;
 }
 
-type TabSecao = 'REORGANIZACAO' | 'SINCRONIZACAO' | 'BASE_RUB' | 'BACKUP' | 'DIAGNOSTICO' | 'PAPEIS';
-
-export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps> = ({ isOpen, onClose }) => {
-  const [tabAtiva, setTabAtiva] = useState<TabSecao>('REORGANIZACAO');
+export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps> = ({
+  isOpen,
+  onClose,
+  initialTab,
+}) => {
+  const [tabAtiva, setTabAtiva] = useState<TabSecao>(() => initialTab || 'REORGANIZACAO');
   const [usuario, setUsuario] = useState<UsuarioOperacional>(() => authRoleService.getUsuarioAtual());
   const [contadores, setContadores] = useState(() => nuvemSyncEngine.getContadores());
   const [versaoAtivaRub, setVersaoAtivaRub] = useState<VersaoAtivaInfo | null>(() => rubSyncService.getVersaoAtivaRemota());
   const [statusPub, setStatusPub] = useState<PublicacaoRubStatus>(() => rubSyncService.getStatusPublicacao());
+
+  // Atualiza tabAtiva se initialTab for fornecido ao abrir
+  useEffect(() => {
+    if (isOpen && initialTab) {
+      setTabAtiva(initialTab);
+    }
+  }, [isOpen, initialTab]);
   
   // Reorganização & Ressincronização states
   const [relatorioReorg, setRelatorioReorg] = useState<RelatorioReorganizacaoNuvem | null>(() =>
@@ -68,6 +90,22 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
   const [isForcingSync, setIsForcingSync] = useState(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
+  // Server Auth states
+  const [authServidor, setAuthServidor] = useState<EstadoAuthServidor>(() => firebaseAuthService.getEstado());
+  const [relatorioSeguranca, setRelatorioSeguranca] = useState<RelatorioDiagnosticoSeguranca>(() =>
+    securityRulesValidator.executarSuiteDeTestes()
+  );
+  const [isLogandoGoogle, setIsLogandoGoogle] = useState(false);
+
+  // Estados da Limpeza Controlada das 3 Bases Operacionais (Filial 172)
+  const [diagnosticoBases, setDiagnosticoBases] = useState<DiagnosticoLimpezaBases | null>(null);
+  const [carregandoDiagnostico, setCarregandoDiagnostico] = useState(false);
+  const [textoConfirmacao, setTextoConfirmacao] = useState('');
+  const [executandoLimpeza, setExecutandoLimpeza] = useState(false);
+  const [resultadoLimpeza, setResultadoLimpeza] = useState<ResultadoLimpezaBases | null>(null);
+  const [erroLimpeza, setErroLimpeza] = useState<string | null>(null);
+  const [limpezaToast, setLimpezaToast] = useState<string | null>(null);
+
   useEffect(() => {
     if (!isOpen) return;
 
@@ -78,6 +116,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
     const unsubRubVersao = rubSyncService.subscribeVersao(setVersaoAtivaRub);
     const unsubRubStatus = rubSyncService.subscribeStatus(setStatusPub);
     const unsubReorg = reorganizacaoNuvemService.subscribe(setRelatorioReorg);
+    const unsubServerAuth = firebaseAuthService.subscribe(setAuthServidor);
 
     return () => {
       unsubAuth();
@@ -85,13 +124,94 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
       unsubRubVersao();
       unsubRubStatus();
       unsubReorg();
+      unsubServerAuth();
     };
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isOpen && tabAtiva === 'LIMPEZA_BASES' && !diagnosticoBases && !carregandoDiagnostico) {
+      handleCarregarDiagnostico();
+    }
+  }, [isOpen, tabAtiva]);
 
   if (!isOpen) return null;
 
   const handleMudarPapel = (papel: PapelOperacional) => {
     authRoleService.alternarPapel(papel);
+  };
+
+  const handleCarregarDiagnostico = async () => {
+    setCarregandoDiagnostico(true);
+    setErroLimpeza(null);
+    try {
+      const diag = await limpezaTresBasesService.diagnosticarBasesOperacionais('172');
+      setDiagnosticoBases(diag);
+    } catch (e: any) {
+      setErroLimpeza(e?.message || 'Falha ao consultar diagnóstico das bases.');
+    } finally {
+      setCarregandoDiagnostico(false);
+    }
+  };
+
+  const handleBaixarBackupPreLimpeza = async () => {
+    try {
+      setLimpezaToast('Gerando e baixando backup completo (JSON)...');
+      await backupService.baixarBackupJson('172');
+      setLimpezaToast('Backup baixado com sucesso!');
+      setTimeout(() => setLimpezaToast(null), 4000);
+    } catch (e: any) {
+      setErroLimpeza(e?.message || 'Falha ao gerar arquivo de backup.');
+    }
+  };
+
+  const handleExecutarLimpezaBases = async () => {
+    if (textoConfirmacao.trim().toUpperCase() !== 'LIMPAR-BASES-172') {
+      setErroLimpeza('Por favor, digite exatamente "LIMPAR-BASES-172" no campo de confirmação.');
+      return;
+    }
+
+    // Eleva papel operacional local para Gerência / Administrador
+    if (authRoleService.getPapel() !== 'GERENCIA_ADMIN') {
+      authRoleService.alternarPapel('GERENCIA_ADMIN');
+    }
+
+    setExecutandoLimpeza(true);
+    setErroLimpeza(null);
+    try {
+      const res = await limpezaTresBasesService.executarLimpezaDasTresBases('172', true);
+      setResultadoLimpeza(res);
+      setTextoConfirmacao('');
+      setLimpezaToast('Limpeza das 3 bases concluída com sucesso!');
+      setTimeout(() => setLimpezaToast(null), 5000);
+      await handleCarregarDiagnostico();
+    } catch (e: any) {
+      console.error('Erro na limpeza das bases:', e);
+      setErroLimpeza(e?.message || 'Erro inesperado durante a execução da limpeza.');
+    } finally {
+      setExecutandoLimpeza(false);
+    }
+  };
+
+  const handleLoginGoogle = async () => {
+    setIsLogandoGoogle(true);
+    try {
+      const res = await firebaseAuthService.loginComGoogle();
+      setSyncToast(res.mensagem);
+    } catch (e: any) {
+      setSyncToast(`Erro login: ${e?.message}`);
+    } finally {
+      setIsLogandoGoogle(false);
+    }
+  };
+
+  const handleLogoutGoogle = async () => {
+    await firebaseAuthService.logout();
+    setSyncToast('Sessão desconectada do Firebase Auth');
+  };
+
+  const handleRodarTestesSeguranca = () => {
+    const rel = securityRulesValidator.executarSuiteDeTestes();
+    setRelatorioSeguranca(rel);
   };
 
   const handleExecutarReorganizacao = async () => {
@@ -279,11 +399,11 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
           </button>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="flex items-center gap-1 px-4 pt-3 border-b border-slate-200 bg-slate-50 overflow-x-auto no-scrollbar">
+        {/* Tab Navigation - Visível, acessível e scrollável */}
+        <div className="flex items-center gap-1.5 px-4 pt-3 border-b border-slate-200 bg-slate-50 overflow-x-auto scrollbar-thin scrollbar-thumb-slate-300 pb-0.5">
           <button
             onClick={() => setTabAtiva('REORGANIZACAO')}
-            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0 ${
               tabAtiva === 'REORGANIZACAO'
                 ? 'border-[#F36B0B] text-[#C94F00] bg-white shadow-2xs font-extrabold'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -295,7 +415,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
 
           <button
             onClick={() => setTabAtiva('SINCRONIZACAO')}
-            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0 ${
               tabAtiva === 'SINCRONIZACAO'
                 ? 'border-[#F36B0B] text-[#C94F00] bg-white shadow-2xs'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -307,7 +427,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
 
           <button
             onClick={() => setTabAtiva('BASE_RUB')}
-            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0 ${
               tabAtiva === 'BASE_RUB'
                 ? 'border-[#F36B0B] text-[#C94F00] bg-white shadow-2xs'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -319,7 +439,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
 
           <button
             onClick={() => setTabAtiva('BACKUP')}
-            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0 ${
               tabAtiva === 'BACKUP'
                 ? 'border-[#F36B0B] text-[#C94F00] bg-white shadow-2xs'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -331,7 +451,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
 
           <button
             onClick={() => setTabAtiva('DIAGNOSTICO')}
-            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0 ${
               tabAtiva === 'DIAGNOSTICO'
                 ? 'border-[#F36B0B] text-[#C94F00] bg-white shadow-2xs'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -343,7 +463,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
 
           <button
             onClick={() => setTabAtiva('PAPEIS')}
-            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 ${
+            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0 ${
               tabAtiva === 'PAPEIS'
                 ? 'border-[#F36B0B] text-[#C94F00] bg-white shadow-2xs'
                 : 'border-transparent text-slate-600 hover:text-slate-900'
@@ -351,6 +471,18 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
           >
             <Users className="w-3.5 h-3.5" />
             <span>Papéis & Acesso</span>
+          </button>
+
+          <button
+            onClick={() => setTabAtiva('LIMPEZA_BASES')}
+            className={`px-3.5 py-2.5 text-xs font-black uppercase tracking-wider rounded-t-xl transition-all border-b-2 whitespace-nowrap cursor-pointer flex items-center gap-1.5 shrink-0 ${
+              tabAtiva === 'LIMPEZA_BASES'
+                ? 'border-rose-600 text-rose-700 bg-white shadow-2xs'
+                : 'border-transparent text-slate-600 hover:text-rose-700'
+            }`}
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+            <span>Limpeza das 3 Bases</span>
           </button>
         </div>
 
@@ -556,6 +688,9 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
                   <span>{syncToast}</span>
                 </div>
               )}
+
+              {/* Status Unificado das 3 Bases Operacionais */}
+              <BasesSyncStatusCard />
 
               {/* Status Counters Cards */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -918,45 +1053,470 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
           {/* ================================================================= */}
           {tabAtiva === 'PAPEIS' && (
             <div className="space-y-4">
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4">
-                <h4 className="text-xs font-black uppercase text-slate-900">
-                  Controle de Acesso Baseado em Papéis (RBAC) — Filial 172
-                </h4>
-                <p className="text-xs text-slate-600 mt-1">
-                  Selecione o papel do usuário deste dispositivo para testar ou operar com as permissões apropriadas:
-                </p>
+              {/* Card 1: Autenticação Firebase & Perfil no Servidor Firestore */}
+              <div className="bg-slate-900 border border-slate-700 rounded-xl p-4 text-white">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-lg bg-indigo-950 border border-indigo-700/60 text-indigo-400">
+                      <Lock className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-black uppercase tracking-wide text-white">
+                        Autenticação Firebase & Autorização no Servidor Firestore
+                      </h4>
+                      <p className="text-[11px] text-slate-300">
+                        {authServidor.isAutenticado && !authServidor.isAnonimo
+                          ? `Conectado via Firebase Auth: ${authServidor.email}`
+                          : 'Sessão anônima local ativa (permissões administrativas restritas na nuvem)'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {authServidor.isAutenticado && !authServidor.isAnonimo ? (
+                      <button
+                        type="button"
+                        onClick={handleLogoutGoogle}
+                        className="px-3 py-1.5 rounded-lg bg-rose-900/60 hover:bg-rose-800 border border-rose-700 text-xs font-bold text-rose-200 transition-colors cursor-pointer"
+                      >
+                        Desconectar
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={handleLoginGoogle}
+                        disabled={isLogandoGoogle}
+                        className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-bold text-white shadow transition-colors flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <UserCheck className="w-3.5 h-3.5" />
+                        <span>{isLogandoGoogle ? 'Conectando...' : 'Entrar com Google'}</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                <div className="pt-3 grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                  <div className="p-2.5 rounded-lg bg-slate-800/80 border border-slate-700">
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Status Servidor:</span>
+                    <span className="font-bold text-slate-200 flex items-center gap-1.5 mt-0.5">
+                      {authServidor.isVerificadoServidor ? (
+                        <>
+                          <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                          <span className="text-emerald-400 font-black">Autorizado no Servidor</span>
+                        </>
+                      ) : (
+                        <>
+                          <ShieldAlert className="w-4 h-4 text-amber-400" />
+                          <span className="text-amber-300 font-semibold">Perfil Local / Anônimo</span>
+                        </>
+                      )}
+                    </span>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-800/80 border border-slate-700">
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Filial Autorizada:</span>
+                    <span className="font-bold text-slate-200 mt-0.5 block">
+                      Filial {authServidor.perfil?.filialId || usuario.filialId || '172'} (Cascavel)
+                    </span>
+                  </div>
+
+                  <div className="p-2.5 rounded-lg bg-slate-800/80 border border-slate-700">
+                    <span className="text-[10px] text-slate-400 uppercase font-bold block">Papel no Firestore:</span>
+                    <span className="font-bold text-orange-400 mt-0.5 block">
+                      {authServidor.perfil?.papel || usuario.papel}
+                    </span>
+                  </div>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {(['OPERADOR_LOJA', 'CONFERENTE_ENCARREGADO', 'GERENCIA_ADMIN'] as PapelOperacional[]).map((p) => {
-                  const info = PAPEIS_INFO[p];
-                  const isCurrent = usuario.papel === p;
-                  return (
-                    <div
-                      key={p}
-                      onClick={() => handleMudarPapel(p)}
-                      className={`p-4 rounded-xl border transition-all cursor-pointer space-y-2 ${
-                        isCurrent
-                          ? 'bg-orange-50 border-[#F36B0B] ring-2 ring-orange-500 shadow-xs'
-                          : 'bg-white border-slate-200 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-black uppercase text-slate-900">{info.rotulo}</span>
-                        {isCurrent && <Check className="w-4 h-4 text-[#C94F00] stroke-[3]" />}
+              {/* Card 2: Seletor de Papéis Operacionais Locais */}
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xs font-black uppercase text-slate-900">
+                      Contexto Operacional Local (RBAC) — Filial 172
+                    </h4>
+                    <p className="text-[11px] text-slate-600 mt-0.5">
+                      No servidor Firestore, o papel é governado por <code className="bg-slate-200 px-1 py-0.5 rounded text-[10px]">/usuarios_autorizados</code> (bloqueado contra auto-escalonamento).
+                    </p>
+                  </div>
+                  <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded">
+                    Perfil Ativo: {usuario.papel}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                  {(['OPERADOR_LOJA', 'CONFERENTE_ENCARREGADO', 'GERENCIA_ADMIN'] as PapelOperacional[]).map((p) => {
+                    const info = PAPEIS_INFO[p];
+                    const isCurrent = usuario.papel === p;
+                    return (
+                      <div
+                        key={p}
+                        onClick={() => handleMudarPapel(p)}
+                        className={`p-3.5 rounded-xl border transition-all cursor-pointer space-y-1.5 ${
+                          isCurrent
+                            ? 'bg-orange-50 border-[#F36B0B] ring-2 ring-orange-500 shadow-xs'
+                            : 'bg-white border-slate-200 hover:border-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-black uppercase text-slate-900">{info.rotulo}</span>
+                          {isCurrent && <Check className="w-4 h-4 text-[#C94F00] stroke-[3]" />}
+                        </div>
+                        <p className="text-[11px] text-slate-600 leading-snug">{info.descricao}</p>
+                        <div className="pt-2 border-t border-slate-100 text-[10px] space-y-0.5">
+                          <p className={p !== 'OPERADOR_LOJA' ? 'text-emerald-700 font-bold' : 'text-slate-400'}>
+                            ✓ Exclusão Lógica fundamentada
+                          </p>
+                          <p className={p === 'GERENCIA_ADMIN' ? 'text-emerald-700 font-bold' : 'text-slate-400'}>
+                            ✓ Publicação Central BASE RUB
+                          </p>
+                        </div>
                       </div>
-                      <p className="text-[11px] text-slate-600 leading-snug">{info.descricao}</p>
-                      <div className="pt-2 border-t border-slate-100 text-[10px] space-y-1">
-                        <p className={p !== 'OPERADOR_LOJA' ? 'text-emerald-700 font-bold' : 'text-slate-400'}>
-                          ✓ Exclusão Lógica fundamentada
-                        </p>
-                        <p className={p === 'GERENCIA_ADMIN' ? 'text-emerald-700 font-bold' : 'text-slate-400'}>
-                          ✓ Publicação Central BASE RUB
-                        </p>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Card 3: Bateria de Diagnóstico de Regras de Segurança (11 Testes) */}
+              <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h4 className="text-xs font-black uppercase text-slate-900 flex items-center gap-1.5">
+                      <Shield className="w-4 h-4 text-indigo-600" />
+                      Diagnóstico de Regras de Segurança do Firestore ({relatorioSeguranca.totalTestes} Testes)
+                    </h4>
+                    <p className="text-[11px] text-slate-500">
+                      Validação em simulador estrito de permissões: não autenticado, outra filial, operador, gerência e auto-escalonamento.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleRodarTestesSeguranca}
+                    className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold uppercase rounded-lg transition-colors cursor-pointer"
+                  >
+                    Re-executar 11 Testes
+                  </button>
+                </div>
+
+                <div className="p-2.5 bg-slate-50 rounded-lg flex items-center justify-between text-xs font-bold">
+                  <span className="text-emerald-800">
+                    ✓ {relatorioSeguranca.testesPassaram} de {relatorioSeguranca.totalTestes} testes de segurança aprovados
+                  </span>
+                  <span className="text-slate-500 text-[10px] font-mono">
+                    Última execução: {new Date(relatorioSeguranca.dataExecucao).toLocaleTimeString('pt-BR')}
+                  </span>
+                </div>
+
+                <div className="space-y-1.5 max-h-60 overflow-y-auto divide-y divide-slate-100 pr-1">
+                  {relatorioSeguranca.resultados.map((t) => (
+                    <div key={t.id} className="pt-2 text-xs flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2">
+                        {t.sucesso ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                        )}
+                        <div>
+                          <p className="font-bold text-slate-800 text-[11px]">{t.nome}</p>
+                          <p className="text-[10px] text-slate-500 leading-tight">{t.motivo}</p>
+                        </div>
+                      </div>
+                      <span className="px-1.5 py-0.5 rounded text-[9px] font-bold shrink-0 font-mono bg-emerald-100 text-emerald-800">
+                        {t.resultadoEsperado}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+          {/* ================================================================= */}
+          {/* TAB 6: LIMPEZA CONTROLADA DAS TRÊS BASES OPERACIONAIS (FILIAL 172) */}
+          {/* ================================================================= */}
+          {tabAtiva === 'LIMPEZA_BASES' && (
+            <div className="space-y-4">
+              {limpezaToast && (
+                <div className="p-3 bg-emerald-50 border border-emerald-300 text-emerald-900 rounded-xl text-xs font-bold animate-in fade-in flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{limpezaToast}</span>
+                </div>
+              )}
+
+              {erroLimpeza && (
+                <div className="p-3 bg-rose-50 border border-rose-300 text-rose-900 rounded-xl text-xs font-bold animate-in fade-in flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{erroLimpeza}</span>
+                </div>
+              )}
+
+              {/* Informative Header Banner */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-linear-to-r from-rose-50 via-amber-50 to-rose-50 border-2 border-rose-200">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <span className="p-2.5 rounded-xl bg-rose-600 text-white shadow-xs shrink-0 mt-0.5">
+                      <Trash2 className="w-5 h-5" />
+                    </span>
+                    <div>
+                      <h3 className="text-base font-black text-slate-900 uppercase tracking-tight">
+                        Limpeza Controlada das Três Bases Operacionais — Filial 172
+                      </h3>
+                      <p className="text-xs text-slate-600 mt-1 max-w-2xl leading-relaxed">
+                        Remove versões antigas da <strong>BASE RUB</strong>, <strong>SPCOI007</strong> e <strong>SAEOU060</strong> do Firebase/Firestore e do IndexedDB local, resetando ponteiros mestres para impedir restauração involuntária por outros dispositivos.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleCarregarDiagnostico}
+                    disabled={carregandoDiagnostico}
+                    className="px-4 py-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-2 shrink-0 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${carregandoDiagnostico ? 'animate-spin' : ''}`} />
+                    <span>Atualizar Diagnóstico</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Preserved Data Shield Banner (Mandatory Isolation Guarantee) */}
+              <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-emerald-600 text-white rounded-lg shrink-0">
+                    <ShieldCheck className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-black uppercase text-emerald-950">
+                      Garantia de Preservação Integral — Isolamento Absoluto
+                    </h4>
+                    <p className="text-[11px] text-emerald-800 mt-0.5">
+                      Vencimentos cadastrados, vínculos EAN de código de barras e promotores <strong>NÃO</strong> são apagados.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 text-xs font-mono font-bold text-emerald-900">
+                  <span className="px-2 py-1 bg-white rounded border border-emerald-300 shadow-2xs">
+                    Vencimentos: {diagnosticoBases?.preservados.vencimentosIndexedDB ?? '...'} lotes
+                  </span>
+                  <span className="px-2 py-1 bg-white rounded border border-emerald-300 shadow-2xs">
+                    EANs: {diagnosticoBases?.preservados.vinculosEanIndexedDB ?? '...'} vínculos
+                  </span>
+                </div>
+              </div>
+
+              {/* Diagnostic Cards Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                {/* 1. BASE RUB */}
+                <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-black uppercase text-slate-800 flex items-center gap-1.5">
+                      <Layers className="w-4 h-4 text-orange-600" />
+                      BASE RUB
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-orange-100 text-orange-800">
+                      36 Colunas
+                    </span>
+                  </div>
+                  <div className="space-y-1 text-xs text-slate-600">
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>IndexedDB Local:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {diagnosticoBases?.baseRub.registrosLocaisIndexedDB ?? '...'} produtos
+                      </strong>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>Versão Ativa Firestore:</span>
+                      <span className="font-mono text-[10px] text-slate-700 truncate max-w-[130px]" title={diagnosticoBases?.baseRub.versaoAtivaRemotaFirestore || 'Nenhuma'}>
+                        {diagnosticoBases?.baseRub.versaoAtivaRemotaFirestore ? diagnosticoBases.baseRub.versaoAtivaRemotaFirestore.substring(0, 16) + '...' : 'Nenhuma'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>Versões Históricas:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {diagnosticoBases?.baseRub.versoesHistoricasRemotas ?? '...'} versões
+                      </strong>
+                    </div>
+                    <div className="flex justify-between py-1">
+                      <span>Chunks no Firestore:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {(diagnosticoBases?.baseRub.chunksRemotosTotal || 0) + (diagnosticoBases?.baseRub.chunksLegadosTotal || 0)} partes
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. SPCOI007 */}
+                <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-black uppercase text-slate-800 flex items-center gap-1.5">
+                      <Database className="w-4 h-4 text-blue-600" />
+                      SPCOI007
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800">
+                      Fornecedores
+                    </span>
+                  </div>
+                  <div className="space-y-1 text-xs text-slate-600">
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>Fornecedores Local:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {diagnosticoBases?.spcoi007.registrosLocaisIndexedDB ?? '...'} fornecedores
+                      </strong>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>Versão Ativa Firestore:</span>
+                      <span className="font-mono text-[10px] text-slate-700 truncate max-w-[130px]" title={diagnosticoBases?.spcoi007.versaoAtivaRemotaFirestore || 'Nenhuma'}>
+                        {diagnosticoBases?.spcoi007.versaoAtivaRemotaFirestore ? diagnosticoBases.spcoi007.versaoAtivaRemotaFirestore.substring(0, 16) + '...' : 'Nenhuma'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>Versões Históricas:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {diagnosticoBases?.spcoi007.versoesHistoricasRemotas ?? '...'} versões
+                      </strong>
+                    </div>
+                    <div className="flex justify-between py-1">
+                      <span>Chunks no Firestore:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {diagnosticoBases?.spcoi007.chunksRemotosTotal ?? '...'} partes
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. SAEOU060 */}
+                <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-black uppercase text-slate-800 flex items-center gap-1.5">
+                      <Clock className="w-4 h-4 text-purple-600" />
+                      SAEOU060
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800">
+                      Entradas Loja
+                    </span>
+                  </div>
+                  <div className="space-y-1 text-xs text-slate-600">
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>IndexedDB Local:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {diagnosticoBases?.saeou060.registrosLocaisIndexedDB ?? '...'} registros
+                      </strong>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>Versão Ativa Firestore:</span>
+                      <span className="font-mono text-[10px] text-slate-700 truncate max-w-[130px]" title={diagnosticoBases?.saeou060.versaoAtivaRemotaFirestore || 'Nenhuma'}>
+                        {diagnosticoBases?.saeou060.versaoAtivaRemotaFirestore ? diagnosticoBases.saeou060.versaoAtivaRemotaFirestore.substring(0, 16) + '...' : 'Nenhuma'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between py-1 border-b border-slate-100">
+                      <span>Versões Históricas:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {diagnosticoBases?.saeou060.versoesHistoricasRemotas ?? '...'} versões
+                      </strong>
+                    </div>
+                    <div className="flex justify-between py-1">
+                      <span>Chunks no Firestore:</span>
+                      <strong className="text-slate-900 font-mono">
+                        {(diagnosticoBases?.saeou060.chunksRemotosTotal || 0) + (diagnosticoBases?.saeou060.chunksLegadosTotal || 0)} partes
+                      </strong>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Backup Preventivo e Segurança */}
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-xs font-black uppercase text-slate-800 flex items-center gap-1.5">
+                    <FileJson className="w-4 h-4 text-blue-600" />
+                    Backup Preventivo Recuperável
+                  </h4>
+                  <p className="text-[11px] text-slate-600 mt-0.5">
+                    Gere um download completo em JSON de todas as tabelas locais antes de confirmar a exclusão.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleBaixarBackupPreLimpeza}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold uppercase rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shrink-0 shadow-xs"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Baixar Backup Preventivo (JSON)</span>
+                </button>
+              </div>
+
+              {/* Area de Confirmação e Exclusão Definitiva */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-rose-50/60 border-2 border-rose-300 space-y-4">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                  <div>
+                    <h4 className="text-sm font-black uppercase text-rose-950">
+                      Confirmação Expressa de Limpeza Definitiva
+                    </h4>
+                    <p className="text-xs text-rose-800 mt-0.5 leading-relaxed">
+                      Esta ação removerá completamente os dados antigos de <strong>BASE RUB</strong>, <strong>SPCOI007</strong> e <strong>SAEOU060</strong> tanto da nuvem Firestore (Filial 172) quanto do armazenamento local deste navegador. O aplicativo ficará limpo e pronto para receber a nova importação de planilhas.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-white rounded-xl border border-rose-200 space-y-2">
+                  <label className="block text-xs font-bold text-slate-700">
+                    Para confirmar a exclusão, digite exatamente <code className="px-1.5 py-0.5 bg-rose-100 text-rose-900 rounded font-mono font-bold">LIMPAR-BASES-172</code> no campo abaixo:
+                  </label>
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                    <input
+                      type="text"
+                      value={textoConfirmacao}
+                      onChange={(e) => setTextoConfirmacao(e.target.value)}
+                      placeholder="LIMPAR-BASES-172"
+                      className="flex-1 px-3 py-2 text-xs font-mono font-bold border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-rose-500 uppercase"
+                      disabled={executandoLimpeza}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleExecutarLimpezaBases}
+                      disabled={executandoLimpeza || textoConfirmacao.trim().toUpperCase() !== 'LIMPAR-BASES-172'}
+                      className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white text-xs font-black uppercase tracking-wider rounded-lg transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed shadow-xs"
+                    >
+                      {executandoLimpeza ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Executando Limpeza...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Executar Limpeza Definitiva</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Summary after execution */}
+                {resultadoLimpeza && (
+                  <div className="p-3.5 bg-emerald-100/80 border border-emerald-300 rounded-xl text-xs space-y-1.5 animate-in fade-in">
+                    <div className="flex items-center gap-2 text-emerald-950 font-black">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-700" />
+                      <span>{resultadoLimpeza.mensagem}</span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[11px] text-emerald-900 font-mono">
+                      <div>
+                        • BASE RUB: {resultadoLimpeza.detalhesExclusao.baseRub.produtosLocaisRemovidos} prods, {resultadoLimpeza.detalhesExclusao.baseRub.versoesRemotasRemovidas} vers
+                      </div>
+                      <div>
+                        • SPCOI007: {resultadoLimpeza.detalhesExclusao.spcoi007.fornecedoresLocaisRemovidos} forn, {resultadoLimpeza.detalhesExclusao.spcoi007.versoesRemotasRemovidas} vers
+                      </div>
+                      <div>
+                        • SAEOU060: {resultadoLimpeza.detalhesExclusao.saeou060.registrosLocaisRemovidos} reg, {resultadoLimpeza.detalhesExclusao.saeou060.versoesRemotasRemovidas} vers
                       </div>
                     </div>
-                  );
-                })}
+                    <div className="pt-1 text-[11px] font-bold text-emerald-950">
+                      ✓ Vencimentos intactos: {resultadoLimpeza.detalhesExclusao.dadosPreservadosIntactos.vencimentos} | Vínculos EAN intactos: {resultadoLimpeza.detalhesExclusao.dadosPreservadosIntactos.vinculosEan}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

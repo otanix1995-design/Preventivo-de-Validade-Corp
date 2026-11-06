@@ -34,6 +34,10 @@ import { productRepository } from '../services/productRepository';
 import { clearAllData, getHistoricoImportacoes, getProdutos, loadDemoData, reprocessarBases } from '../services/storage';
 import { MetadadosBase, ProdutoSMG, ResumoImportacao, ResumoImportacaoIsv, ResumoImportacaoSPCOI007 } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
+import { BasesSyncStatusCard } from './BasesSyncStatusCard';
+import { rubSyncService } from '../services/rubSyncService';
+import { spcoiSyncService } from '../services/spcoiSyncService';
+import { saeouSyncService } from '../services/saeouSyncService';
 
 interface ImportacaoViewProps {
   metadados: MetadadosBase;
@@ -152,6 +156,16 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
       await productRepository.aplicarNovoSnapshotSaeou060(resultado.registros, file.name);
       await productRepository.addHistorico(resultado.resumo);
       setUltimoResumo(resultado.resumo);
+
+      // Publicação centralizada no Firestore (Filial 172)
+      setProgressPercent(90);
+      setProgressStatus('Publicando SAEOU060 na nuvem central da Filial 172...');
+      try {
+        await saeouSyncService.publicarSaeouCentral(resultado.registros, '172');
+      } catch (pubErr) {
+        console.warn('Publicação SAEOU060 em nuvem pendente (dados mantidos no IndexedDB):', pubErr);
+      }
+
       if (onImportComplete) onImportComplete();
     } catch (err: any) {
       console.error('Erro ao importar SAEOU060:', err);
@@ -208,6 +222,20 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         resultado.industrias,
         resultado.resumo
       );
+
+      // Publicação centralizada no Firestore (Filial 172)
+      setProgressPercent(90);
+      setProgressStatus('Publicando SPCOI007 na nuvem central da Filial 172...');
+      try {
+        await spcoiSyncService.publicarSpcoiCentral(
+          resultado.fornecedores,
+          resultado.industrias,
+          resultado.resumo,
+          '172'
+        );
+      } catch (pubErr) {
+        console.warn('Publicação SPCOI007 em nuvem pendente (dados mantidos no IndexedDB):', pubErr);
+      }
 
       setUltimoResumoSpcoi(resultado.resumo);
       if (onImportComplete) onImportComplete();
@@ -299,11 +327,21 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
       }
 
       // 3. Gravar catálogo indexado no IndexedDB (local-first, não bloqueia em nuvem)
-      setProgressPercent(95);
+      setProgressPercent(90);
       setProgressStatus('Confirmando gravação local no IndexedDB...');
       await productRepository.saveProducts(produtosConvertidos);
 
-      // 4. Conclusão confirmada no dispositivo
+      // 4. Publicar na nuvem central da Filial 172 (se autenticado/gerência)
+      setProgressPercent(95);
+      setProgressStatus('Publicando BASE RUB na nuvem central da Filial 172...');
+      try {
+        const metaAtual = productRepository.getMetadados();
+        await rubSyncService.publicarBaseRubCentral(produtosConvertidos, metaAtual, '172');
+      } catch (pubErr) {
+        console.warn('Publicação BASE RUB em nuvem pendente (dados mantidos no IndexedDB):', pubErr);
+      }
+
+      // 5. Conclusão confirmada no dispositivo
       setProgressPercent(100);
       setProgressStatus('Importação concluída com sucesso!');
 
@@ -498,6 +536,9 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Cartão de Sincronização Unificada das 3 Bases Operacionais (Filial 172) */}
+      <BasesSyncStatusCard />
 
       {/* Top Header Card with Bold Typography */}
       <div className="bg-white rounded-xl p-5 shadow-sm border border-gray-200 space-y-3 relative overflow-hidden">

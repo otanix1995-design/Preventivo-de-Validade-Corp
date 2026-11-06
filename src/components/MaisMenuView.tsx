@@ -11,15 +11,16 @@ import {
   TrendingDown,
   UserCheck,
   Users,
-  X
+  X,
+  RefreshCw,
 } from 'lucide-react';
 import React, { useState } from 'react';
 import { clearAllData, loadDemoData } from '../services/storage';
 import { MetadadosBase } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 import { SincronizacaoCentralModal } from './SincronizacaoCentralModal';
-
 import { NuvemV3PreparacaoModal } from './NuvemV3PreparacaoModal';
+import { NuvemV3ControlCenterModal } from './NuvemV3ControlCenterModal';
 
 interface MaisMenuViewProps {
   metadados: MetadadosBase;
@@ -35,8 +36,19 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
   const [isLimparModalOpen, setIsLimparModalOpen] = useState(false);
   const [isNuvemModalOpen, setIsNuvemModalOpen] = useState(false);
   const [isNuvemV3PrepModalOpen, setIsNuvemV3PrepModalOpen] = useState(false);
+  const [isCentralNuvemModalOpen, setIsCentralNuvemModalOpen] = useState(false);
 
   const menuItems = [
+    {
+      id: 'nuvem_v3_central',
+      icon: Cloud,
+      iconColor: 'text-orange-700',
+      iconBg: 'bg-orange-100',
+      title: 'Central Nuvem V3 — Sincronização e Governança',
+      desc: 'Painel completo: Reorganização da filial 172, controle de versões da BASE RUB, backup de 18 tabelas e governança.',
+      badge: 'Nuvem V3',
+      onClick: () => setIsCentralNuvemModalOpen(true),
+    },
     {
       id: 'nuvem_v3_prep',
       icon: ShieldCheck,
@@ -49,7 +61,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
     },
     {
       id: 'nuvem',
-      icon: Cloud,
+      icon: RefreshCw,
       iconColor: 'text-indigo-700',
       iconBg: 'bg-indigo-100',
       title: 'Base Central Firestore & Nuvem',
@@ -306,6 +318,15 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
         isOpen={isNuvemV3PrepModalOpen}
         onClose={() => {
           setIsNuvemV3PrepModalOpen(false);
+          onRefreshData();
+        }}
+      />
+
+      {/* Modal Central Nuvem V3 (Sincronização, BASE RUB e Governança) */}
+      <NuvemV3ControlCenterModal
+        isOpen={isCentralNuvemModalOpen}
+        onClose={() => {
+          setIsCentralNuvemModalOpen(false);
           onRefreshData();
         }}
       />

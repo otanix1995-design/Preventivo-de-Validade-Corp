@@ -1,0 +1,394 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // ISV | FILIAL 172 — REGRAS DE SEGURANÇA E GOVERNANÇA DO FIRESTORE (VERSÃO AUDITADA)
+    // ARQUITETURA HÍBRIDA: ACESSO SEM LOGIN PARA OPERAÇÃO + GERÊNCIA AUTENTICADA
+    // =========================================================================
+
+    // -------------------------------------------------------------------------
+    // 0. ZERO-TRUST DEFAULT-DENY
+    // Qualquer coleção, subcoleção ou rota não expressamente declarada é bloqueada.
+    // -------------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // FUNÇÕES AUXILIARES DE AUTENTICAÇÃO E PAPÉIS
+    // -------------------------------------------------------------------------
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/usuarios_autorizados/$(request.auth.uid)).data;
+    }
+
+    function isAuthorizedUser(filialId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/usuarios_autorizados/$(request.auth.uid)) &&
+        getUserDoc().ativo == true &&
+        getUserDoc().filialId == filialId;
+    }
+
+    function isGerenteAdmin(filialId) {
+      return isAuthorizedUser(filialId) &&
+        getUserDoc().papel == 'GERENCIA_ADMIN';
+    }
+
+    // -------------------------------------------------------------------------
+    // VALIDAÇÃO ESTRUTURAL DE LOTES DE VENCIMENTO (PÚBLICO SEM LOGIN)
+    // -------------------------------------------------------------------------
+
+    function isAllowedLoteKeys(data) {
+      return data.keys().hasOnly([
+        'id', 'vencimentoId', 'filialId', 'filial_id',
+        'codigo_interno', 'codigoInterno', 'digito', 'codigo_exibicao',
+        'descricao_produto', 'descricao', 'embalagem', 'fator_embalagem',
+        'data_validade', 'dataVencimento',
+        'quantidade_total_unidades', 'quantidade',
+        'observacao', 'lote_identificador',
+        'status_customizado', 'status',
+        'enviar_ao_comprador', 'enviarParaComprador',
+        'origem', 'preco_normal', 'precoNormal', 'preco_trabalhado', 'precoTrabalhado',
+        'data_preco', 'saeou060_id', 'arquivo_origem',
+        'criado_em', 'criadoEm', 'atualizado_em', 'atualizadoEm', 'updatedAt', 'createdAt',
+        'criadoPor', 'criadoPorMatricula', 'criadoPorPapel',
+        'atualizadoPor', 'atualizadoPorMatricula', 'atualizadoPorPapel',
+        'deviceId', 'operationId',
+        'isDeleted', 'deletedAt', 'motivoExclusao', 'usuarioExclusao', 'papelExclusao',
+        '_versaoLocal', '_serverVersion', '_syncedAt'
+      ]);
+    }
+
+    function isValidLoteCreate(filialId) {
+      let data = request.resource.data;
+      return isAllowedLoteKeys(data) &&
+        data.filialId == filialId &&
+        filialId == '172' &&
+        // Código do produto obrigatório (string alfanumérica de 1 a 20 chars)
+        ((data.codigoInterno is string && data.codigoInterno.size() >= 1 && data.codigoInterno.size() <= 20) ||
+         (data.codigo_interno is string && data.codigo_interno.size() >= 1 && data.codigo_interno.size() <= 20)) &&
+        // Data canônica de validade no formato YYYY-MM-DD (10 chars)
+        ((data.dataVencimento is string && data.dataVencimento.size() == 10) ||
+         (data.data_validade is string && data.data_validade.size() == 10)) &&
+        // Quantidade numérica válida (limites operacionais: 0 a 100.000 unidades)
+        ((data.quantidade is number && data.quantidade >= 0 && data.quantidade <= 100000) ||
+         (data.quantidade_total_unidades is number && data.quantidade_total_unidades >= 0 && data.quantidade_total_unidades <= 100000)) &&
+        // Preços opcionais não-negativos
+        (!('precoNormal' in data) || data.precoNormal == null || (data.precoNormal is number && data.precoNormal >= 0 && data.precoNormal <= 100000)) &&
+        (!('preco_normal' in data) || data.preco_normal == null || (data.preco_normal is number && data.preco_normal >= 0 && data.preco_normal <= 100000)) &&
+        (!('precoTrabalhado' in data) || data.precoTrabalhado == null || (data.precoTrabalhado is number && data.precoTrabalhado >= 0 && data.precoTrabalhado <= 100000)) &&
+        (!('preco_trabalhado' in data) || data.preco_trabalhado == null || (data.preco_trabalhado is number && data.preco_trabalhado >= 0 && data.preco_trabalhado <= 100000)) &&
+        (!('observacao' in data) || data.observacao == null || (data.observacao is string && data.observacao.size() <= 500)) &&
+        (!('isDeleted' in data) || data.isDeleted == false);
+    }
+
+    function isValidLoteUpdate(filialId) {
+      let data = request.resource.data;
+      let existing = resource.data;
+      return isAllowedLoteKeys(data) &&
+        // 1. Filial é rigorosamente IMUTÁVEL
+        data.filialId == existing.filialId &&
+        data.filialId == filialId &&
+        filialId == '172' &&
+        // 2. Identificadores primários são rigorosamente IMUTÁVEIS
+        (!('id' in existing) || !('id' in data) || data.id == existing.id) &&
+        (!('vencimentoId' in existing) || !('vencimentoId' in data) || data.vencimentoId == existing.vencimentoId) &&
+        // 3. Vínculo do lote com o produto é rigorosamente IMUTÁVEL (impede reatribuição a outro SKU)
+        (!('codigo_interno' in existing) || !('codigo_interno' in data) || data.codigo_interno == existing.codigo_interno) &&
+        (!('codigoInterno' in existing) || !('codigoInterno' in data) || data.codigoInterno == existing.codigoInterno) &&
+        (!('digito' in existing) || !('digito' in data) || data.digito == existing.digito) &&
+        (!('codigo_exibicao' in existing) || !('codigo_exibicao' in data) || data.codigo_exibicao == existing.codigo_exibicao) &&
+        // 4. Origem do lote é rigorosamente IMUTÁVEL
+        (!('origem' in existing) || !('origem' in data) || data.origem == existing.origem) &&
+        (!('saeou060_id' in existing) || !('saeou060_id' in data) || data.saeou060_id == existing.saeou060_id) &&
+        (!('arquivo_origem' in existing) || !('arquivo_origem' in data) || data.arquivo_origem == existing.arquivo_origem) &&
+        // 5. Metadados de criação originais são rigorosamente IMUTÁVEIS
+        (!('criado_em' in existing) || !('criado_em' in data) || data.criado_em == existing.criado_em) &&
+        (!('criadoEm' in existing) || !('criadoEm' in data) || data.criadoEm == existing.criadoEm) &&
+        (!('createdAt' in existing) || !('createdAt' in data) || data.createdAt == existing.createdAt) &&
+        (!('criadoPor' in existing) || !('criadoPor' in data) || data.criadoPor == existing.criadoPor) &&
+        (!('criadoPorMatricula' in existing) || !('criadoPorMatricula' in data) || data.criadoPorMatricula == existing.criadoPorMatricula) &&
+        (!('criadoPorPapel' in existing) || !('criadoPorPapel' in data) || data.criadoPorPapel == existing.criadoPorPapel) &&
+        // 6. Limites numéricos de quantidade
+        ((!('quantidade' in data)) || (data.quantidade is number && data.quantidade >= 0 && data.quantidade <= 100000)) &&
+        ((!('quantidade_total_unidades' in data)) || (data.quantidade_total_unidades is number && data.quantidade_total_unidades >= 0 && data.quantidade_total_unidades <= 100000)) &&
+        // 7. Soft-delete exige justificativa documental válida
+        (
+          (!('isDeleted' in data) || data.isDeleted == false) ||
+          (data.isDeleted == true && data.motivoExclusao is string && data.motivoExclusao.size() >= 3 && data.motivoExclusao.size() <= 200)
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // VALIDAÇÃO DE DIVERGÊNCIAS (ALERTAS OPERACIONAIS)
+    // -------------------------------------------------------------------------
+
+    function isValidDivergenciaKeys(data) {
+      return data.keys().hasOnly([
+        'id', 'tipo', 'origem', 'codigo_interno', 'identificador',
+        'descricao', 'descricao_problema', 'impacto', 'status',
+        'detalhes', 'data_registro'
+      ]);
+    }
+
+    function isValidDivergenciaCreate() {
+      let data = request.resource.data;
+      return isValidDivergenciaKeys(data) &&
+        data.tipo is string && data.tipo.size() >= 3 && data.tipo.size() <= 60 &&
+        data.data_registro is string && data.data_registro.size() >= 10 &&
+        (!('status' in data) || data.status in ['ABERTA', 'RESOLVIDA']) &&
+        (!('impacto' in data) || data.impacto in ['BAIXO', 'MEDIO', 'ALTO']);
+    }
+
+    function isValidDivergenciaUpdate() {
+      let data = request.resource.data;
+      let existing = resource.data;
+      return isValidDivergenciaKeys(data) &&
+        (!('id' in existing) || !('id' in data) || data.id == existing.id) &&
+        (!('tipo' in existing) || !('tipo' in data) || data.tipo == existing.tipo) &&
+        (!('status' in data) || data.status in ['ABERTA', 'RESOLVIDA']);
+    }
+
+    // -------------------------------------------------------------------------
+    // VALIDAÇÃO DAS OPERAÇÕES PÚBLICAS DE PROMOTORES
+    // -------------------------------------------------------------------------
+
+    function isValidSolicitacaoPromotorKeys(data) {
+      return data.keys().hasOnly([
+        'id', 'solicitacaoId', 'filialId', 'promotorId', 'promotorNome',
+        'agencia', 'agenciaNome', 'codigoInterno', 'digito', 'codigoCompleto',
+        'descricao', 'embalagem', 'fatorEmbalagem', 'fator_embalagem',
+        'unidadeMedida', 'unidade_medida', 'ean', 'eans',
+        'dataValidade', 'dataVencimento', 'validade', 'isDataValida',
+        'quantidadeTotalUnidades', 'quantidadeInformada', 'quantidadeInformadaOriginal',
+        'quantidadeCaixas', 'quantidadeUnidades', 'quantidadeEmb1', 'quantidadeEmb9',
+        'quantidadeTexto', 'tipoEmbalagem', 'precoNormal',
+        'inconsistencias', 'isDuplicada', 'duplicadaDeId',
+        'setor', 'setorTipo', 'vinculoPromotorId', 'industriaAgencia',
+        'enviadoEm', 'status', 'criadoEm', 'atualizadoEm',
+        'aprovadoEm', 'aprovadoPor', 'resultadoAprovacao', 'referenciaVencimento',
+        'quantidadeAnterior', 'quantidadeAprovada', 'recusadoEm', 'recusadoPor',
+        'motivoRecusa', 'dataAnalise', 'analisadoPor'
+      ]);
+    }
+
+    function isValidSolicitacaoPromotorCreate() {
+      let data = request.resource.data;
+      return isValidSolicitacaoPromotorKeys(data) &&
+        data.filialId == '172' &&
+        data.promotorId is string && data.promotorId.size() >= 1 &&
+        data.codigoInterno is string && data.codigoInterno.size() >= 1 &&
+        data.status == 'PENDENTE_ANALISE' &&
+        ((data.quantidadeTotalUnidades is number && data.quantidadeTotalUnidades >= 0 && data.quantidadeTotalUnidades <= 100000) ||
+         (data.quantidadeInformada is number && data.quantidadeInformada >= 0 && data.quantidadeInformada <= 100000));
+    }
+
+    function isValidSolicitacaoPromotorUpdate() {
+      let data = request.resource.data;
+      let existing = resource.data;
+      return isValidSolicitacaoPromotorKeys(data) &&
+        (isGerenteAdmin('172') || (
+          // Promotor só pode alterar solicitações enquanto pendentes
+          existing.status == 'PENDENTE_ANALISE' &&
+          data.status == 'PENDENTE_ANALISE' &&
+          data.filialId == existing.filialId &&
+          data.promotorId == existing.promotorId &&
+          data.codigoInterno == existing.codigoInterno
+        ));
+    }
+
+    function isValidVinculoUpdate() {
+      let data = request.resource.data;
+      let existing = resource.data;
+      return isGerenteAdmin('172') || (
+        // Ativação legítima de vínculo pelo promotor no app móvel
+        existing.status == 'AGUARDANDO' &&
+        data.status == 'UTILIZADO' &&
+        data.vinculoId == existing.vinculoId &&
+        data.promotorId == existing.promotorId &&
+        data.codigoVinculo == existing.codigoVinculo &&
+        data.dispositivoId is string && data.dispositivoId.size() >= 3
+      );
+    }
+
+    // =========================================================================
+    // 1. USUÁRIOS AUTORIZADOS (GESTÃO E PROVISIONAMENTO DE PRIVILÉGIOS)
+    // =========================================================================
+    match /usuarios_autorizados/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isGerenteAdmin(resource.data.filialId));
+      allow list: if isSignedIn();
+
+      // Bloqueio de autoatribuição no client Web (exclusivo para Firebase Admin SDK / Console)
+      allow create, update, delete: if false;
+    }
+
+    // =========================================================================
+    // 2. ISOLAMENTO POR FILIAL (FILIAL 172 — CASCAVEL)
+    // =========================================================================
+    match /filiais/{filialId} {
+
+      // 2.1 BASE RUB MESTRE (Catálogo de 36 colunas com custos e vendas)
+      // Conforme decisão definitiva: todos os 36 campos permanecem com leitura pública.
+      // Publicação, substituição e comutação restritas exclusivamente à Gerência.
+      match /catalogo_rub_versoes/{versaoId} {
+        allow read: if true;
+        allow write: if isGerenteAdmin(filialId);
+
+        match /chunks/{chunkId} {
+          allow read: if true;
+          allow write: if isGerenteAdmin(filialId);
+        }
+      }
+
+      // 2.2 SPCOI007 (Fornecedores e Indústrias)
+      match /spcoi_versoes/{versaoId} {
+        allow read: if true;
+        allow write: if isGerenteAdmin(filialId);
+
+        match /chunks/{chunkId} {
+          allow read: if true;
+          allow write: if isGerenteAdmin(filialId);
+        }
+      }
+
+      // 2.3 SAEOU060 (Lotes de Vencimento de Promotores)
+      match /saeou_versoes/{versaoId} {
+        allow read: if true;
+        allow write: if isGerenteAdmin(filialId);
+
+        match /chunks/{chunkId} {
+          allow read: if true;
+          allow write: if isGerenteAdmin(filialId);
+        }
+      }
+
+      // 2.4 PONTEIROS DE VERSÃO ATIVA DA FILIAL (/config/*)
+      match /config/{configDoc} {
+        allow read: if true;
+        allow write: if isGerenteAdmin(filialId);
+      }
+
+      // 2.5 VENCIMENTOS DA FILIAL (/filiais/172/vencimentos/{vencimentoId})
+      // Leitura pública, cadastro e edição sem login (com validação estrita de schema e campos protegidos)
+      match /vencimentos/{vencimentoId} {
+        allow read: if true;
+        allow create: if isValidLoteCreate(filialId);
+        allow update: if isValidLoteUpdate(filialId);
+        allow delete: if false; // Hard-delete permanentemente bloqueado
+      }
+
+      // 2.6 AUDITORIA DA FILIAL (/filiais/172/auditoria/{auditId})
+      // Append-only imutável
+      match /auditoria/{auditId} {
+        allow read, create: if true;
+        allow update, delete: if false;
+      }
+    }
+
+    // =========================================================================
+    // 3. COLEÇÕES GLOBAIS E SINCRONIZAÇÃO COMPATÍVEL
+    // =========================================================================
+
+    // Coleção global de vencimentos (compatibilidade com NuvemSyncEngine e tombstoning)
+    match /vencimentos/{vencimentoId} {
+      allow read: if true;
+      allow create: if isValidLoteCreate('172');
+      allow update: if isValidLoteUpdate('172');
+      allow delete: if false;
+    }
+
+    // Catálogo de Produtos e Vínculos EAN
+    match /produtos/{produtoId} {
+      allow read: if true;
+      allow write: if isGerenteAdmin('172');
+    }
+
+    match /vinculosEAN/{vinculoEanId} {
+      allow read: if true;
+      allow write: if isGerenteAdmin('172');
+    }
+
+    // Alertas de Divergências (Escrita e exclusão indiscriminadas eliminadas)
+    match /divergencias/{divId} {
+      allow read: if true;
+      allow create: if isValidDivergenciaCreate();
+      allow update: if isValidDivergenciaUpdate();
+      allow delete: if isGerenteAdmin('172');
+    }
+
+    // Módulo de Promotores
+    match /promotores/{promotorId} {
+      allow read: if true;
+      allow write: if isGerenteAdmin('172');
+    }
+
+    match /vinculosPromotor/{vinculoId} {
+      allow read: if true;
+      allow create: if isGerenteAdmin('172');
+      allow update: if isValidVinculoUpdate();
+      allow delete: if isGerenteAdmin('172');
+    }
+
+    match /vinculos_promotores/{vinculoId} {
+      allow read: if true;
+      allow create: if isGerenteAdmin('172');
+      allow update: if isValidVinculoUpdate();
+      allow delete: if isGerenteAdmin('172');
+    }
+
+    match /solicitacoesVencimentoPromotor/{solicitacaoId} {
+      allow read: if true;
+      allow create: if isValidSolicitacaoPromotorCreate();
+      allow update: if isValidSolicitacaoPromotorUpdate();
+      allow delete: if false;
+    }
+
+    // Auditoria Global (Append-only imutável)
+    match /auditoria/{auditoriaId} {
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+
+    match /auditoria_promotores/{auditoriaId} {
+      allow read, create: if true;
+      allow update, delete: if false;
+    }
+
+    match /operacoes_promotores/{operationId} {
+      allow read, create: if true;
+      allow update: if isGerenteAdmin('172') || (request.resource.data.processado == true);
+      allow delete: if false;
+    }
+
+    // Metadados Centrais e Chunks de Sincronização
+    match /metadados/{docId} {
+      allow read: if true;
+      allow write: if isGerenteAdmin('172');
+    }
+
+    match /catalogo_chunks/{chunkId} {
+      allow read: if true;
+      allow write: if isGerenteAdmin('172');
+    }
+
+    match /vinculos_chunks/{chunkId} {
+      allow read: if true;
+      allow write: if isGerenteAdmin('172');
+    }
+
+    match /saeou060_chunks/{chunkId} {
+      allow read: if true;
+      allow write: if isGerenteAdmin('172');
+    }
+
+    match /historico_importacoes/{histId} {
+      allow read: if true;
+      allow write: if isGerenteAdmin('172');
+    }
+  }
+}

@@ -37,6 +37,7 @@ import { syncQueueService } from './syncQueueService';
 import { nuvemSyncEngine } from './nuvemSyncEngine';
 import { promotorService } from './promotorService';
 import { isFirestoreQuotaExceeded } from './firebase';
+import { rubSyncService } from './rubSyncService';
 import {
   buildVencimentoKey,
   normalizeVencimentoRecord,
@@ -298,6 +299,24 @@ class ProductRepository {
             dbPutAll(STORES.HISTORICO_IMPORTACOES, remoteHist, true).catch(() => {});
             this.notify();
           },
+        });
+
+        // Registrar callback do RubSyncService para atualização automática da BASE RUB em tempo real
+        rubSyncService.registerCatalogUpdateCallback(async (remoteProdutos, meta) => {
+          this._produtos = remoteProdutos;
+          this._metadados = {
+            ...this._metadados,
+            ...meta,
+            status_base: 'BASE_RUB',
+            total_produtos: remoteProdutos.length,
+          };
+          this.rebuildIndices();
+          this.notify();
+        });
+
+        // Registrar callback de limpeza centralizada da BASE RUB
+        rubSyncService.registerCatalogClearedCallback(() => {
+          this.redefinirBasesOperacionaisAposLimpeza();
         });
 
         // Seed cloud sync service with local catalog version timestamp
@@ -2397,6 +2416,25 @@ class ProductRepository {
       saeouNaoLocalizados,
       statusBase: this._metadados.status_base,
     };
+  }
+
+  /**
+   * Redefine seletivamente as bases operacionais (BASE RUB e SAEOU060) em memória após limpeza,
+   * preservando integralmente todos os vencimentos cadastrados e todos os vínculos EAN.
+   */
+  public redefinirBasesOperacionaisAposLimpeza(): void {
+    this._produtos = [];
+    this._saeou060 = [];
+    this._metadados = {
+      ...this._metadados,
+      status_base: 'VAZIA',
+      total_produtos: 0,
+      total_saeou060: 0,
+      ultima_atualizacao_base_rub: undefined,
+      ultima_atualizacao_saeou060: undefined,
+    };
+    this.rebuildIndices();
+    this.notify();
   }
 }
 

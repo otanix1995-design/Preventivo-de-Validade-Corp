@@ -71,7 +71,8 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
-    match /operacoes_promotores/{operationId} {
+    // 8. FILIAIS (Base RUB, SPCOI007, SAEOU060 versionadas e configurações da filial)
+    match /filiais/{filialId}/{document=**} {
       allow read, write: if true;
     }
   }

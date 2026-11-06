@@ -255,22 +255,28 @@ export class BackupService {
   }
 
   /**
-   * Dispara o download nativo do arquivo JSON de backup no navegador.
+   * Dispara o download nativo do arquivo JSON de backup no navegador utilizando Blob e ObjectURL.
+   * Evita estouro de memória e RangeError: Invalid string length causado por encodeURIComponent em bases volumosas.
    */
   public async baixarBackupJson(filialId = '172'): Promise<SnapshotCompletoIndexedDB> {
     const snapshot = await this.gerarSnapshotCompleto(filialId);
-    if (typeof window !== 'undefined') {
-      const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(snapshot, null, 2));
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+      const jsonContent = JSON.stringify(snapshot, null, 2);
+      const blob = new Blob([jsonContent], { type: 'application/json;charset=utf-8' });
+      const blobUrl = URL.createObjectURL(blob);
       const downloadAnchor = document.createElement('a');
       const dataFormatada = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      downloadAnchor.setAttribute('href', dataStr);
-      downloadAnchor.setAttribute(
-        'download',
-        `backup_seguranca_filial${filialId}_nuvem_v3_${dataFormatada}.json`
-      );
+      downloadAnchor.href = blobUrl;
+      downloadAnchor.download = `backup_seguranca_filial${filialId}_nuvem_v3_${dataFormatada}.json`;
+      downloadAnchor.style.display = 'none';
       document.body.appendChild(downloadAnchor);
       downloadAnchor.click();
-      downloadAnchor.remove();
+      document.body.removeChild(downloadAnchor);
+
+      // Revoga o ObjectURL após alguns segundos para liberar a memória do navegador
+      setTimeout(() => {
+        URL.revokeObjectURL(blobUrl);
+      }, 5000);
     }
     return snapshot;
   }

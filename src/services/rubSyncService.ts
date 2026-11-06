@@ -1,14 +1,15 @@
 /**
  * NUVEM V3 — SERVIÇO DE SINCRONIZAÇÃO E PUBLICAÇÃO MESTRE DA BASE RUB (36 COLUNAS)
  * 
- * Atende aos requisitos:
+ * Atende aos requisitos da Filial 172:
  * 1. BASE RUB é a fonte mestre operacional soberana (Não SMGOI013).
- * 2. Upload fracionado por tamanho real em bytes (chunks <= 450 KB, respeitando amplamente o teto do Firestore).
+ * 2. Upload fracionado por tamanho real em bytes (chunks <= 450 KB, respeitando o teto do Firestore).
  * 3. Checksum de integridade SHA-256 do lote completo.
  * 4. Comutação atômica transacional de versão via ConcurrentRubPublicationService (CAS / Optimistic Concurrency).
- * 5. Download automático e persistência no IndexedDB da filial 172.
+ * 5. Download automático e persistência no IndexedDB da filial 172 sem duplicar produtos.
  * 6. Cache e fallback local blindado: Se a rede cair no download, o catálogo local permanece intacto.
  * 7. Suporte a Rollback operacional para a versão anterior.
+ * 8. Status explícito: LOCAL | PUBLICANDO | SINCRONIZADO | ERRO.
  */
 
 import {
@@ -19,21 +20,24 @@ import {
   onSnapshot,
   setDoc,
   Unsubscribe,
-  writeBatch,
 } from 'firebase/firestore';
 import { db, ensureAuth, isFirestoreQuotaExceeded, isQuotaError, markQuotaExceeded } from './firebase';
 import { authRoleService } from './authRoleService';
 import { concurrentRubPublicationService, VersaoAtivaInfo } from './concurrentRubPublicationService';
-import { dbClear, dbGetAll, dbPutAll, STORES } from './db';
+import { dbClear, dbGetAll, dbPutAll, dbGetMeta, dbSetMeta, STORES } from './db';
 import { MetadadosBase, ProdutoSMG } from '../types';
 
+export type StatusSyncBase = 'LOCAL' | 'PUBLICANDO' | 'SINCRONIZADO' | 'ERRO';
+
 export interface PublicacaoRubStatus {
+  status: StatusSyncBase;
   emAndamento: boolean;
   etapa: 'OCIOSO' | 'GERANDO_CHUNKS' | 'CALCULANDO_CHECKSUM' | 'ENVIANDO_CHUNKS' | 'COMUTANDO_PONTEIRO' | 'CONCLUIDO' | 'ERRO';
   progressoPorcentagem: number;
   mensagem: string;
   versaoPublicada?: string;
   erro?: string;
+  ultimaSincronizacao?: string;
 }
 
 export interface VersaoHistoricoRub {
@@ -71,20 +75,50 @@ async function calcularChecksumSha256(conteudo: string): Promise<string> {
 
 class RubSyncService {
   private _statusPublicacao: PublicacaoRubStatus = {
+    status: 'LOCAL',
     emAndamento: false,
     etapa: 'OCIOSO',
     progressoPorcentagem: 0,
-    mensagem: 'Pronto',
+    mensagem: 'Pronto (IndexedDB)',
   };
 
   private _versaoAtivaRemota: VersaoAtivaInfo | null = null;
+  private _versaoLocalId: string | null = null;
   private _unsubSnapshot: Unsubscribe | null = null;
   private _listenersStatus: Array<(status: PublicacaoRubStatus) => void> = [];
   private _listenersVersao: Array<(versao: VersaoAtivaInfo | null) => void> = [];
   private _isDownloading = false;
+  private _onCatalogUpdateCallback?: (produtos: ProdutoSMG[], meta: MetadadosBase) => Promise<void>;
 
   constructor() {
-    this.iniciarMonitoramentoVersaoAtiva();
+    this.carregarVersaoLocal();
+    this.iniciarMonitoramentoVersaoAtiva('172');
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => {
+        this.verificarSincronizacaoComRemoto('172');
+      });
+    }
+  }
+
+  private async carregarVersaoLocal(): Promise<void> {
+    try {
+      const meta = await dbGetMeta<any>('meta_rub_sync', null);
+      if (meta && meta.versaoId) {
+        this._versaoLocalId = meta.versaoId;
+      }
+    } catch (e) {
+      console.warn('[RubSyncService] Erro ao ler versão local:', e);
+    }
+  }
+
+  public registerCatalogUpdateCallback(cb: (produtos: ProdutoSMG[], meta: MetadadosBase) => Promise<void>): void {
+    this._onCatalogUpdateCallback = cb;
+  }
+
+  private _onCatalogClearedCallback?: () => void;
+  public registerCatalogClearedCallback(cb: () => void): void {
+    this._onCatalogClearedCallback = cb;
   }
 
   // =========================================================================
@@ -103,11 +137,64 @@ class RubSyncService {
       const configDocRef = doc(db, 'filiais', filialId, 'config', 'versao_ativa_rub');
       this._unsubSnapshot = onSnapshot(
         configDocRef,
-        (snap) => {
+        async (snap) => {
           if (snap.exists()) {
-            const data = snap.data() as VersaoAtivaInfo;
+            const data = snap.data() as VersaoAtivaInfo & { status?: string; limpaEm?: string; ativa?: boolean };
+
+            // Se a base mestre foi limpa pela gerência na nuvem central
+            if (!data.versaoId || data.ativa === false || data.status === 'LIMPA_AGUARDANDO_IMPORTACAO') {
+              this._versaoAtivaRemota = null;
+              this.notificarVersao();
+
+              if (this._versaoLocalId !== null) {
+                console.log('[RubSyncService] BASE RUB foi limpa na nuvem central. Sincronizando limpeza local...');
+                try {
+                  await dbClear(STORES.PRODUTOS);
+                  await dbSetMeta('meta_rub_sync', {
+                    versaoId: null,
+                    status: 'LIMPA_AGUARDANDO_IMPORTACAO',
+                    limpaEm: data.limpaEm || new Date().toISOString(),
+                    totalProdutos: 0,
+                  });
+                } catch (e) {
+                  console.warn('[RubSyncService] Erro ao limpar IndexedDB local:', e);
+                }
+                this._versaoLocalId = null;
+                if (this._onCatalogClearedCallback) {
+                  try {
+                    this._onCatalogClearedCallback();
+                  } catch (cbErr) {
+                    console.warn('[RubSyncService] Erro no callback de limpeza:', cbErr);
+                  }
+                }
+              }
+
+              this.atualizarStatus({
+                status: 'LOCAL',
+                emAndamento: false,
+                etapa: 'OCIOSO',
+                mensagem: 'BASE RUB limpa centralmente. Pronta para receber nova importação.',
+                ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
+              });
+              return;
+            }
+
             this._versaoAtivaRemota = data;
             this.notificarVersao();
+
+            // Sincronização automática entre dispositivos:
+            // Se a versão remota é mais recente que a versão local e não estamos publicando,
+            // baixa automaticamente para o IndexedDB
+            if (this._versaoLocalId !== data.versaoId && !this._statusPublicacao.emAndamento && !this._isDownloading) {
+              console.log(`[RubSyncService] Nova BASE RUB detectada: ${data.versaoId} (local: ${this._versaoLocalId}). Baixando automaticamente...`);
+              await this.baixarBaseRubAtivaParaDispositivo(filialId);
+            } else if (this._versaoLocalId === data.versaoId) {
+              this.atualizarStatus({
+                status: 'SINCRONIZADO',
+                mensagem: `BASE RUB sincronizada com a nuvem central (${data.totalProdutos} produtos)`,
+                ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
+              });
+            }
           } else {
             this._versaoAtivaRemota = null;
             this.notificarVersao();
@@ -146,15 +233,18 @@ class RubSyncService {
     }
 
     if (!db) {
+      this.atualizarStatus({ status: 'LOCAL', mensagem: 'Firestore indisponível — base salva localmente' });
       return { sucesso: false, mensagem: 'Banco Firestore central indisponível.' };
     }
 
     if (isFirestoreQuotaExceeded()) {
+      this.atualizarStatus({ status: 'LOCAL', mensagem: 'Cota diária pausada — base salva localmente' });
       return { sucesso: false, mensagem: 'Cota do Firestore temporariamente pausada. Tente novamente mais tarde.' };
     }
 
     const usuario = authRoleService.getUsuarioAtual();
     this.atualizarStatus({
+      status: 'PUBLICANDO',
       emAndamento: true,
       etapa: 'GERANDO_CHUNKS',
       progressoPorcentagem: 5,
@@ -272,12 +362,21 @@ class RubSyncService {
         throw new Error(resComutacao.mensagem);
       }
 
+      this._versaoLocalId = versaoId;
+      await dbSetMeta('meta_rub_sync', {
+        versaoId,
+        dataPublicacaoIso: agora,
+        totalProdutos: produtos.length,
+      });
+
       this.atualizarStatus({
+        status: 'SINCRONIZADO',
         emAndamento: false,
         etapa: 'CONCLUIDO',
         progressoPorcentagem: 100,
         mensagem: `BASE RUB publicada e ativada com sucesso! Versão: ${versaoId}`,
         versaoPublicada: versaoId,
+        ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
       });
 
       return {
@@ -291,6 +390,7 @@ class RubSyncService {
         markQuotaExceeded();
       }
       this.atualizarStatus({
+        status: 'ERRO',
         emAndamento: false,
         etapa: 'ERRO',
         progressoPorcentagem: 0,
@@ -299,7 +399,7 @@ class RubSyncService {
       });
       return {
         sucesso: false,
-        mensagem: `Erro na publicação: ${err?.message || 'Falha inesperada'}`,
+        mensagem: `Erro na publicação: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`,
       };
     }
   }
@@ -329,6 +429,7 @@ class RubSyncService {
       // 1. Obter ponteiro ativo
       const configSnap = await getDoc(doc(db, 'filiais', filialId, 'config', 'versao_ativa_rub'));
       if (!configSnap.exists()) {
+        this.atualizarStatus({ status: 'LOCAL', mensagem: 'Nenhuma BASE RUB publicada na nuvem' });
         return { sucesso: false, mensagem: 'Nenhuma BASE RUB oficial publicada para esta filial.' };
       }
 
@@ -381,6 +482,34 @@ class RubSyncService {
         ultima_atualizacao_base_rub: versaoInfo.dataPublicacaoIso,
       };
 
+      await dbSetMeta('metadados_gerais', novoMeta);
+      await dbSetMeta('meta_rub_sync', {
+        versaoId,
+        dataPublicacaoIso: versaoInfo.dataPublicacaoIso,
+        totalProdutos: todosProdutos.length,
+      });
+
+      this._versaoLocalId = versaoId;
+
+      // 6. Atualizar repositório em memória e notificar telas
+      if (this._onCatalogUpdateCallback) {
+        try {
+          await this._onCatalogUpdateCallback(todosProdutos, novoMeta);
+        } catch (cbErr) {
+          console.warn('[RubSyncService] Erro no callback de atualização em memória:', cbErr);
+        }
+      }
+
+      this.atualizarStatus({
+        status: 'SINCRONIZADO',
+        emAndamento: false,
+        etapa: 'CONCLUIDO',
+        progressoPorcentagem: 100,
+        mensagem: `BASE RUB sincronizada com sucesso (${todosProdutos.length} produtos)`,
+        versaoPublicada: versaoId,
+        ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
+      });
+
       if (onProgress) onProgress(100, `BASE RUB atualizada com sucesso! (${todosProdutos.length} produtos)`);
 
       return {
@@ -391,12 +520,41 @@ class RubSyncService {
       };
     } catch (err: any) {
       console.error('[RubSyncService] Erro ao baixar BASE RUB:', err);
+      this.atualizarStatus({
+        status: 'ERRO',
+        emAndamento: false,
+        etapa: 'ERRO',
+        progressoPorcentagem: 0,
+        mensagem: 'Erro ao baixar BASE RUB da nuvem',
+        erro: err?.message || 'Erro de rede',
+      });
       return {
         sucesso: false,
         mensagem: `Falha ao baixar BASE RUB: ${err?.message || 'Erro de rede'}. A base local foi preservada.`,
       };
     } finally {
       this._isDownloading = false;
+    }
+  }
+
+  public async verificarSincronizacaoComRemoto(filialId: string = '172'): Promise<void> {
+    if (!db || this._isDownloading || this._statusPublicacao.emAndamento) return;
+    try {
+      const snap = await getDoc(doc(db, 'filiais', filialId, 'config', 'versao_ativa_rub'));
+      if (snap.exists()) {
+        const remota = snap.data() as VersaoAtivaInfo;
+        if (this._versaoLocalId !== remota.versaoId) {
+          await this.baixarBaseRubAtivaParaDispositivo(filialId);
+        } else {
+          this.atualizarStatus({
+            status: 'SINCRONIZADO',
+            mensagem: `BASE RUB em dia com a nuvem central (${remota.totalProdutos} produtos)`,
+            ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('[RubSyncService] Falha na checagem remota:', e);
     }
   }
 
@@ -458,6 +616,10 @@ class RubSyncService {
     return this._versaoAtivaRemota ? { ...this._versaoAtivaRemota } : null;
   }
 
+  public getVersaoLocalId(): string | null {
+    return this._versaoLocalId;
+  }
+
   public subscribeStatus(cb: (status: PublicacaoRubStatus) => void): () => void {
     this._listenersStatus.push(cb);
     cb(this.getStatusPublicacao());
@@ -472,6 +634,21 @@ class RubSyncService {
     return () => {
       this._listenersVersao = this._listenersVersao.filter((l) => l !== cb);
     };
+  }
+
+  public redefinirEstadoLocalAposLimpeza(): void {
+    this._versaoLocalId = null;
+    this._versaoAtivaRemota = null;
+    this.atualizarStatus({
+      status: 'LOCAL',
+      emAndamento: false,
+      etapa: 'OCIOSO',
+      progressoPorcentagem: 0,
+      mensagem: 'BASE RUB limpa centralmente. Pronta para receber nova importação.',
+      versaoPublicada: undefined,
+      ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
+    });
+    this.notificarVersao();
   }
 
   private atualizarStatus(patch: Partial<PublicacaoRubStatus>): void {

@@ -264,6 +264,22 @@ export async function dbClear(storeName: string): Promise<void> {
   });
 }
 
+export async function dbCount(storeName: string): Promise<number> {
+  try {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeName, 'readonly');
+      const store = tx.objectStore(storeName);
+      const req = store.count();
+      req.onsuccess = () => resolve(req.result || 0);
+      req.onerror = () => reject(req.error);
+    });
+  } catch {
+    return 0;
+  }
+}
+
+
 export async function dbGetMeta<T>(key: string, fallback: T): Promise<T> {
   try {
     const db = await getDB();
