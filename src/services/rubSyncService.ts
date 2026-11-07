@@ -216,12 +216,22 @@ class RubSyncService {
   public async publicarBaseRubCentral(
     produtos: ProdutoSMG[],
     meta: MetadadosBase,
-    filialId: string = '172'
-  ): Promise<{ sucesso: boolean; mensagem: string; versaoId?: string }> {
+    filialId: string = '172',
+    onProgress?: (pct: number, msg: string, chunkAtual?: number, totalChunks?: number) => void
+  ): Promise<{ sucesso: boolean; mensagem: string; versaoId?: string; motivoRecusa?: string; chunksEnviados?: number; totalChunks?: number }> {
     // 1. Validação estrita de autorização
     const permissao = authRoleService.podePublicarRub();
     if (!permissao.permitido) {
-      return { sucesso: false, mensagem: permissao.motivoRecusa || 'Acesso negado.' };
+      const motivo = permissao.motivoRecusa || 'Apenas a Gerência/Administrador possui permissão para publicar a BASE RUB na nuvem central.';
+      this.atualizarStatus({
+        status: 'LOCAL',
+        emAndamento: false,
+        etapa: 'ERRO',
+        progressoPorcentagem: 0,
+        mensagem: motivo,
+        erro: motivo,
+      });
+      return { sucesso: false, mensagem: motivo, motivoRecusa: motivo };
     }
 
     if (!produtos || produtos.length === 0) {
@@ -250,6 +260,7 @@ class RubSyncService {
       progressoPorcentagem: 5,
       mensagem: 'Fracionando catálogo por tamanho real de bytes...',
     });
+    onProgress?.(5, 'Fracionando catálogo por tamanho real de bytes...');
 
     try {
       await ensureAuth().catch(() => null);
@@ -280,6 +291,7 @@ class RubSyncService {
         progressoPorcentagem: 20,
         mensagem: `Calculando checksum SHA-256 de integridade (${chunks.length} partes)...`,
       });
+      onProgress?.(20, `Calculando checksum SHA-256 de integridade (${chunks.length} partes)...`, 0, chunks.length);
 
       // 3. Cálculo de Checksum de Integridade
       const baseContentSample = JSON.stringify(produtos.slice(0, 100)) + `_len_${produtos.length}_end_` + JSON.stringify(produtos.slice(-100));
@@ -288,37 +300,43 @@ class RubSyncService {
       const agora = new Date().toISOString();
       const versaoId = `rub_${filialId}_${Date.now()}`;
 
-      // 4. Gravação dos chunks na subcoleção /filiais/{filialId}/catalogo_rub_versoes/{versaoId}/chunks/{chunkIdx}
+      // 4. Gravação dos chunks na subcoleção com concorrência limitada (lotes de até 5 chunks)
+      const CONCURRENCY_LIMIT = 5;
       this.atualizarStatus({
         etapa: 'ENVIANDO_CHUNKS',
         progressoPorcentagem: 30,
         mensagem: `Enviando partes fracionadas para a nuvem (0 de ${chunks.length})...`,
       });
+      onProgress?.(30, `Enviando partes fracionadas para a nuvem (0 de ${chunks.length})...`, 0, chunks.length);
 
-      for (let i = 0; i < chunks.length; i++) {
-        const chunkDocRef = doc(db, 'filiais', filialId, 'catalogo_rub_versoes', versaoId, 'chunks', `chunk_${i}`);
-        const chunkData = {
-          versaoId,
-          index: i,
-          totalChunks: chunks.length,
-          itemsCount: chunks[i].length,
-          items: chunks[i],
-          atualizadoEm: agora,
-        };
+      for (let i = 0; i < chunks.length; i += CONCURRENCY_LIMIT) {
+        const batch = chunks.slice(i, i + CONCURRENCY_LIMIT);
+        await Promise.all(
+          batch.map(async (chunkData, idxInBatch) => {
+            const chunkIdx = i + idxInBatch;
+            const chunkDocRef = doc(db, 'filiais', filialId, 'catalogo_rub_versoes', versaoId, 'chunks', `chunk_${chunkIdx}`);
+            await setDoc(chunkDocRef, {
+              versaoId,
+              index: chunkIdx,
+              totalChunks: chunks.length,
+              itemsCount: chunkData.length,
+              items: chunkData,
+              atualizadoEm: agora,
+            });
+          })
+        );
 
-        await setDoc(chunkDocRef, chunkData);
+        const chunksConcluidos = Math.min(i + batch.length, chunks.length);
+        const pct = Math.round(30 + (chunksConcluidos / chunks.length) * 55); // 30% a 85%
+        const msg = `Enviando partes fracionadas para a nuvem (${chunksConcluidos} de ${chunks.length})...`;
+        this.atualizarStatus({ progressoPorcentagem: pct, mensagem: msg });
+        onProgress?.(pct, msg, chunksConcluidos, chunks.length);
 
-        const pct = Math.round(30 + ((i + 1) / chunks.length) * 50);
-        this.atualizarStatus({
-          progressoPorcentagem: pct,
-          mensagem: `Enviando partes fracionadas para a nuvem (${i + 1} de ${chunks.length})...`,
-        });
-
-        // Pequena pausa preventiva
-        await new Promise((r) => setTimeout(r, 20));
+        await new Promise((r) => setTimeout(r, 15));
       }
 
       // 5. Gravação dos metadados da versão
+      onProgress?.(88, 'Gravando metadados oficiais da versão...', chunks.length, chunks.length);
       const versaoMetaDocRef = doc(db, 'filiais', filialId, 'catalogo_rub_versoes', versaoId);
       await setDoc(versaoMetaDocRef, {
         versaoId,
@@ -344,9 +362,10 @@ class RubSyncService {
       // 6. Comutação Atômica Transacional de Ponteiro com verificação de versão ativa prévia (CAS)
       this.atualizarStatus({
         etapa: 'COMUTANDO_PONTEIRO',
-        progressoPorcentagem: 90,
+        progressoPorcentagem: 92,
         mensagem: 'Executando comutação transacional atômica da versão oficial...',
       });
+      onProgress?.(92, 'Executando comutação transacional atômica da versão oficial...', chunks.length, chunks.length);
 
       const resComutacao = await concurrentRubPublicationService.comutarPonteiroVersaoAtivaTransacional({
         filialId,
@@ -378,11 +397,14 @@ class RubSyncService {
         versaoPublicada: versaoId,
         ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
       });
+      onProgress?.(100, `BASE RUB publicada e ativada na nuvem com sucesso! (${produtos.length} produtos)`, chunks.length, chunks.length);
 
       return {
         sucesso: true,
         mensagem: `BASE RUB publicada com sucesso na nuvem central (${produtos.length} produtos em ${chunks.length} partes).`,
         versaoId,
+        chunksEnviados: chunks.length,
+        totalChunks: chunks.length,
       };
     } catch (err: any) {
       console.error('[RubSyncService] Erro ao publicar BASE RUB:', err);
@@ -399,7 +421,7 @@ class RubSyncService {
       });
       return {
         sucesso: false,
-        mensagem: `Erro na publicação: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`,
+        mensagem: `Erro na publicação no Firebase: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`,
       };
     }
   }

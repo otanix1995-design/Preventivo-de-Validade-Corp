@@ -38,6 +38,7 @@ import { BasesSyncStatusCard } from './BasesSyncStatusCard';
 import { rubSyncService } from '../services/rubSyncService';
 import { spcoiSyncService } from '../services/spcoiSyncService';
 import { saeouSyncService } from '../services/saeouSyncService';
+import { authRoleService } from '../services/authRoleService';
 
 interface ImportacaoViewProps {
   metadados: MetadadosBase;
@@ -150,23 +151,39 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
     try {
       const resultado = await processarSAEOU060(file, (percent, status) => {
-        setProgressPercent(percent);
+        const pct = Math.min(70, Math.round((percent / 100) * 70));
+        setProgressPercent(pct);
         setProgressStatus(status);
       });
+      setProgressPercent(75);
+      setProgressStatus('Gravando registros SAEOU060 no IndexedDB local...');
       await productRepository.aplicarNovoSnapshotSaeou060(resultado.registros, file.name);
       await productRepository.addHistorico(resultado.resumo);
       setUltimoResumo(resultado.resumo);
 
-      // Publicação centralizada no Firestore (Filial 172)
-      setProgressPercent(90);
-      setProgressStatus('Publicando SAEOU060 na nuvem central da Filial 172...');
-      try {
-        await saeouSyncService.publicarSaeouCentral(resultado.registros, '172');
-      } catch (pubErr) {
-        console.warn('Publicação SAEOU060 em nuvem pendente (dados mantidos no IndexedDB):', pubErr);
+      // Publicação centralizada no Firestore (Filial 172) com progresso contínuo real
+      setProgressPercent(80);
+      setProgressStatus('Preparando envio do SAEOU060 para a nuvem central...');
+      const resPub = await saeouSyncService.publicarSaeouCentral(
+        resultado.registros,
+        '172',
+        (pct, msg, chunkAtual, totalChunks) => {
+          const mapped = Math.min(98, Math.round(80 + (pct / 100) * 18));
+          setProgressPercent(mapped);
+          setProgressStatus(chunkAtual && totalChunks ? `${msg} (${chunkAtual}/${totalChunks})` : msg);
+        }
+      );
+
+      if (resPub.sucesso) {
+        setProgressPercent(100);
+        setProgressStatus(`SAEOU060 publicado e ativado com sucesso na nuvem central! (${resultado.registros.length} registros)`);
+      } else {
+        setProgressPercent(100);
+        setProgressStatus(`SAEOU060 salvo localmente no dispositivo. Nuvem: ${resPub.mensagem}`);
       }
 
       if (onImportComplete) onImportComplete();
+      await new Promise((r) => setTimeout(r, 1800));
     } catch (err: any) {
       console.error('Erro ao importar SAEOU060:', err);
       setErroGlobal(
@@ -212,33 +229,46 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         produtosAtuais,
         industriasAtuais,
         (percent, status) => {
-          setProgressPercent(percent);
+          const pct = Math.min(70, Math.round((percent / 100) * 70));
+          setProgressPercent(pct);
           setProgressStatus(status);
         }
       );
 
+      setProgressPercent(75);
+      setProgressStatus('Gravando fornecedores e indústrias no IndexedDB local...');
       await isvService.salvarImportacaoSpcoi(
         resultado.fornecedores,
         resultado.industrias,
         resultado.resumo
       );
 
-      // Publicação centralizada no Firestore (Filial 172)
-      setProgressPercent(90);
-      setProgressStatus('Publicando SPCOI007 na nuvem central da Filial 172...');
-      try {
-        await spcoiSyncService.publicarSpcoiCentral(
-          resultado.fornecedores,
-          resultado.industrias,
-          resultado.resumo,
-          '172'
-        );
-      } catch (pubErr) {
-        console.warn('Publicação SPCOI007 em nuvem pendente (dados mantidos no IndexedDB):', pubErr);
+      // Publicação centralizada no Firestore (Filial 172) com progresso real contínuo
+      setProgressPercent(80);
+      setProgressStatus('Preparando envio do SPCOI007 para a nuvem central...');
+      const resPub = await spcoiSyncService.publicarSpcoiCentral(
+        resultado.fornecedores,
+        resultado.industrias,
+        resultado.resumo,
+        '172',
+        (pct, msg, chunkAtual, totalChunks) => {
+          const mapped = Math.min(98, Math.round(80 + (pct / 100) * 18));
+          setProgressPercent(mapped);
+          setProgressStatus(chunkAtual && totalChunks ? `${msg} (${chunkAtual}/${totalChunks})` : msg);
+        }
+      );
+
+      if (resPub.sucesso) {
+        setProgressPercent(100);
+        setProgressStatus(`SPCOI007 publicado e sincronizado com sucesso na nuvem central! (${resultado.fornecedores.length} fornecedores)`);
+      } else {
+        setProgressPercent(100);
+        setProgressStatus(`SPCOI007 salvo localmente no dispositivo. Nuvem: ${resPub.mensagem}`);
       }
 
       setUltimoResumoSpcoi(resultado.resumo);
       if (onImportComplete) onImportComplete();
+      await new Promise((r) => setTimeout(r, 1800));
     } catch (err: any) {
       console.error('Erro ao importar SPCOI007:', err);
       setErroGlobal(
@@ -276,8 +306,8 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         produtosAtuais,
         fornecedoresAtuais,
         (percent, status) => {
-          // Mapeia o progresso do parser da planilha para 0% a 70%
-          const pct = Math.min(70, Math.round((percent / 100) * 70));
+          // Mapeia o progresso do parser da planilha para 0% a 65%
+          const pct = Math.min(65, Math.round((percent / 100) * 65));
           setProgressPercent(pct);
           setProgressStatus(
             status.includes('concluída com sucesso')
@@ -288,15 +318,14 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
       );
 
       // 1. Salvar registros operacionais no isvService
-      setProgressPercent(75);
-      setProgressStatus('Gravando registros operacionais da BASE RUB localmente...');
+      setProgressPercent(70);
+      setProgressStatus('Gravando registros operacionais da BASE RUB no IndexedDB local...');
       await isvService.salvarImportacaoPlanilhaIsv(
         resultado.registros,
         resultado.resumo
       );
 
       // 2. Converter registros da BASE DO RUB em lotes assíncronos (chunks)
-      // Estabelece a BASE DO RUB como catálogo primário oficial do aplicativo sem travar a interface
       const vinculosAtuais = productRepository.getVinculos();
       const vinculosPorCodigo = new Map<string, string[]>();
       vinculosAtuais.forEach((v) => {
@@ -319,37 +348,54 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
           produtosConvertidos.push(converterRegistroRubParaProduto(reg, eans));
         }
 
-        const pct = Math.round(75 + (i / totalRegistros) * 15);
+        const pct = Math.round(70 + (i / totalRegistros) * 15);
         setProgressPercent(pct);
         setProgressStatus(`Indexando catálogo da BASE DO RUB (${Math.min(i + CHUNK_SIZE, totalRegistros)} de ${totalRegistros})...`);
-        // Libera o event loop do navegador para fluidez da UI
         await new Promise((r) => setTimeout(r, 0));
       }
 
       // 3. Gravar catálogo indexado no IndexedDB (local-first, não bloqueia em nuvem)
-      setProgressPercent(90);
+      setProgressPercent(85);
       setProgressStatus('Confirmando gravação local no IndexedDB...');
       await productRepository.saveProducts(produtosConvertidos);
 
-      // 4. Publicar na nuvem central da Filial 172 (se autenticado/gerência)
-      setProgressPercent(95);
-      setProgressStatus('Publicando BASE RUB na nuvem central da Filial 172...');
-      try {
-        const metaAtual = productRepository.getMetadados();
-        await rubSyncService.publicarBaseRubCentral(produtosConvertidos, metaAtual, '172');
-      } catch (pubErr) {
-        console.warn('Publicação BASE RUB em nuvem pendente (dados mantidos no IndexedDB):', pubErr);
+      // 4. Verificação estrita de autorização administrativa antes da publicação na nuvem
+      const permissaoGerencia = authRoleService.podePublicarRub();
+      if (!permissaoGerencia.permitido) {
+        // Usuário sem papel GERENCIA_ADMIN:
+        // Mantém a base 100% segura no IndexedDB e informa claramente que a publicação central requer gerência
+        setProgressPercent(100);
+        setProgressStatus('BASE RUB salva no dispositivo (IndexedDB). Publicação na nuvem requer papel Gerência / Administrador.');
+        setUltimoResumoIsv(resultado.resumo);
+        if (onImportComplete) onImportComplete();
+        await new Promise((r) => setTimeout(r, 2200));
+        return;
       }
 
-      // 5. Conclusão confirmada no dispositivo
-      setProgressPercent(100);
-      setProgressStatus('Importação concluída com sucesso!');
+      // 5. Publicar na nuvem central da Filial 172 (Gerência autenticada) com progresso real contínuo
+      setProgressPercent(86);
+      setProgressStatus('Iniciando publicação da BASE RUB na nuvem central da Filial 172...');
+      const metaAtual = productRepository.getMetadados();
+      const resPub = await rubSyncService.publicarBaseRubCentral(
+        produtosConvertidos,
+        metaAtual,
+        '172',
+        (pct, msg, chunkAtual, totalChunks) => {
+          const mapped = Math.min(98, Math.round(86 + (pct / 100) * 12));
+          setProgressPercent(mapped);
+          setProgressStatus(chunkAtual && totalChunks ? `${msg} (${chunkAtual}/${totalChunks})` : msg);
+        }
+      );
 
-      // Pequena pausa para confirmar 100% visualmente
-      await new Promise((r) => setTimeout(r, 200));
+      // 6. Confirmação real sem falso sucesso
+      if (resPub.sucesso) {
+        setProgressPercent(100);
+        setProgressStatus(`BASE RUB publicada e ativada na nuvem central com sucesso! (${resPub.totalChunks || 1} partes)`);
+      } else {
+        setProgressPercent(100);
+        setProgressStatus(`Salvo localmente no dispositivo. Nuvem: ${resPub.mensagem}`);
+      }
 
-      // Garante encerramento imediato do modal local
-      setIsProcessing(false);
       setUltimoResumoIsv(resultado.resumo);
 
       if (onImportComplete) {
@@ -359,6 +405,7 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
           console.warn('[ImportacaoView] Aviso ao notificar onImportComplete:', cbErr);
         }
       }
+      await new Promise((r) => setTimeout(r, 1800));
     } catch (err: any) {
       console.error('Erro ao importar BASE DO RUB:', err);
       setErroGlobal(
@@ -525,12 +572,12 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
             {progressPercent >= 100 ? (
               <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900 font-semibold flex items-center justify-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Importação concluída com sucesso no dispositivo! Fechando...</span>
+                <span>Processamento e confirmação concluídos! Finalizando...</span>
               </div>
             ) : (
               <div className="bg-blue-50 border border-blue-100 rounded-xl p-2.5 text-[11px] text-blue-900 font-medium flex items-center justify-center gap-2">
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-700 shrink-0" />
-                <span>Por favor, aguarde a conclusão sem fechar a tela.</span>
+                <span>Enviando dados com segurança. Por favor, aguarde sem fechar a tela.</span>
               </div>
             )}
           </div>

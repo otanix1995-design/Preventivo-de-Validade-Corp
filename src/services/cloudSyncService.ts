@@ -319,8 +319,10 @@ class CloudSyncService {
       if (!metaSnap.exists()) return;
 
       const data = metaSnap.data();
-      // Não sobrescrever catálogo local quando BASE RUB já estiver carregada localmente
-      if ((data.catalogo_version || 0) > this._localCatalogoVersion && data.total_produtos > 0) {
+      // Na Filial 172, a BASE RUB oficial é gerenciada pelo rubSyncService sob /filiais/172/catalogo_rub_versoes.
+      // Removemos a leitura irrestrita da coleção legada catalogo_chunks para evitar exceder o limite de 128 MiB do Firestore.
+      const isBaseRubAtiva = data.status_base === 'BASE_RUB' || data.filial_numero === '172';
+      if (!isBaseRubAtiva && (data.catalogo_version || 0) > this._localCatalogoVersion && data.total_produtos > 0) {
         await this.pullCatalogoFromCloud(data.catalogo_version);
       }
       if ((data.vinculos_version || 0) > this._localVinculosVersion && data.total_eans > 0) {
@@ -527,21 +529,27 @@ class CloudSyncService {
       }
 
       const meta = metaSnap.data() as MetadadosBase & { catalogo_version?: number; total_chunks?: number };
+      if (meta.status_base === 'BASE_RUB' || meta.filial_numero === '172') {
+        // Filial 172 utiliza o rubSyncService (/filiais/172/catalogo_rub_versoes)
+        this.updateStatus({ state: 'connected' });
+        this._isSyncing = false;
+        return false;
+      }
+
       const totalChunks = meta.total_chunks || 1;
-
-      const chunksCol = collection(db, 'catalogo_chunks');
-      const chunksSnap = await getDocs(chunksCol);
-
       const chunkDocs: { index: number; items: ProdutoSMG[] }[] = [];
-      chunksSnap.forEach((docSnap) => {
-        const d = docSnap.data();
-        if (d.items && Array.isArray(d.items)) {
-          chunkDocs.push({ index: d.index ?? 0, items: d.items });
-        }
-      });
 
-      // Sort by chunk index
-      chunkDocs.sort((a, b) => a.index - b.index);
+      // Carregamento seguro por ID para evitar ultrapassar o limite de 128 MiB de varredura do Firestore
+      for (let i = 0; i < Math.min(totalChunks, 50); i++) {
+        const chunkId = `chunk_${String(i).padStart(3, '0')}`;
+        const chunkSnap = await getDoc(doc(db, 'catalogo_chunks', chunkId));
+        if (chunkSnap.exists()) {
+          const d = chunkSnap.data();
+          if (d.items && Array.isArray(d.items)) {
+            chunkDocs.push({ index: d.index ?? i, items: d.items });
+          }
+        }
+      }
 
       const allProducts: ProdutoSMG[] = [];
       chunkDocs.forEach((c) => allProducts.push(...c.items));

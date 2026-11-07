@@ -218,8 +218,9 @@ class SaeouSyncService {
 
   public async publicarSaeouCentral(
     registros: RegistroSaeou060[],
-    filialId: string = '172'
-  ): Promise<{ sucesso: boolean; mensagem: string; versaoId?: string }> {
+    filialId: string = '172',
+    onProgress?: (pct: number, msg: string, chunkAtual?: number, totalChunks?: number) => void
+  ): Promise<{ sucesso: boolean; mensagem: string; versaoId?: string; chunksEnviados?: number; totalChunks?: number }> {
     if (!registros || registros.length === 0) {
       return { sucesso: false, mensagem: 'Não há registros SAEOU060 para publicação.' };
     }
@@ -246,6 +247,7 @@ class SaeouSyncService {
       progressoPorcentagem: 10,
       mensagem: 'Fracionando registros SAEOU060 em partes seguras...',
     });
+    onProgress?.(10, 'Fracionando registros SAEOU060 em partes seguras...');
 
     try {
       await ensureAuth().catch(() => null);
@@ -276,6 +278,7 @@ class SaeouSyncService {
         progressoPorcentagem: 25,
         mensagem: `Calculando checksum de integridade (${chunks.length} partes)...`,
       });
+      onProgress?.(25, `Calculando checksum de integridade (${chunks.length} partes)...`, 0, chunks.length);
 
       // 2. Checksum
       const sample = JSON.stringify(registros.slice(0, 50)) + `_len_${registros.length}_` + JSON.stringify(registros.slice(-50));
@@ -284,62 +287,57 @@ class SaeouSyncService {
       const agora = new Date().toISOString();
       const versaoId = `saeou_${filialId}_${Date.now()}`;
 
-      // 3. Enviar chunks para /filiais/{filialId}/saeou_versoes/{versaoId}/chunks/chunk_{i}
-      // E simultaneamente para saeou060_chunks (compatibilidade retroativa)
+      // 3. Enviar chunks com concorrência limitada (lotes de até 5 chunks)
+      const CONCURRENCY_LIMIT = 5;
       this.atualizarStatus({
         etapa: 'ENVIANDO_CHUNKS',
         progressoPorcentagem: 35,
         mensagem: `Enviando partes para a nuvem (0 de ${chunks.length})...`,
       });
+      onProgress?.(35, `Enviando partes para a nuvem (0 de ${chunks.length})...`, 0, chunks.length);
 
-      for (let i = 0; i < chunks.length; i++) {
-        const cleanChunk = chunks[i].map((item) => cleanForFirestore(item));
-        const chunkDocRef = doc(db, 'filiais', filialId, 'saeou_versoes', versaoId, 'chunks', `chunk_${i}`);
-        await setDoc(chunkDocRef, {
-          versaoId,
-          index: i,
-          totalChunks: chunks.length,
-          itemsCount: cleanChunk.length,
-          items: cleanChunk,
-          atualizadoEm: agora,
-        });
+      for (let i = 0; i < chunks.length; i += CONCURRENCY_LIMIT) {
+        const batch = chunks.slice(i, i + CONCURRENCY_LIMIT);
+        await Promise.all(
+          batch.map(async (chunkItems, idxInBatch) => {
+            const chunkIdx = i + idxInBatch;
+            const cleanChunk = chunkItems.map((item) => cleanForFirestore(item));
+            const chunkDocRef = doc(db, 'filiais', filialId, 'saeou_versoes', versaoId, 'chunks', `chunk_${chunkIdx}`);
+            await setDoc(chunkDocRef, {
+              versaoId,
+              index: chunkIdx,
+              totalChunks: chunks.length,
+              itemsCount: cleanChunk.length,
+              items: cleanChunk,
+              atualizadoEm: agora,
+            });
 
-        // Gravação retrocompatível em saeou060_chunks
-        const legacyChunkRef = doc(db, 'saeou060_chunks', `chunk_${String(i).padStart(3, '0')}`);
-        await setDoc(legacyChunkRef, cleanForFirestore({
-          index: i,
-          total: chunks.length,
-          items: cleanChunk,
-          updatedAt: agora,
-        }));
+            // Gravação retrocompatível em saeou060_chunks
+            try {
+              const legacyChunkRef = doc(db, 'saeou060_chunks', `chunk_${String(chunkIdx).padStart(3, '0')}`);
+              await setDoc(legacyChunkRef, cleanForFirestore({
+                index: chunkIdx,
+                total: chunks.length,
+                items: cleanChunk,
+                updatedAt: agora,
+              }));
+            } catch (legErr) {
+              // Não bloquear a publicação oficial caso a coleção legada falhe
+            }
+          })
+        );
 
-        const pct = Math.round(35 + ((i + 1) / chunks.length) * 45);
-        this.atualizarStatus({
-          progressoPorcentagem: pct,
-          mensagem: `Enviando partes para a nuvem (${i + 1} de ${chunks.length})...`,
-        });
+        const chunksConcluidos = Math.min(i + batch.length, chunks.length);
+        const pct = Math.round(35 + (chunksConcluidos / chunks.length) * 50); // 35% a 85%
+        const msg = `Enviando partes para a nuvem (${chunksConcluidos} de ${chunks.length})...`;
+        this.atualizarStatus({ progressoPorcentagem: pct, mensagem: msg });
+        onProgress?.(pct, msg, chunksConcluidos, chunks.length);
 
-        await new Promise((r) => setTimeout(r, 20));
+        await new Promise((r) => setTimeout(r, 15));
       }
 
-      // 4. Limpar chunks legados obsoletos
-      try {
-        const existingChunksSnap = await getDocs(collection(db, 'saeou060_chunks'));
-        const deletePromises: Promise<void>[] = [];
-        existingChunksSnap.forEach((docSnap) => {
-          const match = docSnap.id.match(/^chunk_(\d+)$/);
-          if (match && parseInt(match[1], 10) >= chunks.length) {
-            deletePromises.push(deleteDoc(docSnap.ref));
-          }
-        });
-        if (deletePromises.length > 0) {
-          await Promise.all(deletePromises);
-        }
-      } catch (errClean) {
-        console.warn('[SaeouSyncService] Aviso ao limpar chunks legados:', errClean);
-      }
-
-      // 5. Salvar metadados da versão
+      // 4. Salvar metadados da versão
+      onProgress?.(88, 'Gravando metadados oficiais da versão SAEOU060...', chunks.length, chunks.length);
       const versaoMetaDocRef = doc(db, 'filiais', filialId, 'saeou_versoes', versaoId);
       await setDoc(versaoMetaDocRef, {
         versaoId,
@@ -352,15 +350,18 @@ class SaeouSyncService {
         versaoAnteriorId: this._versaoAtivaRemota?.versaoId || null,
       });
 
-      // 6. Comutação Atômica do Ponteiro Oficial
+      // 5. Comutação Atômica do Ponteiro Oficial
       this.atualizarStatus({
         etapa: 'COMUTANDO_PONTEIRO',
-        progressoPorcentagem: 90,
+        progressoPorcentagem: 92,
         mensagem: 'Ativando versão central do SAEOU060...',
       });
+      onProgress?.(92, 'Ativando versão central do SAEOU060...', chunks.length, chunks.length);
 
       const configRef = doc(db, 'filiais', filialId, 'config', 'versao_ativa_saeou');
       await runTransaction(db, async (txn) => {
+        const snap = await txn.get(configRef);
+        const versaoAnterior = snap.exists() ? ((snap.data() as any).versaoId || null) : null;
         txn.set(configRef, {
           versaoId,
           filialId,
@@ -369,18 +370,22 @@ class SaeouSyncService {
           totalRegistros: registros.length,
           totalChunks: chunks.length,
           checksumBase: checksum,
-          versaoAnteriorId: this._versaoAtivaRemota?.versaoId || null,
+          versaoAnteriorId: versaoAnterior,
           atualizadoEm: agora,
         });
       });
 
-      // Atualizar metadados gerais globais para compatibilidade
-      await setDoc(doc(db, 'metadados', 'geral'), cleanForFirestore({
-        total_saeou060: registros.length,
-        total_saeou_chunks: chunks.length,
-        saeou060_version: Date.now(),
-        updatedAt: agora,
-      }), { merge: true });
+      // Atualizar metadados gerais globais para compatibilidade retroativa
+      try {
+        await setDoc(doc(db, 'metadados', 'geral'), cleanForFirestore({
+          total_saeou060: registros.length,
+          total_saeou_chunks: chunks.length,
+          saeou060_version: Date.now(),
+          updatedAt: agora,
+        }), { merge: true });
+      } catch (metaErr) {
+        // Não bloqueia
+      }
 
       this._versaoLocalId = versaoId;
       await dbSetMeta('meta_saeou_sync', {
@@ -398,11 +403,14 @@ class SaeouSyncService {
         versaoPublicada: versaoId,
         ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
       });
+      onProgress?.(100, `SAEOU060 publicado e sincronizado com sucesso na nuvem! (${registros.length} registros)`, chunks.length, chunks.length);
 
       return {
         sucesso: true,
-        mensagem: `SAEOU060 publicado na nuvem central com sucesso (${registros.length} registros).`,
+        mensagem: `SAEOU060 publicado na nuvem central com sucesso (${registros.length} registros em ${chunks.length} partes).`,
         versaoId,
+        chunksEnviados: chunks.length,
+        totalChunks: chunks.length,
       };
     } catch (err: any) {
       console.error('[SaeouSyncService] Erro ao publicar SAEOU060:', err);
@@ -419,7 +427,7 @@ class SaeouSyncService {
       });
       return {
         sucesso: false,
-        mensagem: `Erro na publicação: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`,
+        mensagem: `Erro na publicação no Firebase: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`,
       };
     }
   }

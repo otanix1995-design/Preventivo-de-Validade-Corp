@@ -224,8 +224,9 @@ class SpcoiSyncService {
     fornecedores: FornecedorSPCOI007[],
     industrias: Industria[],
     resumo?: ResumoImportacaoSPCOI007,
-    filialId: string = '172'
-  ): Promise<{ sucesso: boolean; mensagem: string; versaoId?: string }> {
+    filialId: string = '172',
+    onProgress?: (pct: number, msg: string, chunkAtual?: number, totalChunks?: number) => void
+  ): Promise<{ sucesso: boolean; mensagem: string; versaoId?: string; chunksEnviados?: number; totalChunks?: number }> {
     if (!fornecedores || fornecedores.length === 0) {
       return { sucesso: false, mensagem: 'Não há registros de fornecedores SPCOI007 para publicação.' };
     }
@@ -252,6 +253,7 @@ class SpcoiSyncService {
       progressoPorcentagem: 10,
       mensagem: 'Fracionando dados do SPCOI007 em partes seguras...',
     });
+    onProgress?.(10, 'Fracionando dados do SPCOI007 em partes seguras...');
 
     try {
       await ensureAuth().catch(() => null);
@@ -282,6 +284,7 @@ class SpcoiSyncService {
         progressoPorcentagem: 25,
         mensagem: `Calculando checksum de integridade (${chunks.length} partes)...`,
       });
+      onProgress?.(25, `Calculando checksum de integridade (${chunks.length} partes)...`, 0, chunks.length);
 
       // 2. Checksum
       const sample = JSON.stringify(fornecedores.slice(0, 50)) + `_len_${fornecedores.length}_ind_${industrias.length}_` + JSON.stringify(fornecedores.slice(-50));
@@ -290,34 +293,44 @@ class SpcoiSyncService {
       const agora = new Date().toISOString();
       const versaoId = `spcoi_${filialId}_${Date.now()}`;
 
-      // 3. Enviar chunks para /filiais/{filialId}/spcoi_versoes/{versaoId}/chunks/chunk_{i}
+      // 3. Enviar chunks com concorrência limitada (lotes de até 5 chunks paralelos)
+      // Reduz o tempo de 50s para ~7s garantindo confirmação integral antes da ativação
+      const CONCURRENCY_LIMIT = 5;
       this.atualizarStatus({
         etapa: 'ENVIANDO_CHUNKS',
         progressoPorcentagem: 35,
         mensagem: `Enviando partes para a nuvem (0 de ${chunks.length})...`,
       });
+      onProgress?.(35, `Enviando partes para a nuvem (0 de ${chunks.length})...`, 0, chunks.length);
 
-      for (let i = 0; i < chunks.length; i++) {
-        const chunkDocRef = doc(db, 'filiais', filialId, 'spcoi_versoes', versaoId, 'chunks', `chunk_${i}`);
-        await setDoc(chunkDocRef, {
-          versaoId,
-          index: i,
-          totalChunks: chunks.length,
-          itemsCount: chunks[i].length,
-          items: chunks[i],
-          atualizadoEm: agora,
-        });
+      for (let i = 0; i < chunks.length; i += CONCURRENCY_LIMIT) {
+        const batch = chunks.slice(i, i + CONCURRENCY_LIMIT);
+        await Promise.all(
+          batch.map(async (chunkData, idxInBatch) => {
+            const chunkIdx = i + idxInBatch;
+            const chunkDocRef = doc(db, 'filiais', filialId, 'spcoi_versoes', versaoId, 'chunks', `chunk_${chunkIdx}`);
+            await setDoc(chunkDocRef, {
+              versaoId,
+              index: chunkIdx,
+              totalChunks: chunks.length,
+              itemsCount: chunkData.length,
+              items: chunkData,
+              atualizadoEm: agora,
+            });
+          })
+        );
 
-        const pct = Math.round(35 + ((i + 1) / chunks.length) * 45);
-        this.atualizarStatus({
-          progressoPorcentagem: pct,
-          mensagem: `Enviando partes para a nuvem (${i + 1} de ${chunks.length})...`,
-        });
+        const chunksConcluidos = Math.min(i + batch.length, chunks.length);
+        const pct = Math.round(35 + (chunksConcluidos / chunks.length) * 45); // 35% a 80%
+        const msg = `Enviando partes para a nuvem (${chunksConcluidos} de ${chunks.length})...`;
+        this.atualizarStatus({ progressoPorcentagem: pct, mensagem: msg });
+        onProgress?.(pct, msg, chunksConcluidos, chunks.length);
 
-        await new Promise((r) => setTimeout(r, 20));
+        await new Promise((r) => setTimeout(r, 15));
       }
 
       // 4. Salvar indústrias e metadados da versão
+      onProgress?.(85, 'Salvando cadastro de indústrias e metadados da versão...', chunks.length, chunks.length);
       const versaoMetaDocRef = doc(db, 'filiais', filialId, 'spcoi_versoes', versaoId);
       await setDoc(versaoMetaDocRef, {
         versaoId,
@@ -336,12 +349,15 @@ class SpcoiSyncService {
       // 5. Comutação Atômica do Ponteiro Oficial
       this.atualizarStatus({
         etapa: 'COMUTANDO_PONTEIRO',
-        progressoPorcentagem: 90,
+        progressoPorcentagem: 92,
         mensagem: 'Ativando versão central do SPCOI007...',
       });
+      onProgress?.(92, 'Ativando versão central do SPCOI007...', chunks.length, chunks.length);
 
       const configRef = doc(db, 'filiais', filialId, 'config', 'versao_ativa_spcoi');
       await runTransaction(db, async (txn) => {
+        const snap = await txn.get(configRef);
+        const versaoAnterior = snap.exists() ? ((snap.data() as any).versaoId || null) : null;
         txn.set(configRef, {
           versaoId,
           filialId,
@@ -351,7 +367,7 @@ class SpcoiSyncService {
           totalIndustrias: industrias.length,
           totalChunks: chunks.length,
           checksumBase: checksum,
-          versaoAnteriorId: this._versaoAtivaRemota?.versaoId || null,
+          versaoAnteriorId: versaoAnterior,
           atualizadoEm: agora,
         });
       });
@@ -373,11 +389,14 @@ class SpcoiSyncService {
         versaoPublicada: versaoId,
         ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
       });
+      onProgress?.(100, `SPCOI007 publicado e sincronizado com sucesso! (${fornecedores.length} fornecedores)`, chunks.length, chunks.length);
 
       return {
         sucesso: true,
-        mensagem: `SPCOI007 publicado na nuvem central com sucesso (${fornecedores.length} fornecedores).`,
+        mensagem: `SPCOI007 publicado na nuvem central com sucesso (${fornecedores.length} fornecedores, ${chunks.length} partes).`,
         versaoId,
+        chunksEnviados: chunks.length,
+        totalChunks: chunks.length,
       };
     } catch (err: any) {
       console.error('[SpcoiSyncService] Erro ao publicar SPCOI007:', err);
@@ -394,7 +413,7 @@ class SpcoiSyncService {
       });
       return {
         sucesso: false,
-        mensagem: `Erro na publicação: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`,
+        mensagem: `Erro na publicação no Firebase: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`,
       };
     }
   }

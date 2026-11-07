@@ -92,6 +92,20 @@ export function resetQuotaExceeded(): void {
 export function isQuotaError(err: any): boolean {
   if (!err) return false;
   const msg = String(err?.message || err?.code || err).toLowerCase();
+
+  // Distinguir erro de estouro de memória de consulta pontual (128 MiB in-memory query limit)
+  // que NÃO é esgotamento de cota diária do projeto Firebase
+  if (
+    msg.includes('128.00 mib') ||
+    msg.includes('128.14 mib') ||
+    msg.includes('128 mib') ||
+    msg.includes('134,367,920') ||
+    msg.includes('scanning over large documents') ||
+    msg.includes('attempted to use')
+  ) {
+    return false;
+  }
+
   return (
     msg.includes('resource-exhausted') ||
     msg.includes('quota-exceeded') ||
