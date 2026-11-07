@@ -718,6 +718,7 @@ export interface ItemIsv {
   valor_estoque_formatado: string;
   cnpjs: string[];
   industrias_nomes: string[];
+  fornecedor_razao_social?: string;
   promotores_nomes: string[];
   agencias_nomes: string[];
   tem_promotor: boolean;

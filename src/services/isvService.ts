@@ -908,6 +908,40 @@ class IsvService {
     return this._industrias.find((i) => i.cnpj === norm);
   }
 
+  /**
+   * Obtém os fornecedores cadastrados na SPCOI007 para um determinado produto.
+   */
+  public getFornecedoresDoProduto(codigoInterno: string, digito?: string): FornecedorSPCOI007[] {
+    const codNorm = (codigoInterno || '').toString().trim().replace(/^0+/, '');
+    const digNorm = digito !== undefined && digito !== null ? digito.toString().trim().replace(/^0+/, '') : undefined;
+    if (digNorm) {
+      const list = this._fornecedoresByCodDig.get(`${codNorm}-${digNorm}`);
+      if (list && list.length > 0) return list;
+    }
+    return this._fornecedoresByCod.get(codNorm) || [];
+  }
+
+  /**
+   * Obtém exclusivamente a RAZÃO SOCIAL DA INDÚSTRIA vinculada ao produto através da SPCOI007.
+   * Não retorna comprador, promotor ou representante. Se não localizado, retorna 'NÃO IDENTIFICADO'.
+   */
+  public getRazaoSocialIndustria(codigoInterno: string, digito?: string): string {
+    const forns = this.getFornecedoresDoProduto(codigoInterno, digito);
+    for (let i = 0; i < forns.length; i++) {
+      const f = forns[i];
+      if (f.cnpj) {
+        const ind = this._industriasMap.get(f.cnpj);
+        if (ind?.razao_social && ind.razao_social.trim() !== '' && ind.razao_social.trim() !== '-') {
+          return ind.razao_social.trim();
+        }
+      }
+      if (f.razao_social && f.razao_social.trim() !== '' && f.razao_social.trim() !== '-') {
+        return f.razao_social.trim();
+      }
+    }
+    return 'NÃO IDENTIFICADO';
+  }
+
   public async salvarIndustria(industria: Industria): Promise<void> {
     const norm = normalizarCnpj(industria.cnpj);
     const idx = this._industrias.findIndex((i) => i.cnpj === norm);
@@ -1200,12 +1234,29 @@ class IsvService {
         const p = smgPorCodigo.get(reg.codigo_interno);
 
         const codNorm = reg.codigo_interno.toString().trim().replace(/^0+/, '');
-        const forns = fornecedoresPorCodigo.get(codNorm) || [];
+        const digNorm = reg.digito ? reg.digito.toString().trim().replace(/^0+/, '') : undefined;
+        let forns = digNorm ? this._fornecedoresByCodDig.get(`${codNorm}-${digNorm}`) || [] : [];
+        if (forns.length === 0) {
+          forns = fornecedoresPorCodigo.get(codNorm) || [];
+        }
         const cnpjs = Array.from(new Set(forns.map((f) => f.cnpj)));
+
+        // Razão social oficial da indústria na SPCOI007
+        let fornecedorRazaoSocial = 'NÃO IDENTIFICADO';
+        for (let j = 0; j < forns.length; j++) {
+          const f = forns[j];
+          const ind = industriasMap.get(f.cnpj);
+          const rz = (ind?.razao_social || f.razao_social || '').trim();
+          if (rz && rz !== '-' && rz.toUpperCase() !== 'NÃO IDENTIFICADO') {
+            fornecedorRazaoSocial = rz;
+            break;
+          }
+        }
 
         const industriasNomes = cnpjs.map((cnpj) => {
           const ind = industriasMap.get(cnpj);
-          return ind?.nome_exibicao || ind?.razao_social || cnpj;
+          const fornMatch = forns.find((f) => f.cnpj === cnpj);
+          return ind?.razao_social || fornMatch?.razao_social || ind?.nome_exibicao || cnpj;
         });
 
         const promotoresNomesSet = new Set<string>();
@@ -1313,6 +1364,7 @@ class IsvService {
           valor_estoque_formatado: valorEstoqueFormatado,
           cnpjs,
           industrias_nomes: industriasNomes,
+          fornecedor_razao_social: fornecedorRazaoSocial,
           promotores_nomes: promotoresNomes,
           agencias_nomes: agenciasNomes,
           tem_promotor: temPromotor,
@@ -1327,12 +1379,29 @@ class IsvService {
       // =========================================================================
       result = prods.map((p) => {
         const codNorm = p.codigo_interno.toString().trim().replace(/^0+/, '');
-        const forns = fornecedoresPorCodigo.get(codNorm) || [];
+        const digNorm = p.digito ? p.digito.toString().trim().replace(/^0+/, '') : undefined;
+        let forns = digNorm ? this._fornecedoresByCodDig.get(`${codNorm}-${digNorm}`) || [] : [];
+        if (forns.length === 0) {
+          forns = fornecedoresPorCodigo.get(codNorm) || [];
+        }
         const cnpjs = Array.from(new Set(forns.map((f) => f.cnpj)));
+
+        // Razão social oficial da indústria na SPCOI007
+        let fornecedorRazaoSocial = 'NÃO IDENTIFICADO';
+        for (let j = 0; j < forns.length; j++) {
+          const f = forns[j];
+          const ind = industriasMap.get(f.cnpj);
+          const rz = (ind?.razao_social || f.razao_social || '').trim();
+          if (rz && rz !== '-' && rz.toUpperCase() !== 'NÃO IDENTIFICADO') {
+            fornecedorRazaoSocial = rz;
+            break;
+          }
+        }
 
         const industriasNomes = cnpjs.map((cnpj) => {
           const ind = industriasMap.get(cnpj);
-          return ind?.nome_exibicao || ind?.razao_social || cnpj;
+          const fornMatch = forns.find((f) => f.cnpj === cnpj);
+          return ind?.razao_social || fornMatch?.razao_social || ind?.nome_exibicao || cnpj;
         });
 
         const promotoresNomesSet = new Set<string>();
@@ -1396,6 +1465,7 @@ class IsvService {
             valorEstoque !== null ? formatarMoedaBR(valorEstoque) : 'VALOR INDISPONÍVEL',
           cnpjs,
           industrias_nomes: industriasNomes,
+          fornecedor_razao_social: fornecedorRazaoSocial,
           promotores_nomes: promotoresNomes,
           agencias_nomes: agenciasNomes,
           tem_promotor: temPromotor,

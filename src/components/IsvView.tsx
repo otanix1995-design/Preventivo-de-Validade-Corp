@@ -23,13 +23,25 @@ import {
   RefreshCw,
   Search,
   TrendingDown,
+  Trophy,
   UserCheck,
   Users,
   X
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { formatarMoedaBR } from '../services/deviceId';
-import { gerarRelatorioIsvA3Pdf } from '../services/isvPdfService';
+import {
+  gerarRelatorioAgenciaPdf,
+  gerarRelatorioFornecedorPdf,
+  gerarRelatorioIsvA4Pdf,
+  gerarRelatorioPromotorPdf,
+  gerarRelatorioTop30Pdf,
+} from '../services/isvPdfService';
+import {
+  ClassificacaoDiasSemVenda,
+  classificarDiasSemVenda,
+  DEFINICOES_CLASSIFICACAO,
+} from '../services/isvClassificacaoService';
 import { isvService } from '../services/isvService';
 import { productRepository } from '../services/productRepository';
 import { promotorService } from '../services/promotorService';
@@ -43,8 +55,10 @@ import {
   SetorOperacionalIsv,
   SolicitacaoAjusteIsv,
 } from '../types';
+import { GraficoMercadoriasSemVenda } from './isv/GraficoMercadoriasSemVenda';
 import { ModalDetalhesVinculosIsv } from './isv/ModalDetalhesVinculosIsv';
 import { ModalRegistrarAjusteIsv } from './isv/ModalRegistrarAjusteIsv';
+import { TabelaTop30Mercadorias } from './isv/TabelaTop30Mercadorias';
 
 interface IsvViewProps {
   produtos: ProdutoSMG[];
@@ -61,7 +75,8 @@ export const IsvView: React.FC<IsvViewProps> = ({
   onBack,
   onNavigateToImportacao,
 }) => {
-  const [subAba, setSubAba] = useState<'geral' | 'ajustes' | 'ocorrencias'>('geral');
+  const [subAba, setSubAba] = useState<'geral' | 'top30' | 'ajustes' | 'ocorrencias'>('geral');
+  const [filtroClassificacaoGiro, setFiltroClassificacaoGiro] = useState<ClassificacaoDiasSemVenda | null>(null);
   const [industrias, setIndustrias] = useState<Industria[]>([]);
   const [promotores, setPromotores] = useState<Promotor[]>([]);
   const [solicitacoesAjuste, setSolicitacoesAjuste] = useState<SolicitacaoAjusteIsv[]>([]);
@@ -76,7 +91,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
   // Modal de geração de PDF
   const [isModalPdfOpen, setIsModalPdfOpen] = useState(false);
   const [pdfExibirValor, setPdfExibirValor] = useState(true);
-  const [pdfTipoAgrupamento, setPdfTipoAgrupamento] = useState<'GERAL' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA'>('GERAL');
+  const [pdfTipoAgrupamento, setPdfTipoAgrupamento] = useState<'GERAL' | 'TOP30' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA'>('TOP30');
   const [pdfEntidadeSelecionada, setPdfEntidadeSelecionada] = useState<string>('');
   const [pdfLimiteExportacao, setPdfLimiteExportacao] = useState<number | 'TODOS'>(30);
 
@@ -196,8 +211,18 @@ export const IsvView: React.FC<IsvViewProps> = ({
       base = base.filter((it) => it.elegivel_ajuste);
     }
 
+    // Filtro por classificação de dias sem venda (clique nos cards do gráfico)
+    if (filtroClassificacaoGiro) {
+      base = base.filter((it) => {
+        const est = it.estoque_total ?? it.produto?.estoque_total ?? 0;
+        const dias = it.dias_sem_venda ?? it.produto?.dias_sem_venda ?? 0;
+        const classif = classificarDiasSemVenda(dias, est);
+        return classif !== null && classif.tipo === filtroClassificacaoGiro;
+      });
+    }
+
     return isvService.filtrarItensIsv(base, filtros);
-  }, [itensIsvBrutos, filtros, subAba]);
+  }, [itensIsvBrutos, filtros, subAba, filtroClassificacaoGiro]);
 
   // Indicadores consolidados do painel (sempre com produtos únicos e cálculo unificado em uma única passada)
   const indicadores = useMemo(() => {
@@ -232,46 +257,89 @@ export const IsvView: React.FC<IsvViewProps> = ({
   };
 
   const handleDispararPdf = () => {
-    let tituloFiltro = 'Geral da Loja';
-    let nomeEntidade = '';
-    let subtituloEntidade = '';
+    const filialNome = 'FILIAL 172 — CASCAVEL';
 
-    if (pdfTipoAgrupamento === 'INDUSTRIA' && pdfEntidadeSelecionada) {
-      const ind = industrias.find((i) => i.cnpj === pdfEntidadeSelecionada);
-      if (ind) {
-        nomeEntidade = ind.nome_exibicao || ind.razao_social;
-        subtituloEntidade = `CNPJ: ${ind.cnpj_formatado || ind.cnpj} • ${ind.razao_social}`;
-        tituloFiltro = `Indústria: ${nomeEntidade}`;
-      }
-    } else if (pdfTipoAgrupamento === 'PROMOTOR' && pdfEntidadeSelecionada) {
-      const prom = promotores.find((p) => p.promotorId === pdfEntidadeSelecionada);
-      if (prom) {
-        nomeEntidade = prom.nome;
-        subtituloEntidade = `Agência: ${prom.agenciaNome || 'Não informada'}`;
-        tituloFiltro = `Promotor: ${nomeEntidade}`;
-      }
-    } else if (pdfTipoAgrupamento === 'AGENCIA' && pdfEntidadeSelecionada) {
-      nomeEntidade = pdfEntidadeSelecionada;
-      subtituloEntidade = `Agência: ${pdfEntidadeSelecionada}`;
-      tituloFiltro = `Agência: ${pdfEntidadeSelecionada}`;
+    if (pdfTipoAgrupamento === 'TOP30') {
+      gerarRelatorioTop30Pdf(itensFiltrados, {
+        filialNome,
+        exibirValorEstoque: pdfExibirValor,
+      });
+      setIsModalPdfOpen(false);
+      return;
     }
 
+    if (pdfTipoAgrupamento === 'INDUSTRIA') {
+      const ind = industrias.find((i) => i.cnpj === pdfEntidadeSelecionada);
+      const nomeEntidade = ind
+        ? ind.razao_social
+        : pdfEntidadeSelecionada || 'GERAL';
+      const subtituloEntidade = ind
+        ? `CNPJ: ${ind.cnpj_formatado || ind.cnpj}`
+        : '';
+      const itensAlvo = ind
+        ? itensFiltrados.filter((it) => it.cnpjs?.includes(ind.cnpj))
+        : itensFiltrados;
+
+      gerarRelatorioFornecedorPdf(nomeEntidade, itensAlvo, {
+        filialNome,
+        subtituloEntidade,
+        exibirValorEstoque: pdfExibirValor,
+        limiteQuantidade: pdfLimiteExportacao,
+        filtrosDescricao: getFiltrosAtivosDescricao(),
+      });
+      setIsModalPdfOpen(false);
+      return;
+    }
+
+    if (pdfTipoAgrupamento === 'PROMOTOR') {
+      const prom = promotores.find((p) => p.promotorId === pdfEntidadeSelecionada);
+      const nomeEntidade = prom ? prom.nome : pdfEntidadeSelecionada || 'GERAL';
+      const subtituloEntidade = prom ? `Agência: ${prom.agenciaNome || 'Não informada'}` : '';
+      const itensAlvo = prom
+        ? itensFiltrados.filter((it) => it.promotores_nomes?.includes(prom.nome))
+        : itensFiltrados;
+
+      gerarRelatorioPromotorPdf(nomeEntidade, itensAlvo, {
+        filialNome,
+        subtituloEntidade,
+        exibirValorEstoque: pdfExibirValor,
+        limiteQuantidade: pdfLimiteExportacao,
+        filtrosDescricao: getFiltrosAtivosDescricao(),
+      });
+      setIsModalPdfOpen(false);
+      return;
+    }
+
+    if (pdfTipoAgrupamento === 'AGENCIA') {
+      const nomeEntidade = pdfEntidadeSelecionada || 'GERAL';
+      const itensAlvo = pdfEntidadeSelecionada
+        ? itensFiltrados.filter((it) => it.agencias_nomes?.includes(nomeEntidade))
+        : itensFiltrados;
+
+      gerarRelatorioAgenciaPdf(nomeEntidade, itensAlvo, {
+        filialNome,
+        subtituloEntidade: `Agência: ${nomeEntidade}`,
+        exibirValorEstoque: pdfExibirValor,
+        limiteQuantidade: pdfLimiteExportacao,
+        filtrosDescricao: getFiltrosAtivosDescricao(),
+      });
+      setIsModalPdfOpen(false);
+      return;
+    }
+
+    // Geral (Filtros Ativos) - Relatório A4 Institucional
     const fonteOficial = isvService.temPlanilhaIsv()
       ? 'Planilha Operacional Oficial ISV'
       : 'BASE DO RUB';
 
-    const filtrosDescricao = getFiltrosAtivosDescricao();
-
-    gerarRelatorioIsvA3Pdf(itensFiltrados, {
-      tituloFiltro,
-      tipoAgrupamento: pdfTipoAgrupamento,
-      nomeEntidade,
-      subtituloEntidade,
+    gerarRelatorioIsvA4Pdf(itensFiltrados, {
+      tituloFiltro: 'Geral da Loja',
+      tipoAgrupamento: 'GERAL',
       exibirValorEstoque: pdfExibirValor,
-      filialNome: 'FILIAL 172 - CASCAVEL',
+      filialNome,
       limiteQuantidade: pdfLimiteExportacao,
       fonteOficial,
-      filtrosDescricao,
+      filtrosDescricao: getFiltrosAtivosDescricao(),
     });
 
     setIsModalPdfOpen(false);
@@ -308,18 +376,9 @@ export const IsvView: React.FC<IsvViewProps> = ({
   };
 
   const handleQuickPrintTop30 = () => {
-    const fonteOficial = isvService.temPlanilhaIsv()
-      ? 'Planilha Operacional Oficial ISV'
-      : 'BASE DO RUB';
-
-    gerarRelatorioIsvA3Pdf(itensFiltrados, {
-      tituloFiltro: 'Geral da Loja (Top 30 Maiores)',
-      tipoAgrupamento: 'GERAL',
+    gerarRelatorioTop30Pdf(itensFiltrados, {
+      filialNome: 'FILIAL 172 — CASCAVEL',
       exibirValorEstoque: true,
-      filialNome: 'FILIAL 172 - CASCAVEL',
-      limiteQuantidade: 30,
-      fonteOficial,
-      filtrosDescricao: getFiltrosAtivosDescricao(),
     });
   };
 
@@ -391,8 +450,8 @@ export const IsvView: React.FC<IsvViewProps> = ({
           </div>
         </div>
 
-        {/* Abas Sub-Navegação: Geral / Possíveis Ajustes / Ocorrências */}
-        <div className="flex items-center gap-2 pt-2 border-t border-slate-800 text-xs font-black uppercase tracking-wider">
+        {/* Abas Sub-Navegação: Geral / TOP 30 / Possíveis Ajustes / Ocorrências */}
+        <div className="flex items-center gap-2 pt-2 border-t border-slate-800 text-xs font-black uppercase tracking-wider flex-wrap">
           <button
             onClick={() => setSubAba('geral')}
             className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
@@ -403,6 +462,18 @@ export const IsvView: React.FC<IsvViewProps> = ({
           >
             <Layers className="w-3.5 h-3.5" />
             <span>Todos os Itens ({itensIsvBrutos.length})</span>
+          </button>
+
+          <button
+            onClick={() => setSubAba('top30')}
+            className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+              subAba === 'top30'
+                ? 'bg-amber-400 text-slate-950 font-black shadow-xs'
+                : 'text-amber-300 hover:text-white hover:bg-white/10'
+            }`}
+          >
+            <Trophy className="w-3.5 h-3.5" />
+            <span>⭐ TOP 30 Mercadorias</span>
           </button>
 
           <button
@@ -485,8 +556,33 @@ export const IsvView: React.FC<IsvViewProps> = ({
         </div>
       </div>
 
-      {subAba !== 'ocorrencias' && (
+      {/* 2.5. Aba Especial: TOP 30 Mercadorias (Ranking Oficial) */}
+      {subAba === 'top30' && (
+        <TabelaTop30Mercadorias
+          itens={itensIsvBrutos}
+          filialNome="FILIAL 172 — CASCAVEL"
+          onSelecionarProduto={(item) => {
+            if (item.produto && onSelectProduto) {
+              onSelectProduto(item.produto);
+            }
+          }}
+        />
+      )}
+
+      {/* Visualização de Itens e Ajustes */}
+      {(subAba === 'geral' || subAba === 'ajustes') && (
         <>
+          {/* Gráfico Oficial por Dias Sem Venda (Base RUB) */}
+          {subAba === 'geral' && (
+            <GraficoMercadoriasSemVenda
+              itens={itensIsvBrutos}
+              filtroClassificacaoAtivo={filtroClassificacaoGiro}
+              onSelecionarClassificacao={setFiltroClassificacaoGiro}
+              onAbrirTop30={() => setSubAba('top30')}
+              onGerarPdfTop30={handleQuickPrintTop30}
+            />
+          )}
+
           {/* 3. Barra de Filtros Combináveis (Seção 7) */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-2xs p-4 space-y-3">
             <div className="flex items-center justify-between flex-wrap gap-2">
@@ -561,10 +657,10 @@ export const IsvView: React.FC<IsvViewProps> = ({
                   onChange={(e) => setFiltros((prev) => ({ ...prev, industriaCnpj: e.target.value }))}
                   className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-[#F36B0B] focus:outline-hidden"
                 >
-                  <option value="TODAS">Indústria: Todas</option>
+                  <option value="TODAS">Fornecedor: Todos (Razão Social)</option>
                   {industrias.map((ind) => (
                     <option key={ind.cnpj} value={ind.cnpj}>
-                      {ind.nome_exibicao || ind.razao_social}
+                      {ind.razao_social || ind.nome_exibicao}
                     </option>
                   ))}
                 </select>
@@ -1126,19 +1222,35 @@ export const IsvView: React.FC<IsvViewProps> = ({
                             {item.estoque_formatado}
                           </td>
 
-                          {/* 6. DIAS SEM VENDA */}
+                          {/* 6. DIAS SEM VENDA (Classificação Oficial ISV) */}
                           <td className="py-2.5 px-2 text-center whitespace-nowrap">
-                            <span
-                              className={`font-mono font-bold px-2 py-0.5 rounded text-[11px] ${
-                                item.dias_sem_venda >= 10
-                                  ? 'bg-red-50 text-red-700 border border-red-200'
-                                  : item.dias_sem_venda >= 5
-                                  ? 'bg-amber-50 text-amber-800 border border-amber-200'
-                                  : 'text-slate-600'
-                              }`}
-                            >
-                              {item.dias_sem_venda}
-                            </span>
+                            {(() => {
+                              const est = item.estoque_total ?? item.produto?.estoque_total ?? 0;
+                              const dias = item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0;
+                              const classif = classificarDiasSemVenda(dias, est);
+
+                              if (!classif) {
+                                return (
+                                  <span className="font-mono text-slate-500 text-[11px]">
+                                    {dias}d
+                                  </span>
+                                );
+                              }
+
+                              return (
+                                <span
+                                  className="font-mono font-bold px-2 py-0.5 rounded text-[11px] border shadow-2xs inline-block"
+                                  style={{
+                                    backgroundColor: classif.bgHex,
+                                    color: classif.textHex,
+                                    borderColor: classif.borderHex,
+                                  }}
+                                  title={`${classif.rotulo} (${classif.faixaTexto})`}
+                                >
+                                  {dias}d
+                                </span>
+                              );
+                            })()}
                           </td>
 
                           {/* 7. IDADE */}
@@ -1356,10 +1468,10 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 </div>
                 <div>
                   <h3 className="text-base font-black tracking-tight uppercase">
-                    Exportar Relatório A3
+                    Exportar Relatório Oficial A4 (PDF)
                   </h3>
                   <p className="text-xs text-blue-200 font-medium mt-0.5">
-                    ISV — Formato Oficial A3 Horizontal
+                    ISV — Formato Oficial A4 Paisagem (297x210mm) • Filial 172
                   </p>
                 </div>
               </div>
@@ -1386,8 +1498,8 @@ export const IsvView: React.FC<IsvViewProps> = ({
                       [✓] EXIBIR VALOR DO ESTOQUE
                     </span>
                     <p className="text-[11px] text-slate-500 font-medium leading-relaxed mt-0.5">
-                      Quando marcado, inclui a coluna <strong>VALOR DO ESTOQUE (11 colunas)</strong> e o somatório em R$.
-                      Ao desmarcar, a coluna é removida <strong>(10 colunas)</strong> e nenhum valor financeiro é exibido no documento.
+                      Quando marcado, inclui o somatório financeiro em R$ e a coluna quando aplicável.
+                      Utiliza sempre uma única coluna de <strong>ESTOQUE</strong> em conformidade institucional.
                     </p>
                   </div>
                 </label>
@@ -1458,7 +1570,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
               {/* Tipo de Cabeçalho / Relatório */}
               <div className="space-y-1">
                 <label className="block text-xs font-black uppercase text-slate-700">
-                  Cabeçalho / Agrupamento do Relatório:
+                  Modelo Oficial do Relatório:
                 </label>
                 <select
                   value={pdfTipoAgrupamento}
@@ -1468,10 +1580,11 @@ export const IsvView: React.FC<IsvViewProps> = ({
                   }}
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2.5 text-xs font-bold text-slate-900 focus:bg-white focus:outline-hidden"
                 >
-                  <option value="GERAL">Geral (Filtros Ativos)</option>
-                  <option value="INDUSTRIA">Por Indústria Específica</option>
-                  <option value="PROMOTOR">Por Promotor Específico</option>
-                  <option value="AGENCIA">Por Agência Específica</option>
+                  <option value="TOP30">⭐ TOP 30 — Mercadorias (Ranking Oficial dos 30 Maiores Dias s/ Venda)</option>
+                  <option value="GERAL">Geral da Loja (Filtros Ativos)</option>
+                  <option value="INDUSTRIA">Por Fornecedor / Indústria (9 Colunas)</option>
+                  <option value="PROMOTOR">Por Promotor Específico (9 Colunas)</option>
+                  <option value="AGENCIA">Por Agência Específica (9 Colunas)</option>
                 </select>
               </div>
 
@@ -1489,7 +1602,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
                     <option value="">Selecione...</option>
                     {industrias.map((ind) => (
                       <option key={ind.cnpj} value={ind.cnpj}>
-                        {ind.nome_exibicao || ind.razao_social} ({ind.cnpj_formatado})
+                        {ind.razao_social || ind.nome_exibicao} ({ind.cnpj_formatado})
                       </option>
                     ))}
                   </select>
