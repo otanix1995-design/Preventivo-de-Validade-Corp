@@ -38,6 +38,7 @@ import { nuvemSyncEngine } from './nuvemSyncEngine';
 import { promotorService } from './promotorService';
 import { isFirestoreQuotaExceeded } from './firebase';
 import { rubSyncService } from './rubSyncService';
+import { isModoAtualizacaoLocalAtivo, notificarAlteracaoParaPacoteLocal } from './localPackageMode';
 import {
   buildVencimentoKey,
   normalizeVencimentoRecord,
@@ -923,7 +924,8 @@ class ProductRepository {
    */
   public async saveProducts(
     novosProdutos: ProdutoSMG[],
-    onProgress?: (pct: number, msg: string) => void
+    onProgress?: (pct: number, msg: string) => void,
+    options?: { skipLegacyCloudSync?: boolean }
   ): Promise<boolean> {
     this._produtos = novosProdutos;
     this.rebuildIndices();
@@ -952,10 +954,28 @@ class ProductRepository {
     // Notifica listeners locais imediatamente (IndexedDB 100% gravado)
     this.notify();
 
-    // 2. Sincronização em nuvem desacoplada e NÃO-BLOQUEANTE:
-    // Nunca bloqueia a conclusão do salvamento local nem retém a tela aberta.
-    // Se a cota estiver excedida ou o dispositivo estiver offline, mantém a sincronização pendente.
-    if (!isFirestoreQuotaExceeded() && typeof navigator !== 'undefined' && navigator.onLine) {
+    if (!options?.skipLegacyCloudSync) {
+      notificarAlteracaoParaPacoteLocal(
+        'BASE_RUB',
+        `BASE RUB atualizada (${novosProdutos.length} produtos)`
+      );
+    }
+
+    // 2. Bloqueio da sincronização legada concorrente (/catalogo_chunks):
+    // Quando a Filial 172 utiliza publicação versionada ou pacote local único,
+    // saveProducts() NÃO deve disparar cloudSyncService.pushCatalogoToCloud() em background.
+    const usaPublicacaoVersionadaRub =
+      isModoAtualizacaoLocalAtivo() ||
+      options?.skipLegacyCloudSync === true ||
+      (meta.filial_numero || '172') === '172' ||
+      meta.status_base === 'BASE_RUB';
+
+    if (
+      !usaPublicacaoVersionadaRub &&
+      !isFirestoreQuotaExceeded() &&
+      typeof navigator !== 'undefined' &&
+      navigator.onLine
+    ) {
       cloudSyncService.pushCatalogoToCloud(novosProdutos, meta).catch((e) => {
         console.warn('[ProductRepository] Sincronização em background do catálogo pendente:', e?.message || e);
       });
@@ -1646,7 +1666,8 @@ class ProductRepository {
    */
   public async aplicarNovoSnapshotSaeou060(
     novosRegistrosDaPlanilha: RegistroSaeou060[],
-    arquivoOrigem?: string
+    arquivoOrigem?: string,
+    options?: { skipLegacyCloudSync?: boolean }
   ): Promise<ResultadoReconciliacaoSaeou060> {
     // 1. Processar e reconciliar os dados com a base existente
     const resultado = reconciliarSaeou060Snapshot(
@@ -1725,10 +1746,24 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    // 5. Sincronização limpa com o Firestore (remove chunks antigos excedentes)
-    cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
-      console.warn('Erro ao sincronizar SAEOU060 limpo na nuvem:', e);
-    });
+    // 5. Sincronização legada apenas fora do fluxo versionado V3 / pacote local da Filial 172
+    const usaPublicacaoVersionadaSaeou =
+      isModoAtualizacaoLocalAtivo() ||
+      options?.skipLegacyCloudSync === true ||
+      (this._metadados?.filial_numero || '172') === '172';
+
+    if (!usaPublicacaoVersionadaSaeou) {
+      cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
+        console.warn('Erro ao sincronizar SAEOU060 limpo na nuvem:', e);
+      });
+    }
+
+    if (!options?.skipLegacyCloudSync) {
+      notificarAlteracaoParaPacoteLocal(
+        'SAEOU060',
+        `SAEOU060 atualizado (${this._saeou060.length} registros)`
+      );
+    }
 
     this.notify();
     return resultado;
@@ -1819,8 +1854,10 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    // Sincronizar na nuvem e remover chunks obsoletos
-    await cloudSyncService.pushSaeou060ToCloud(this._saeou060);
+    // Sincronizar na nuvem legada apenas fora do fluxo versionado V3 da Filial 172
+    if ((this._metadados?.filial_numero || '172') !== '172' && !isFirestoreQuotaExceeded()) {
+      await cloudSyncService.pushSaeou060ToCloud(this._saeou060);
+    }
 
     this.notify();
     return {
@@ -1846,9 +1883,11 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
-      console.warn('Erro ao sincronizar SAEOU060 na nuvem:', e);
-    });
+    if ((this._metadados?.filial_numero || '172') !== '172' && !isFirestoreQuotaExceeded()) {
+      cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
+        console.warn('Erro ao sincronizar SAEOU060 na nuvem:', e);
+      });
+    }
 
     this.notify();
   }
@@ -2277,6 +2316,13 @@ class ProductRepository {
   // --- METADADOS ---
 
   public async syncWithCloud(): Promise<{ success: boolean; message: string }> {
+    if (isFirestoreQuotaExceeded()) {
+      return {
+        success: true,
+        message: 'Modo local IndexedDB ativo (cota diária gratuita do Firebase Spark aguardando liberação).',
+      };
+    }
+
     const cloudRes = await cloudSyncService.syncFull(
       this._produtos,
       this._metadados,
@@ -2285,15 +2331,23 @@ class ProductRepository {
       this._vencimentos
     );
 
-    // Também sincroniza as coleções centrais padronizadas no Firestore
+    if (isFirestoreQuotaExceeded()) {
+      return cloudRes;
+    }
+
+    // Na Filial 172 / BASE RUB, a BASE RUB já é versionada via rubSyncService.
+    // Evitar reescrever ~11.700+ documentos individuais na coleção raiz 'produtos' para preservar a cota gratuita Spark.
+    const filialPadrao = this._metadados?.filial_numero || '172';
+    const usaCatalogoVersionadoV3 = filialPadrao === '172' || this._metadados?.status_base === 'BASE_RUB';
+
     try {
       await centralFirestoreService.sincronizarBaseComNuvem({
-        produtos: this._produtos,
+        produtos: usaCatalogoVersionadoV3 ? [] : this._produtos,
         vinculos: this._vinculos,
-        vencimentos: this._vencimentos,
+        vencimentos: [], // já sincronizado via cloudSyncService.syncFull sem duplicar escritas
         promotores: promotorService.getPromotores(),
         vinculosPromotores: promotorService.getVinculos(),
-        filialPadrao: this._metadados?.filial_numero || '172',
+        filialPadrao,
       });
     } catch (e) {
       console.warn('[ProductRepository] Sincronização central em segundo plano:', e);
@@ -2416,6 +2470,124 @@ class ProductRepository {
       saeouNaoLocalizados,
       statusBase: this._metadados.status_base,
     };
+  }
+
+  /**
+   * Aplica catálogo BASE RUB e SAEOU060 provenientes de um Pacote Local Único (.zip),
+   * preservando 100% os lotes de vencimento, vínculos EAN locais, divergências, filas offline e tombstones.
+   */
+  public async aplicarCatalogoESaeouDePacote(params: {
+    produtos: ProdutoSMG[];
+    saeou060: RegistroSaeou060[];
+    versaoPacoteId: string;
+    dataGeracaoIso: string;
+  }): Promise<{
+    vencimentosPreservados: number;
+    vinculosEanPreservados: number;
+  }> {
+    // Re-anexar vínculos EAN já existentes no dispositivo aos produtos recebidos do pacote
+    const eansPorCodigo = new Map<string, string[]>();
+    for (const v of this._vinculos) {
+      if (v.codigo_interno && v.ean) {
+        const list = eansPorCodigo.get(v.codigo_interno) || [];
+        if (!list.includes(v.ean)) list.push(v.ean);
+        eansPorCodigo.set(v.codigo_interno, list);
+      }
+    }
+
+    const produtosEnriquecidos = params.produtos.map((prod) => {
+      const eansLocais = eansPorCodigo.get(prod.codigo_interno) || [];
+      if (eansLocais.length === 0) return prod;
+      const mergedEans = Array.from(new Set([...(prod.eans || []), ...eansLocais]));
+      return {
+        ...prod,
+        eans: mergedEans,
+      };
+    });
+
+    // Preservar estado dos registros SAEOU060 que já correspondam a vencimentos locais no controle
+    const lotesPorChave = new Map<string, string>();
+    for (const v of this._vencimentos) {
+      if (v.codigo_interno && v.data_validade) {
+        lotesPorChave.set(`${v.codigo_interno}:${v.data_validade}`, v.id);
+      }
+    }
+
+    const saeouConciliado = deduplicarRegistrosSaeouPlanilha(params.saeou060).map((reg) => {
+      if (reg.data_vencimento) {
+        const matchVenc = lotesPorChave.get(`${reg.codigo_interno}:${reg.data_vencimento}`);
+        if (matchVenc) {
+          return {
+            ...reg,
+            status_saeou: 'JA_NO_CONTROLE' as const,
+            vencimento_id_vinculado: matchVenc,
+          };
+        }
+      }
+      return reg;
+    });
+
+    const snapshotAnterior = {
+      produtos: this._produtos,
+      saeou060: this._saeou060,
+      metadados: this._metadados,
+    };
+
+    try {
+      this._produtos = produtosEnriquecidos;
+      this._saeou060 = saeouConciliado;
+
+      // Revalidar status dos vínculos EAN locais em relação ao novo catálogo sem apagar nenhum vínculo
+      const codigosDisponiveis = new Set(produtosEnriquecidos.map((p) => p.codigo_interno));
+      const vinculosReavaliados = this._vinculos.map((v) => {
+        if (!codigosDisponiveis.has(v.codigo_interno)) return v;
+        const prod = produtosEnriquecidos.find((p) => p.codigo_interno === v.codigo_interno);
+        return {
+          ...v,
+          status_vinculo: 'VINCULADO' as const,
+          descricao: v.descricao || prod?.descricao || '',
+          digito: v.digito || prod?.digito || '',
+        };
+      });
+      this._vinculos = vinculosReavaliados;
+
+      const dataBr = new Date(params.dataGeracaoIso).toLocaleString('pt-BR');
+      const novoMeta: MetadadosBase = {
+        ...this._metadados,
+        filial_numero: '172',
+        filial_nome: 'CASCAVEL',
+        status_base: produtosEnriquecidos.length > 0 ? 'BASE_RUB' : 'VAZIA',
+        total_produtos: produtosEnriquecidos.length,
+        total_saeou060: saeouConciliado.length,
+        total_vencimentos: this._vencimentos.length,
+        total_eans: this._vinculos.length,
+        ultima_atualizacao_base_rub: dataBr,
+        ultima_atualizacao_smgoi013: dataBr,
+        ultima_atualizacao_saeou060: dataBr,
+      };
+      this._metadados = novoMeta;
+      this.rebuildIndices();
+
+      await Promise.all([
+        dbPutAll(STORES.PRODUTOS, this._produtos, true),
+        dbPutAll(STORES.SAEOU060, this._saeou060, true),
+        dbPutAll(STORES.VINCULOS_EAN, this._vinculos, true),
+        dbSetMeta('metadados_gerais', novoMeta),
+      ]);
+
+      this.notify();
+
+      return {
+        vencimentosPreservados: this._vencimentos.length,
+        vinculosEanPreservados: this._vinculos.length,
+      };
+    } catch (err) {
+      this._produtos = snapshotAnterior.produtos;
+      this._saeou060 = snapshotAnterior.saeou060;
+      this._metadados = snapshotAnterior.metadados;
+      this.rebuildIndices();
+      throw err;
+    }
   }
 
   /**

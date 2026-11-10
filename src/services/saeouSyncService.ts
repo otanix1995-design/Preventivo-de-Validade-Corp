@@ -1,44 +1,74 @@
 /**
  * NUVEM V3 — SERVIÇO DE SINCRONIZAÇÃO E PUBLICAÇÃO DO SAEOU060
- * 
+ *
  * Atende aos requisitos da Filial 172:
- * 1. Armazenamento versionado no Firestore em /filiais/{filialId}/saeou_versoes/{versaoId}
- *    e compatibilidade com /saeou060_chunks.
- * 2. Upload fracionado por tamanho (chunks <= 400 KB).
- * 3. Checksum SHA-256 de integridade antes da ativação.
- * 4. Comutação atômica de ponteiro ativo em /filiais/{filialId}/config/versao_ativa_saeou.
- * 5. Listener em tempo real nos demais dispositivos com download automático para o IndexedDB
- *    utilizando productRepository.aplicarNovoSnapshotSaeou060 (zero duplicatas, vínculos preservados).
- * 6. Status explícito: LOCAL | PUBLICANDO | SINCRONIZADO | ERRO.
+ * 1. Armazenamento versionado no Firestore em /filiais/{filialId}/saeou_versoes/{versaoId}.
+ * 2. Upload fracionado por tamanho (chunks <= 400 KB), concorrência limitada a 2.
+ * 3. Checksum SHA-256 de integridade + validação integral no servidor antes da ativação.
+ * 4. Controle de tempo limite sem acumular escritas concorrentes no WriteStream.
+ * 5. Comutação atômica + confirmação pós-gravação do ponteiro ativo em /filiais/{filialId}/config/versao_ativa_saeou.
+ * 6. Status explícito: LOCAL | PUBLICANDO | SINCRONIZADO | PENDENTE_CONFIRMACAO | ERRO.
  */
 
 import {
   collection,
-  deleteDoc,
   doc,
   getDoc,
   getDocs,
   onSnapshot,
-  runTransaction,
-  setDoc,
   Unsubscribe,
 } from 'firebase/firestore';
-import { db, ensureAuth, isFirestoreQuotaExceeded, isQuotaError, markQuotaExceeded } from './firebase';
-import { authRoleService } from './authRoleService';
+import { detectQuotaResourceType } from './firebase';
+import { authRoleService, UsuarioOperacional } from './authRoleService';
 import { dbClear, dbGetMeta, dbSetMeta, STORES } from './db';
 import { RegistroSaeou060 } from '../types';
 import { productRepository } from './productRepository';
 import { cleanForFirestore } from './deviceId';
+import { isModoAtualizacaoLocalAtivo } from './localPackageMode';
+import {
+  buildSafeChunks,
+  calcularChecksumSha256,
+  confirmarPonteiroAtivoNoServidor,
+  createDefaultPublishAdapter,
+  DEFAULT_CONCURRENCY_LIMIT,
+  DEFAULT_READ_TIMEOUT_MS,
+  DEFAULT_WRITE_TIMEOUT_MS,
+  executarEnvioChunksControlado,
+  PendingWriteTracker,
+  PublishAdapter,
+  PublishIntegrityError,
+  PublishTimeoutError,
+  ResultadoPublicacaoBase,
+  runTrackedWithTimeout,
+  StatusSyncBase,
+  validarIntegridadeVersaoNoServidor,
+  verificarEstadoRemotoAntesDePublicar,
+  verificarVersaoAtivaIdenticaEIntegra,
+} from './firestorePublishGuard';
 
-export type StatusSyncBase = 'LOCAL' | 'PUBLICANDO' | 'SINCRONIZADO' | 'ERRO';
+export type { StatusSyncBase, ResultadoPublicacaoBase };
 
 export interface PublicacaoSaeouStatus {
   status: StatusSyncBase;
   emAndamento: boolean;
-  etapa: 'OCIOSO' | 'GERANDO_CHUNKS' | 'CALCULANDO_CHECKSUM' | 'ENVIANDO_CHUNKS' | 'COMUTANDO_PONTEIRO' | 'CONCLUIDO' | 'ERRO';
+  etapa:
+    | 'OCIOSO'
+    | 'GERANDO_CHUNKS'
+    | 'CALCULANDO_CHECKSUM'
+    | 'VERIFICANDO_REMOTO'
+    | 'ENVIANDO_CHUNKS'
+    | 'VALIDANDO_INTEGRIDADE'
+    | 'COMUTANDO_PONTEIRO'
+    | 'CONFIRMANDO_ATIVA'
+    | 'CONCLUIDO'
+    | 'PENDENTE_CONFIRMACAO'
+    | 'ERRO';
   progressoPorcentagem: number;
   mensagem: string;
   versaoPublicada?: string;
+  versaoPendente?: string;
+  chunkFalhou?: number;
+  aguardandoConfirmacaoNuvem?: boolean;
   erro?: string;
   ultimaSincronizacao?: string;
 }
@@ -54,28 +84,17 @@ export interface VersaoAtivaSaeouInfo {
   versaoAnteriorId?: string | null;
 }
 
-async function calcularChecksumSha256(conteudo: string): Promise<string> {
-  if (typeof crypto !== 'undefined' && crypto.subtle) {
-    try {
-      const msgUint8 = new TextEncoder().encode(conteudo);
-      const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
-      const hashArray = Array.from(new Uint8Array(hashBuffer));
-      return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-    } catch {
-      // Fallback
-    }
-  }
-  let hash1 = 5381;
-  let hash2 = 52711;
-  for (let i = 0; i < conteudo.length; i++) {
-    const char = conteudo.charCodeAt(i);
-    hash1 = (hash1 * 33) ^ char;
-    hash2 = (hash2 * 33) ^ char;
-  }
-  return `CHK_${Math.abs(hash1).toString(16)}_${Math.abs(hash2).toString(16)}_${conteudo.length}`;
+export interface SaeouSyncServiceOptions {
+  autoStart?: boolean;
+  adapter?: PublishAdapter;
+  writeTimeoutMs?: number;
+  readTimeoutMs?: number;
+  concurrencyLimit?: number;
+  setMetaFn?: (key: string, val: any) => Promise<void>;
+  getUsuarioFn?: () => UsuarioOperacional;
 }
 
-class SaeouSyncService {
+export class SaeouSyncService {
   private _status: PublicacaoSaeouStatus = {
     status: 'LOCAL',
     emAndamento: false,
@@ -90,16 +109,71 @@ class SaeouSyncService {
   private _listenersStatus: Array<(status: PublicacaoSaeouStatus) => void> = [];
   private _listenersVersao: Array<(versao: VersaoAtivaSaeouInfo | null) => void> = [];
   private _isDownloading = false;
+  private _onSaeouClearedCallback?: () => void;
 
-  constructor() {
-    this.carregarVersaoLocal();
-    this.iniciarMonitoramentoVersaoAtiva('172');
+  private readonly _writeTracker = new PendingWriteTracker();
+  private readonly _adapter: PublishAdapter;
+  private readonly _writeTimeoutMs: number;
+  private readonly _readTimeoutMs: number;
+  private readonly _concurrencyLimit: number;
+  private readonly _setMetaFn: (key: string, val: any) => Promise<void>;
+  private readonly _getUsuarioFn: () => UsuarioOperacional;
 
-    if (typeof window !== 'undefined') {
-      window.addEventListener('online', () => {
-        this.verificarSincronizacaoComRemoto('172');
-      });
+  private _unsubQuota: (() => void) | null = null;
+
+  constructor(options?: SaeouSyncServiceOptions) {
+    this._adapter = options?.adapter ?? createDefaultPublishAdapter();
+    this._writeTimeoutMs = options?.writeTimeoutMs ?? DEFAULT_WRITE_TIMEOUT_MS;
+    this._readTimeoutMs = options?.readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS;
+    this._concurrencyLimit = options?.concurrencyLimit ?? DEFAULT_CONCURRENCY_LIMIT;
+    this._setMetaFn = options?.setMetaFn ?? dbSetMeta;
+    this._getUsuarioFn = options?.getUsuarioFn ?? (() => authRoleService.getUsuarioAtual());
+
+    if (options?.autoStart !== false) {
+      this.carregarVersaoLocal();
+      this.iniciarMonitoramentoVersaoAtiva('172');
+
+      if (this._adapter.subscribeQuotaStatus) {
+        this._unsubQuota = this._adapter.subscribeQuotaStatus((qState) => {
+          if (qState.bloqueado) {
+            if (this._unsubSnapshot) {
+              this._unsubSnapshot();
+              this._unsubSnapshot = null;
+            }
+            if (!this._status.emAndamento && this._status.status !== 'BLOQUEADO_COTA') {
+              this.atualizarStatus({
+                status: 'BLOQUEADO_COTA',
+                emAndamento: false,
+                etapa: 'OCIOSO',
+                mensagem:
+                  'Cota diária do Firebase Spark aguardando liberação — operando 100% local via IndexedDB.',
+                aguardandoConfirmacaoNuvem: false,
+              });
+            }
+          } else if (this._status.status === 'BLOQUEADO_COTA') {
+            this.atualizarStatus({
+              status: 'LOCAL',
+              emAndamento: false,
+              etapa: 'OCIOSO',
+              mensagem: 'Cota liberada — pronto para sincronização',
+            });
+            this.iniciarMonitoramentoVersaoAtiva('172');
+          }
+        });
+      }
+
+      if (typeof window !== 'undefined') {
+        window.addEventListener('online', () => {
+          if (!this._adapter.isFirestoreQuotaExceeded() && !isModoAtualizacaoLocalAtivo()) {
+            this.verificarSincronizacaoComRemoto('172');
+          }
+        });
+      }
     }
+  }
+
+  public getWriteTracker(): PendingWriteTracker {
+    return this._writeTracker;
   }
 
   private async carregarVersaoLocal(): Promise<void> {
@@ -113,7 +187,6 @@ class SaeouSyncService {
     }
   }
 
-  private _onSaeouClearedCallback?: () => void;
   public registerSaeouClearedCallback(cb: () => void): void {
     this._onSaeouClearedCallback = cb;
   }
@@ -128,10 +201,31 @@ class SaeouSyncService {
       this._unsubSnapshot = null;
     }
 
-    if (!db) return;
+    if (filialId === '172' && isModoAtualizacaoLocalAtivo()) {
+      this.atualizarStatus({
+        status: 'LOCAL',
+        emAndamento: false,
+        etapa: 'OCIOSO',
+        mensagem: 'Modo Pacote Local Único (.zip) ativo na Filial 172 — IndexedDB protegido.',
+      });
+      return;
+    }
+
+    if (this._adapter.isFirestoreQuotaExceeded()) {
+      this.atualizarStatus({
+        status: 'BLOQUEADO_COTA',
+        emAndamento: false,
+        etapa: 'OCIOSO',
+        mensagem:
+          'Cota diária do Firebase Spark aguardando liberação — monitoramento remoto pausado (IndexedDB local ativo).',
+      });
+      return;
+    }
+
+    if (!this._adapter.db) return;
 
     try {
-      const configDocRef = doc(db, 'filiais', filialId, 'config', 'versao_ativa_saeou');
+      const configDocRef = doc(this._adapter.db, 'filiais', filialId, 'config', 'versao_ativa_saeou');
       this._unsubSnapshot = onSnapshot(
         configDocRef,
         async (snap) => {
@@ -191,7 +285,12 @@ class SaeouSyncService {
             if (this._versaoLocalId !== data.versaoId && !this._status.emAndamento && !this._isDownloading) {
               console.log(`[SaeouSyncService] Nova versão remota detectada: ${data.versaoId} (local: ${this._versaoLocalId}). Baixando...`);
               await this.baixarSaeouAtivoParaDispositivo(filialId);
-            } else if (this._versaoLocalId === data.versaoId) {
+            } else if (
+              this._versaoLocalId === data.versaoId &&
+              !this._status.emAndamento &&
+              this._status.status !== 'PENDENTE_CONFIRMACAO' &&
+              this._status.status !== 'ERRO'
+            ) {
               this.atualizarStatus({
                 status: 'SINCRONIZADO',
                 mensagem: `Sincronizado com a nuvem central (${data.totalRegistros} registros SAEOU060)`,
@@ -205,6 +304,20 @@ class SaeouSyncService {
         },
         (err) => {
           console.warn('[SaeouSyncService] Erro no listener de SAEOU060:', err?.message);
+          if (this._adapter.isQuotaError(err)) {
+            this._adapter.markQuotaExceeded(err?.message, detectQuotaResourceType(err));
+            if (this._unsubSnapshot) {
+              this._unsubSnapshot();
+              this._unsubSnapshot = null;
+            }
+            this.atualizarStatus({
+              status: 'BLOQUEADO_COTA',
+              emAndamento: false,
+              etapa: 'OCIOSO',
+              mensagem:
+                'Cota diária gratuita do Firebase Spark atingida. Monitoramento pausado e dados locais preservados.',
+            });
+          }
         }
       );
     } catch (e) {
@@ -220,75 +333,203 @@ class SaeouSyncService {
     registros: RegistroSaeou060[],
     filialId: string = '172',
     onProgress?: (pct: number, msg: string, chunkAtual?: number, totalChunks?: number) => void
-  ): Promise<{ sucesso: boolean; mensagem: string; versaoId?: string; chunksEnviados?: number; totalChunks?: number }> {
+  ): Promise<ResultadoPublicacaoBase> {
     if (!registros || registros.length === 0) {
-      return { sucesso: false, mensagem: 'Não há registros SAEOU060 para publicação.' };
+      return {
+        sucesso: false,
+        estadoPublicacao: 'ERRO',
+        versaoConfirmadaNoServidor: false,
+        mensagem: 'Não há registros SAEOU060 para publicação.',
+      };
     }
 
     if (this._status.emAndamento) {
-      return { sucesso: false, mensagem: 'Já existe uma publicação de SAEOU060 em andamento.' };
+      return {
+        sucesso: false,
+        estadoPublicacao: 'ERRO',
+        versaoConfirmadaNoServidor: false,
+        mensagem: 'Já existe uma publicação de SAEOU060 em andamento. Aguarde a conclusão antes de iniciar outra.',
+      };
     }
 
-    if (!db) {
-      this.atualizarStatus({ status: 'LOCAL', mensagem: 'Firestore indisponível — base salva no IndexedDB' });
-      return { sucesso: false, mensagem: 'Banco Firestore central indisponível.' };
+    if (!this._adapter.db) {
+      this.atualizarStatus({
+        status: 'LOCAL',
+        mensagem: 'Firestore indisponível — base salva no IndexedDB',
+        aguardandoConfirmacaoNuvem: false,
+      });
+      return {
+        sucesso: false,
+        estadoPublicacao: 'LOCAL_SEM_NUVEM',
+        versaoConfirmadaNoServidor: false,
+        mensagem: 'Banco Firestore central indisponível. Dados preservados localmente no IndexedDB.',
+      };
     }
 
-    if (isFirestoreQuotaExceeded()) {
-      this.atualizarStatus({ status: 'LOCAL', mensagem: 'Cota diária pausada — base salva no IndexedDB' });
-      return { sucesso: false, mensagem: 'Cota do Firestore pausada. Dados protegidos no IndexedDB.' };
+    if (this._adapter.isFirestoreQuotaExceeded()) {
+      const msgCota =
+        'Publicação pausada: cota diária gratuita do Firebase Spark aguardando liberação. Dados do SAEOU060 preservados localmente no IndexedDB.';
+      this.atualizarStatus({
+        status: 'BLOQUEADO_COTA',
+        emAndamento: false,
+        etapa: 'OCIOSO',
+        progressoPorcentagem: 0,
+        mensagem: msgCota,
+        aguardandoConfirmacaoNuvem: false,
+      });
+      return {
+        sucesso: false,
+        estadoPublicacao: 'AGUARDANDO_COTA',
+        versaoConfirmadaNoServidor: false,
+        aguardandoCota: true,
+        mensagem: msgCota,
+      };
     }
 
-    const usuario = authRoleService.getUsuarioAtual();
+    const usuario = this._getUsuarioFn();
+    let versaoId = '';
+    let totalChunksPlanejados = 0;
+    let ultimoPercentual = 5;
+
     this.atualizarStatus({
       status: 'PUBLICANDO',
       emAndamento: true,
-      etapa: 'GERANDO_CHUNKS',
-      progressoPorcentagem: 10,
-      mensagem: 'Fracionando registros SAEOU060 em partes seguras...',
+      etapa: 'VERIFICANDO_REMOTO',
+      progressoPorcentagem: 5,
+      mensagem: 'Verificando estado remoto e gravações pendentes do SAEOU060...',
+      aguardandoConfirmacaoNuvem: false,
+      erro: undefined,
+      chunkFalhou: undefined,
     });
-    onProgress?.(10, 'Fracionando registros SAEOU060 em partes seguras...');
+    onProgress?.(5, 'Verificando estado remoto e gravações pendentes do SAEOU060...');
 
     try {
-      await ensureAuth().catch(() => null);
+      await this._adapter.ensureAuth().catch(() => null);
 
-      // 1. Chunks <= 400 KB
-      const MAX_CHUNK_BYTES = 400 * 1024;
-      const chunks: RegistroSaeou060[][] = [];
-      let currentChunk: RegistroSaeou060[] = [];
-      let currentChunkSize = 0;
+      // 1. Verificar estado remoto e impedir acúmulo enquanto escrita anterior estiver pendente
+      const preCheck = await verificarEstadoRemotoAntesDePublicar<VersaoAtivaSaeouInfo>(
+        this._adapter,
+        this._writeTracker,
+        filialId,
+        'versao_ativa_saeou',
+        'saeou_versoes',
+        this._readTimeoutMs
+      );
 
-      for (const reg of registros) {
-        const itemBytes = JSON.stringify(reg).length * 2;
-        if (currentChunkSize + itemBytes > MAX_CHUNK_BYTES && currentChunk.length > 0) {
-          chunks.push(currentChunk);
-          currentChunk = [reg];
-          currentChunkSize = itemBytes;
-        } else {
-          currentChunk.push(reg);
-          currentChunkSize += itemBytes;
-        }
+      if (!preCheck.podeIniciar) {
+        const isPending = preCheck.estadoPublicacao === 'PENDENTE_CONFIRMACAO';
+        this.atualizarStatus({
+          status: isPending ? 'PENDENTE_CONFIRMACAO' : 'ERRO',
+          emAndamento: false,
+          etapa: isPending ? 'PENDENTE_CONFIRMACAO' : 'ERRO',
+          progressoPorcentagem: 0,
+          mensagem: preCheck.mensagem || 'Publicação do SAEOU060 bloqueada pela verificação prévia.',
+          chunkFalhou: preCheck.chunkFalhou,
+          aguardandoConfirmacaoNuvem: isPending,
+          erro: preCheck.mensagem,
+        });
+        return {
+          sucesso: false,
+          estadoPublicacao: preCheck.estadoPublicacao || 'PENDENTE_CONFIRMACAO',
+          versaoConfirmadaNoServidor: false,
+          mensagem: preCheck.mensagem || 'Publicação do SAEOU060 bloqueada pela verificação prévia.',
+          chunkFalhou: preCheck.chunkFalhou,
+        };
       }
-      if (currentChunk.length > 0) {
-        chunks.push(currentChunk);
+
+      if (preCheck.versaoAtivaServidor) {
+        this._versaoAtivaRemota = preCheck.versaoAtivaServidor;
+      } else {
+        this._versaoAtivaRemota = null;
       }
 
+      // 2. Sanitizar e dividir em chunks <= 400 KB
+      ultimoPercentual = 12;
+      this.atualizarStatus({
+        etapa: 'GERANDO_CHUNKS',
+        progressoPorcentagem: 12,
+        mensagem: 'Fracionando registros SAEOU060 em partes seguras...',
+      });
+      onProgress?.(12, 'Fracionando registros SAEOU060 em partes seguras...');
+
+      const sanitized = registros.map((item) => cleanForFirestore(item));
+      const chunks = buildSafeChunks(sanitized, 400 * 1024);
+      totalChunksPlanejados = chunks.length;
+
+      ultimoPercentual = 22;
       this.atualizarStatus({
         etapa: 'CALCULANDO_CHECKSUM',
-        progressoPorcentagem: 25,
+        progressoPorcentagem: 22,
         mensagem: `Calculando checksum de integridade (${chunks.length} partes)...`,
       });
-      onProgress?.(25, `Calculando checksum de integridade (${chunks.length} partes)...`, 0, chunks.length);
+      onProgress?.(22, `Calculando checksum de integridade (${chunks.length} partes)...`, 0, chunks.length);
 
-      // 2. Checksum
-      const sample = JSON.stringify(registros.slice(0, 50)) + `_len_${registros.length}_` + JSON.stringify(registros.slice(-50));
+      // 3. Checksum
+      const sample =
+        JSON.stringify(registros.slice(0, 50)) +
+        `_len_${registros.length}_` +
+        JSON.stringify(registros.slice(-50));
       const checksum = await calcularChecksumSha256(sample);
 
-      const agora = new Date().toISOString();
-      const versaoId = `saeou_${filialId}_${Date.now()}`;
+      // 3.1 Economia Spark: evitar reenvio de chunks se a versão ativa no servidor já for idêntica e íntegra
+      const idempotencia = await verificarVersaoAtivaIdenticaEIntegra({
+        adapter: this._adapter,
+        filialId,
+        versoesCollectionName: 'saeou_versoes',
+        versaoAtivaServidor: this._versaoAtivaRemota,
+        expectedChecksum: checksum,
+        expectedTotalChunks: chunks.length,
+        expectedCountField: 'totalRegistros',
+        expectedCountValue: registros.length,
+        readTimeoutMs: this._readTimeoutMs,
+      });
 
-      // 3. Enviar chunks com concorrência limitada (lotes de até 5 chunks)
-      const CONCURRENCY_LIMIT = 5;
+      if (idempotencia.reutilizavel && idempotencia.versaoId) {
+        const agoraReuso = new Date().toISOString();
+        this._writeTracker.setPendingVersion(null);
+        this._versaoLocalId = idempotencia.versaoId;
+        await this._setMetaFn('meta_saeou_sync', {
+          versaoId: idempotencia.versaoId,
+          dataPublicacaoIso: this._versaoAtivaRemota?.dataPublicacaoIso || agoraReuso,
+          totalRegistros: registros.length,
+        });
+
+        this.atualizarStatus({
+          status: 'SINCRONIZADO',
+          emAndamento: false,
+          etapa: 'CONCLUIDO',
+          progressoPorcentagem: 100,
+          mensagem: `SAEOU060 sem alterações: versão ${idempotencia.versaoId} já está íntegra e ativa na nuvem (0 escritas).`,
+          versaoPublicada: idempotencia.versaoId,
+          versaoPendente: undefined,
+          chunkFalhou: undefined,
+          aguardandoConfirmacaoNuvem: false,
+          ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
+        });
+        onProgress?.(
+          100,
+          `SAEOU060 idêntico à versão ativa (${idempotencia.versaoId}). Reenvio ignorado para economizar cota (0 escritas).`,
+          chunks.length,
+          chunks.length
+        );
+
+        return {
+          sucesso: true,
+          estadoPublicacao: 'CONFIRMADA',
+          versaoConfirmadaNoServidor: true,
+          semAlteracoesPulouEnvio: true,
+          mensagem: `SAEOU060 já estava atualizado e íntegro na nuvem central (versão ${idempotencia.versaoId}). Nenhuma escrita redundante executada.`,
+          versaoId: idempotencia.versaoId,
+          chunksEnviados: 0,
+          totalChunks: chunks.length,
+        };
+      }
+
+      const agora = new Date().toISOString();
+      versaoId = `saeou_${filialId}_${Date.now()}`;
+
+      // 4. Enviar chunks exclusivamente para a coleção versionada V3 com concorrência máxima de 2 e timeout
+      ultimoPercentual = 35;
       this.atualizarStatus({
         etapa: 'ENVIANDO_CHUNKS',
         progressoPorcentagem: 35,
@@ -296,99 +537,142 @@ class SaeouSyncService {
       });
       onProgress?.(35, `Enviando partes para a nuvem (0 de ${chunks.length})...`, 0, chunks.length);
 
-      for (let i = 0; i < chunks.length; i += CONCURRENCY_LIMIT) {
-        const batch = chunks.slice(i, i + CONCURRENCY_LIMIT);
-        await Promise.all(
-          batch.map(async (chunkItems, idxInBatch) => {
-            const chunkIdx = i + idxInBatch;
-            const cleanChunk = chunkItems.map((item) => cleanForFirestore(item));
-            const chunkDocRef = doc(db, 'filiais', filialId, 'saeou_versoes', versaoId, 'chunks', `chunk_${chunkIdx}`);
-            await setDoc(chunkDocRef, {
-              versaoId,
-              index: chunkIdx,
-              totalChunks: chunks.length,
-              itemsCount: cleanChunk.length,
-              items: cleanChunk,
-              atualizadoEm: agora,
-            });
-
-            // Gravação retrocompatível em saeou060_chunks
-            try {
-              const legacyChunkRef = doc(db, 'saeou060_chunks', `chunk_${String(chunkIdx).padStart(3, '0')}`);
-              await setDoc(legacyChunkRef, cleanForFirestore({
-                index: chunkIdx,
-                total: chunks.length,
-                items: cleanChunk,
-                updatedAt: agora,
-              }));
-            } catch (legErr) {
-              // Não bloquear a publicação oficial caso a coleção legada falhe
-            }
-          })
-        );
-
-        const chunksConcluidos = Math.min(i + batch.length, chunks.length);
-        const pct = Math.round(35 + (chunksConcluidos / chunks.length) * 50); // 35% a 85%
-        const msg = `Enviando partes para a nuvem (${chunksConcluidos} de ${chunks.length})...`;
-        this.atualizarStatus({ progressoPorcentagem: pct, mensagem: msg });
-        onProgress?.(pct, msg, chunksConcluidos, chunks.length);
-
-        await new Promise((r) => setTimeout(r, 15));
-      }
-
-      // 4. Salvar metadados da versão
-      onProgress?.(88, 'Gravando metadados oficiais da versão SAEOU060...', chunks.length, chunks.length);
-      const versaoMetaDocRef = doc(db, 'filiais', filialId, 'saeou_versoes', versaoId);
-      await setDoc(versaoMetaDocRef, {
-        versaoId,
+      const { confirmedIndices } = await executarEnvioChunksControlado({
+        adapter: this._adapter,
+        tracker: this._writeTracker,
         filialId,
-        dataPublicacaoIso: agora,
-        publicadoPor: `${usuario.nome} (${usuario.matricula})`,
-        totalRegistros: registros.length,
-        totalChunks: chunks.length,
-        checksumBase: checksum,
-        versaoAnteriorId: this._versaoAtivaRemota?.versaoId || null,
+        versoesCollectionName: 'saeou_versoes',
+        versaoId,
+        chunks,
+        concurrencyLimit: this._concurrencyLimit,
+        writeTimeoutMs: this._writeTimeoutMs,
+        buildPayload: (chunkItems, chunkIdx, total) => ({
+          versaoId,
+          index: chunkIdx,
+          totalChunks: total,
+          itemsCount: chunkItems.length,
+          items: chunkItems,
+          atualizadoEm: agora,
+        }),
+        onChunkBatchConfirmed: (chunksConcluidos, total) => {
+          const pct = Math.round(35 + (chunksConcluidos / total) * 47); // 35% a 82%
+          ultimoPercentual = pct;
+          const msg = `Enviando partes para a nuvem (${chunksConcluidos} de ${total})...`;
+          this.atualizarStatus({ progressoPorcentagem: pct, mensagem: msg });
+          onProgress?.(pct, msg, chunksConcluidos, total);
+        },
       });
 
-      // 5. Comutação Atômica do Ponteiro Oficial
+      // 5. Salvar metadados da versão com timeout controlado
+      ultimoPercentual = 86;
+      onProgress?.(86, 'Gravando metadados oficiais da versão SAEOU060...', chunks.length, chunks.length);
+      const versaoMetaDocRef = this._adapter.doc(
+        this._adapter.db,
+        'filiais',
+        filialId,
+        'saeou_versoes',
+        versaoId
+      );
+      await runTrackedWithTimeout(
+        this._writeTracker,
+        () =>
+          this._adapter.setDoc(versaoMetaDocRef, {
+            versaoId,
+            filialId,
+            dataPublicacaoIso: agora,
+            publicadoPor: `${usuario.nome} (${usuario.matricula})`,
+            totalRegistros: registros.length,
+            totalChunks: chunks.length,
+            checksumBase: checksum,
+            versaoAnteriorId: this._versaoAtivaRemota?.versaoId || null,
+          }),
+        this._writeTimeoutMs,
+        'gravação de metadados da versão SAEOU060'
+      );
+
+      // 6. Validação integral no servidor antes de comutar ponteiro
+      ultimoPercentual = 90;
+      this.atualizarStatus({
+        etapa: 'VALIDANDO_INTEGRIDADE',
+        progressoPorcentagem: 90,
+        mensagem: 'Validando integridade de chunks, metadados e checksum no servidor...',
+      });
+      onProgress?.(
+        90,
+        'Validando integridade de chunks, metadados e checksum no servidor...',
+        chunks.length,
+        chunks.length
+      );
+
+      await validarIntegridadeVersaoNoServidor({
+        adapter: this._adapter,
+        filialId,
+        versoesCollectionName: 'saeou_versoes',
+        versaoId,
+        expectedTotalChunks: chunks.length,
+        expectedChecksum: checksum,
+        confirmedIndices,
+        expectedCountField: 'totalRegistros',
+        expectedCountValue: registros.length,
+        readTimeoutMs: this._readTimeoutMs,
+      });
+
+      // 7. Comutação Atômica do Ponteiro Oficial com timeout controlado
+      ultimoPercentual = 94;
       this.atualizarStatus({
         etapa: 'COMUTANDO_PONTEIRO',
-        progressoPorcentagem: 92,
+        progressoPorcentagem: 94,
         mensagem: 'Ativando versão central do SAEOU060...',
       });
-      onProgress?.(92, 'Ativando versão central do SAEOU060...', chunks.length, chunks.length);
+      onProgress?.(94, 'Ativando versão central do SAEOU060...', chunks.length, chunks.length);
 
-      const configRef = doc(db, 'filiais', filialId, 'config', 'versao_ativa_saeou');
-      await runTransaction(db, async (txn) => {
-        const snap = await txn.get(configRef);
-        const versaoAnterior = snap.exists() ? ((snap.data() as any).versaoId || null) : null;
-        txn.set(configRef, {
-          versaoId,
-          filialId,
-          dataPublicacaoIso: agora,
-          publicadoPor: `${usuario.nome} (${usuario.matricula})`,
-          totalRegistros: registros.length,
-          totalChunks: chunks.length,
-          checksumBase: checksum,
-          versaoAnteriorId: versaoAnterior,
-          atualizadoEm: agora,
-        });
+      const configRef = this._adapter.doc(this._adapter.db, 'filiais', filialId, 'config', 'versao_ativa_saeou');
+      await runTrackedWithTimeout(
+        this._writeTracker,
+        () =>
+          this._adapter.runTransaction(this._adapter.db!, async (txn) => {
+            const snap = await txn.get(configRef);
+            const rawPrev = snap.exists() ? (snap.data() as any) : null;
+            const versaoAnterior =
+              rawPrev && rawPrev.versaoId && rawPrev.ativa !== false ? rawPrev.versaoId : null;
+            txn.set(configRef, {
+              versaoId,
+              filialId,
+              dataPublicacaoIso: agora,
+              publicadoPor: `${usuario.nome} (${usuario.matricula})`,
+              totalRegistros: registros.length,
+              totalChunks: chunks.length,
+              checksumBase: checksum,
+              versaoAnteriorId: versaoAnterior,
+              atualizadoEm: agora,
+            });
+          }),
+        this._writeTimeoutMs,
+        'ativação transacional do ponteiro SAEOU060'
+      );
+
+      // 8. Confirmação pós-transação do ponteiro ativo no servidor antes de reportar 100%
+      ultimoPercentual = 98;
+      this.atualizarStatus({
+        etapa: 'CONFIRMANDO_ATIVA',
+        progressoPorcentagem: 98,
+        mensagem: 'Confirmando ponteiro ativo do SAEOU060 no Firestore...',
       });
+      onProgress?.(98, 'Confirmando ponteiro ativo do SAEOU060 no Firestore...', chunks.length, chunks.length);
 
-      // Atualizar metadados gerais globais para compatibilidade retroativa
-      try {
-        await setDoc(doc(db, 'metadados', 'geral'), cleanForFirestore({
-          total_saeou060: registros.length,
-          total_saeou_chunks: chunks.length,
-          saeou060_version: Date.now(),
-          updatedAt: agora,
-        }), { merge: true });
-      } catch (metaErr) {
-        // Não bloqueia
-      }
+      await confirmarPonteiroAtivoNoServidor(
+        this._adapter,
+        filialId,
+        'versao_ativa_saeou',
+        versaoId,
+        checksum,
+        chunks.length,
+        this._readTimeoutMs
+      );
 
+      this._writeTracker.setPendingVersion(null);
       this._versaoLocalId = versaoId;
-      await dbSetMeta('meta_saeou_sync', {
+      await this._setMetaFn('meta_saeou_sync', {
         versaoId,
         dataPublicacaoIso: agora,
         totalRegistros: registros.length,
@@ -401,33 +685,107 @@ class SaeouSyncService {
         progressoPorcentagem: 100,
         mensagem: `SAEOU060 publicado e sincronizado com sucesso! (${registros.length} registros)`,
         versaoPublicada: versaoId,
+        versaoPendente: undefined,
+        chunkFalhou: undefined,
+        aguardandoConfirmacaoNuvem: false,
         ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
       });
-      onProgress?.(100, `SAEOU060 publicado e sincronizado com sucesso na nuvem! (${registros.length} registros)`, chunks.length, chunks.length);
+      onProgress?.(
+        100,
+        `SAEOU060 publicado e confirmado na nuvem central! (${registros.length} registros)`,
+        chunks.length,
+        chunks.length
+      );
 
       return {
         sucesso: true,
-        mensagem: `SAEOU060 publicado na nuvem central com sucesso (${registros.length} registros em ${chunks.length} partes).`,
+        estadoPublicacao: 'CONFIRMADA',
+        versaoConfirmadaNoServidor: true,
+        mensagem: `SAEOU060 publicado e confirmado na nuvem central com sucesso (${registros.length} registros em ${chunks.length} partes).`,
         versaoId,
         chunksEnviados: chunks.length,
         totalChunks: chunks.length,
       };
     } catch (err: any) {
       console.error('[SaeouSyncService] Erro ao publicar SAEOU060:', err);
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
+
+      if (err instanceof PublishTimeoutError || err?.name === 'PublishTimeoutError') {
+        if (versaoId) {
+          this._writeTracker.setPendingVersion({
+            versaoId,
+            chunkFalhou: err.chunkIndex,
+            motivo: err.message,
+            registradoEmMs: Date.now(),
+          });
+        }
+        this.atualizarStatus({
+          status: 'PENDENTE_CONFIRMACAO',
+          emAndamento: false,
+          etapa: 'PENDENTE_CONFIRMACAO',
+          progressoPorcentagem: Math.min(95, ultimoPercentual),
+          mensagem: err.message,
+          versaoPendente: versaoId || undefined,
+          chunkFalhou: err.chunkIndex,
+          aguardandoConfirmacaoNuvem: true,
+          erro: err.message,
+        });
+        return {
+          sucesso: false,
+          estadoPublicacao: 'PENDENTE_CONFIRMACAO',
+          versaoConfirmadaNoServidor: false,
+          mensagem: `${err.message} A versão NÃO foi ativada no Firestore. Dados locais preservados.`,
+          versaoId: versaoId || undefined,
+          chunkFalhou: err.chunkIndex,
+          totalChunks: totalChunksPlanejados || undefined,
+        };
       }
+
+      if (this._adapter.isQuotaError(err)) {
+        const recurso = detectQuotaResourceType(err);
+        this._adapter.markQuotaExceeded(err?.message, recurso);
+        const msgCota =
+          'Cota diária gratuita do Firebase Spark esgotada (resource-exhausted). Envios interrompidos sem retentativas; versão anterior na nuvem e dados locais preservados.';
+        this.atualizarStatus({
+          status: 'BLOQUEADO_COTA',
+          emAndamento: false,
+          etapa: 'OCIOSO',
+          progressoPorcentagem: Math.min(95, ultimoPercentual),
+          mensagem: msgCota,
+          aguardandoConfirmacaoNuvem: false,
+          erro: err?.message || 'resource-exhausted',
+        });
+        return {
+          sucesso: false,
+          estadoPublicacao: 'AGUARDANDO_COTA',
+          versaoConfirmadaNoServidor: false,
+          aguardandoCota: true,
+          mensagem: msgCota,
+          versaoId: versaoId || undefined,
+          totalChunks: totalChunksPlanejados || undefined,
+        };
+      }
+
+      const msgErro =
+        err instanceof PublishIntegrityError
+          ? err.message
+          : `Erro na publicação no Firebase: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`;
+
       this.atualizarStatus({
         status: 'ERRO',
         emAndamento: false,
         etapa: 'ERRO',
-        progressoPorcentagem: 0,
-        mensagem: 'Erro ao publicar SAEOU060 central',
+        progressoPorcentagem: Math.min(95, ultimoPercentual),
+        mensagem: msgErro,
+        aguardandoConfirmacaoNuvem: false,
         erro: err?.message || 'Falha de comunicação',
       });
       return {
         sucesso: false,
-        mensagem: `Erro na publicação no Firebase: ${err?.message || 'Falha inesperada'}. Dados locais preservados.`,
+        estadoPublicacao: 'ERRO',
+        versaoConfirmadaNoServidor: false,
+        mensagem: msgErro,
+        versaoId: versaoId || undefined,
+        totalChunks: totalChunksPlanejados || undefined,
       };
     }
   }
@@ -443,37 +801,43 @@ class SaeouSyncService {
     if (this._isDownloading) {
       return { sucesso: false, mensagem: 'Download de SAEOU060 já em andamento.' };
     }
-    if (!db) {
+    if (this._adapter.isFirestoreQuotaExceeded()) {
+      this.atualizarStatus({
+        status: 'BLOQUEADO_COTA',
+        emAndamento: false,
+        mensagem: 'Download remoto pausado por bloqueio de cota — operando com IndexedDB local.',
+      });
+      return {
+        sucesso: false,
+        mensagem: 'Cota do Firebase Spark aguardando liberação. Operando com dados locais do IndexedDB.',
+      };
+    }
+    if (!this._adapter.db) {
       return { sucesso: false, mensagem: 'Firestore indisponível.' };
     }
 
     this._isDownloading = true;
 
     try {
-      await ensureAuth().catch(() => null);
+      await this._adapter.ensureAuth().catch(() => null);
       if (onProgress) onProgress(5, 'Consultando versão oficial do SAEOU060...');
 
-      const configSnap = await getDoc(doc(db, 'filiais', filialId, 'config', 'versao_ativa_saeou'));
+      const configSnap = await getDoc(doc(this._adapter.db, 'filiais', filialId, 'config', 'versao_ativa_saeou'));
       let versaoId = '';
-      let totalChunks = 0;
-      let totalEsperado = 0;
       let dataIso = '';
 
       if (configSnap.exists()) {
         const versaoInfo = configSnap.data() as VersaoAtivaSaeouInfo;
         versaoId = versaoInfo.versaoId;
-        totalChunks = versaoInfo.totalChunks;
-        totalEsperado = versaoInfo.totalRegistros;
         dataIso = versaoInfo.dataPublicacaoIso;
       } else {
         // Fallback para metadados/geral e saeou060_chunks
-        const metaSnap = await getDoc(doc(db, 'metadados', 'geral'));
+        const metaSnap = await getDoc(doc(this._adapter.db, 'metadados', 'geral'));
         if (!metaSnap.exists()) {
           this.atualizarStatus({ status: 'LOCAL', mensagem: 'Nenhum SAEOU060 publicado na nuvem' });
           return { sucesso: false, mensagem: 'Nenhum SAEOU060 oficial publicado.' };
         }
         const metaData = metaSnap.data();
-        totalEsperado = metaData.total_saeou060 || 0;
         versaoId = `legacy_${metaData.saeou060_version || Date.now()}`;
       }
 
@@ -481,11 +845,11 @@ class SaeouSyncService {
 
       // Buscar chunks (tentando a coleção versionada primeiro, ou saeou060_chunks como fallback)
       let chunksSnap = await getDocs(
-        collection(db, 'filiais', filialId, 'saeou_versoes', versaoId, 'chunks')
+        collection(this._adapter.db, 'filiais', filialId, 'saeou_versoes', versaoId, 'chunks')
       );
 
       if (chunksSnap.empty) {
-        chunksSnap = await getDocs(collection(db, 'saeou060_chunks'));
+        chunksSnap = await getDocs(collection(this._adapter.db, 'saeou060_chunks'));
       }
 
       const chunkDocs: { index: number; items: RegistroSaeou060[] }[] = [];
@@ -507,10 +871,11 @@ class SaeouSyncService {
 
       if (onProgress) onProgress(70, 'Reconciliando e gravando no IndexedDB...');
 
-      // Aplicar snapshot reconciliado sem duplicar registros e preservando vínculos
+      // Aplicar snapshot reconciliado sem duplicar registros e sem disparar sync legado
       await productRepository.aplicarNovoSnapshotSaeou060(
         todosRegistros,
-        `NUVEM_${versaoId}`
+        `NUVEM_${versaoId}`,
+        { skipLegacyCloudSync: true }
       );
 
       this._versaoLocalId = versaoId;
@@ -539,6 +904,21 @@ class SaeouSyncService {
       };
     } catch (err: any) {
       console.error('[SaeouSyncService] Erro ao baixar SAEOU060:', err);
+      if (this._adapter.isQuotaError(err)) {
+        this._adapter.markQuotaExceeded(err?.message, detectQuotaResourceType(err));
+        this.atualizarStatus({
+          status: 'BLOQUEADO_COTA',
+          emAndamento: false,
+          etapa: 'OCIOSO',
+          progressoPorcentagem: 0,
+          mensagem: 'Cota diária do Firebase Spark atingida ao baixar SAEOU060. Dados locais preservados.',
+          erro: err?.message || 'resource-exhausted',
+        });
+        return {
+          sucesso: false,
+          mensagem: 'Cota diária gratuita do Firebase Spark esgotada. Base local do IndexedDB preservada.',
+        };
+      }
       this.atualizarStatus({
         status: 'ERRO',
         emAndamento: false,
@@ -557,9 +937,17 @@ class SaeouSyncService {
   }
 
   public async verificarSincronizacaoComRemoto(filialId: string = '172'): Promise<void> {
-    if (!db || this._isDownloading || this._status.emAndamento) return;
+    if (
+      (filialId === '172' && isModoAtualizacaoLocalAtivo()) ||
+      !this._adapter.db ||
+      this._isDownloading ||
+      this._status.emAndamento ||
+      this._adapter.isFirestoreQuotaExceeded()
+    ) {
+      return;
+    }
     try {
-      const snap = await getDoc(doc(db, 'filiais', filialId, 'config', 'versao_ativa_saeou'));
+      const snap = await getDoc(doc(this._adapter.db, 'filiais', filialId, 'config', 'versao_ativa_saeou'));
       if (snap.exists()) {
         const remota = snap.data() as VersaoAtivaSaeouInfo;
         if (this._versaoLocalId !== remota.versaoId) {
@@ -572,7 +960,10 @@ class SaeouSyncService {
           });
         }
       }
-    } catch (e) {
+    } catch (e: any) {
+      if (this._adapter.isQuotaError(e)) {
+        this._adapter.markQuotaExceeded(e?.message, detectQuotaResourceType(e));
+      }
       console.warn('[SaeouSyncService] Falha na checagem de sincronização:', e);
     }
   }
@@ -615,6 +1006,9 @@ class SaeouSyncService {
       progressoPorcentagem: 0,
       mensagem: 'SAEOU060 limpo centralmente. Pronto para receber nova importação.',
       versaoPublicada: undefined,
+      versaoPendente: undefined,
+      chunkFalhou: undefined,
+      aguardandoConfirmacaoNuvem: false,
       ultimaSincronizacao: new Date().toLocaleTimeString('pt-BR'),
     });
     this.notificarVersao();

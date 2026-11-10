@@ -7,8 +7,14 @@
  * Previne que dois terminais sobrescrevam silenciosamente as atualizações da BASE RUB da filial.
  */
 
-import { doc, runTransaction } from 'firebase/firestore';
+import { doc, Firestore, runTransaction } from 'firebase/firestore';
 import { db } from './firebase';
+import {
+  DEFAULT_WRITE_TIMEOUT_MS,
+  PendingWriteTracker,
+  PublishAdapter,
+  runTrackedWithTimeout,
+} from './firestorePublishGuard';
 
 export interface VersaoAtivaInfo {
   versaoId: string;
@@ -29,6 +35,9 @@ export interface SolicitacaoPublicacaoRub {
   totalChunks: number;
   checksumBase: string;
   dryRun?: boolean; // Modo de simulação sem alteração real
+  timeoutMs?: number;
+  tracker?: PendingWriteTracker;
+  adapter?: Pick<PublishAdapter, 'db' | 'doc' | 'runTransaction'>;
 }
 
 export interface ResultadoPublicacaoRub {
@@ -99,15 +108,32 @@ export class ConcurrentRubPublicationService {
       );
     }
 
-    const configDocRef = doc(db, 'filiais', solicitacao.filialId, 'config', 'versao_ativa_rub');
+    const activeDb: Firestore | null = solicitacao.adapter ? solicitacao.adapter.db : db;
+    if (!activeDb) {
+      return {
+        sucesso: false,
+        mensagem: 'Banco Firestore indisponível para comutação transacional.',
+      };
+    }
 
-    try {
-      const resultado = await runTransaction(db, async (transaction) => {
+    const configDocRef = solicitacao.adapter
+      ? solicitacao.adapter.doc(activeDb, 'filiais', solicitacao.filialId, 'config', 'versao_ativa_rub')
+      : doc(activeDb, 'filiais', solicitacao.filialId, 'config', 'versao_ativa_rub');
+
+    const runTxn = solicitacao.adapter
+      ? solicitacao.adapter.runTransaction
+      : (firestore: Firestore, fn: (txn: any) => Promise<VersaoAtivaInfo>) => runTransaction(firestore, fn);
+
+    const execTxn = async () =>
+      runTxn(activeDb, async (transaction) => {
         const snap = await transaction.get(configDocRef);
         let versaoAtivaAtual: VersaoAtivaInfo | null = null;
 
         if (snap.exists()) {
-          versaoAtivaAtual = snap.data() as VersaoAtivaInfo;
+          const raw = snap.data() as VersaoAtivaInfo & { ativa?: boolean; status?: string };
+          if (raw.versaoId && raw.ativa !== false && raw.status !== 'LIMPA_AGUARDANDO_IMPORTACAO') {
+            versaoAtivaAtual = raw;
+          }
         }
 
         const idAtivoAtual = versaoAtivaAtual ? versaoAtivaAtual.versaoId : null;
@@ -138,6 +164,22 @@ export class ConcurrentRubPublicationService {
         return novaVersaoAtivaPayload;
       });
 
+    try {
+      const timeoutMs = solicitacao.timeoutMs ?? DEFAULT_WRITE_TIMEOUT_MS;
+      const resultado = solicitacao.tracker
+        ? await runTrackedWithTimeout(
+            solicitacao.tracker,
+            execTxn,
+            timeoutMs,
+            'comutação transacional da versão ativa BASE RUB'
+          )
+        : await runTrackedWithTimeout(
+            new PendingWriteTracker(),
+            execTxn,
+            timeoutMs,
+            'comutação transacional da versão ativa BASE RUB'
+          );
+
       return {
         sucesso: true,
         mensagem: 'Ponteiro da BASE RUB atualizado com sucesso via transação segura.',
@@ -162,6 +204,10 @@ export class ConcurrentRubPublicationService {
         }
       } catch {
         // Fallback para outros erros
+      }
+
+      if (err?.name === 'PublishTimeoutError') {
+        throw err;
       }
 
       return {

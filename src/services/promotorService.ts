@@ -31,15 +31,18 @@ import {
   VinculoPromotor
 } from '../types';
 import { cleanForFirestore } from './cloudSyncService';
-import { dbGetAll, dbPut, dbPutAll, STORES } from './db';
+import { dbGetAll, dbGetMeta, dbPut, dbPutAll, STORES } from './db';
 import {
   db,
+  detectQuotaResourceType,
   isFirestoreQuotaExceeded,
   isQuotaError,
   logFirestoreRead,
-  markQuotaExceeded
+  markQuotaExceeded,
+  subscribeQuotaStatus,
 } from './firebase';
 import { productRepository } from './productRepository';
+import { isModoAtualizacaoLocalAtivo, notificarAlteracaoParaPacoteLocal } from './localPackageMode';
 
 export interface PromotoresIndicators {
   totalAtivos: number;
@@ -116,6 +119,15 @@ class PromotorService {
   private _firestoreUnsubs: Unsubscribe[] = [];
 
   constructor() {
+    subscribeQuotaStatus((qState) => {
+      if (qState.bloqueado) {
+        this._firestoreUnsubs.forEach((u) => {
+          try { u(); } catch {}
+        });
+        this._firestoreUnsubs = [];
+      }
+    });
+
     // Expiration check timer every minute
     if (typeof window !== 'undefined') {
       setInterval(() => {
@@ -161,9 +173,10 @@ class PromotorService {
       if (localAuditorias.length > 0) this._auditorias = localAuditorias;
       if (localOperacoes.length > 0) this._operacoes = localOperacoes;
 
-      // Garantir existência de MARIA (Agência: SEARA, Filial: 172, Setores: FRIOS + LOJA) para paridade central
+      // Garantir existência de MARIA apenas em ambiente inicial sem pacote instalado
+      const metaPacote = await dbGetMeta<any>('meta_pacote_atualizacao_isv', null);
       const temMaria = this._promotores.some((p) => p.nome.toUpperCase().includes('MARIA'));
-      if (!temMaria) {
+      if (!temMaria && !metaPacote?.versaoInstaladaId && this._promotores.length === 0) {
         const agora = new Date().toISOString();
         const mariaPadrao: Promotor = {
           promotorId: 'promotor_maria_seara_172',
@@ -193,8 +206,10 @@ class PromotorService {
       this.verificarExpiracaoVinculos();
       this.notify();
 
-      // 2. Conectar com Firestore em tempo real
-      this.initFirestoreSync();
+      // 2. Conectar com Firestore em tempo real apenas quando NÃO estiver no modo de atualização local
+      if (!isModoAtualizacaoLocalAtivo()) {
+        this.initFirestoreSync();
+      }
 
       this._isInitialized = true;
     } catch (err) {
@@ -203,7 +218,7 @@ class PromotorService {
   }
 
   private initFirestoreSync() {
-    if (!db) return;
+    if (!db || isModoAtualizacaoLocalAtivo()) return;
 
     // Requisito 10: Limpar listeners anteriores antes de abrir novos (evita ouvintes duplicados)
     this._firestoreUnsubs.forEach((u) => {
@@ -241,7 +256,7 @@ class PromotorService {
         (err) => {
           console.warn('Aviso Firestore promotores onSnapshot:', err?.message);
           if (isQuotaError(err)) {
-            markQuotaExceeded();
+            markQuotaExceeded(err?.message, detectQuotaResourceType(err));
           }
         }
       );
@@ -274,7 +289,7 @@ class PromotorService {
         (err) => {
           console.warn('Aviso Firestore vinculosPromotor onSnapshot:', err?.message);
           if (isQuotaError(err)) {
-            markQuotaExceeded();
+            markQuotaExceeded(err?.message, detectQuotaResourceType(err));
           }
         }
       );
@@ -285,7 +300,7 @@ class PromotorService {
     } catch (err: any) {
       console.warn('Erro ao configurar Firestore listeners de promotores:', err?.message);
       if (isQuotaError(err)) {
-        markQuotaExceeded();
+        markQuotaExceeded(err?.message, detectQuotaResourceType(err));
       }
     }
   }
@@ -451,6 +466,7 @@ class PromotorService {
       statusSincronizacao: 'SINCRONIZADO',
     });
 
+    notificarAlteracaoParaPacoteLocal('PROMOTOR', `Promotor cadastrado: ${novoPromotor.nome} (${agenciaLimpa})`);
     this.notify();
     return novoPromotor;
   }
@@ -509,6 +525,7 @@ class PromotorService {
       statusSincronizacao: 'SINCRONIZADO',
     });
 
+    notificarAlteracaoParaPacoteLocal('PROMOTOR', `Promotor atualizado: ${atualizado.nome} (${novaAgencia})`);
     this.notify();
     return atualizado;
   }
@@ -545,6 +562,7 @@ class PromotorService {
       statusSincronizacao: 'SINCRONIZADO',
     });
 
+    notificarAlteracaoParaPacoteLocal('PROMOTOR', `Permissões atualizadas: ${atualizado.nome}`);
     this.notify();
     return atualizado;
   }
@@ -580,6 +598,7 @@ class PromotorService {
       statusSincronizacao: 'SINCRONIZADO',
     });
 
+    notificarAlteracaoParaPacoteLocal('PROMOTOR', `Promotor bloqueado: ${atualizado.nome}`);
     this.notify();
     return atualizado;
   }
@@ -614,6 +633,7 @@ class PromotorService {
       statusSincronizacao: 'SINCRONIZADO',
     });
 
+    notificarAlteracaoParaPacoteLocal('PROMOTOR', `Promotor desbloqueado: ${atualizado.nome}`);
     this.notify();
     return atualizado;
   }
@@ -653,6 +673,7 @@ class PromotorService {
       statusSincronizacao: 'SINCRONIZADO',
     });
 
+    notificarAlteracaoParaPacoteLocal('PROMOTOR', `Dispositivo desvinculado: ${atualizado.nome}`);
     this.notify();
     return atualizado;
   }
@@ -1052,14 +1073,81 @@ class PromotorService {
   }
 
   // =========================================================================
+  // ATUALIZAÇÃO POR PACOTE LOCAL ÚNICO (FILIAL 172)
+  // =========================================================================
+
+  /**
+   * Substitui ou aplica promotores e vínculos de dispositivo a partir de um Pacote Local Único (.zip),
+   * mantendo auditorias e histórico local preservados e sem duplicar registros.
+   */
+  public async substituirDadosComerciaisDePacote(params: {
+    promotores: Promotor[];
+    vinculosDispositivoPromotor?: VinculoPromotor[];
+    preservarAlteracoesComerciaisLocais?: boolean;
+  }): Promise<void> {
+    if (params.preservarAlteracoesComerciaisLocais) {
+      return;
+    }
+
+    const snapshot = {
+      promotores: this._promotores,
+      vinculos: this._vinculos,
+    };
+
+    try {
+      // Desativar eventuais listeners remotos de promotores antes da troca atômica
+      this._firestoreUnsubs.forEach((u) => {
+        try { u(); } catch {}
+      });
+      this._firestoreUnsubs = [];
+
+      const promotoresUnicosMap = new Map<string, Promotor>();
+      for (const p of params.promotores) {
+        if (p && p.promotorId) {
+          promotoresUnicosMap.set(p.promotorId, normalizePromotor(p));
+        }
+      }
+      const promotoresNorm = Array.from(promotoresUnicosMap.values());
+
+      let vinculosNorm = this._vinculos;
+      if (params.vinculosDispositivoPromotor) {
+        const vincMap = new Map<string, VinculoPromotor>();
+        for (const v of params.vinculosDispositivoPromotor) {
+          if (v && v.vinculoId) {
+            vincMap.set(v.vinculoId, normalizeVinculo(v));
+          }
+        }
+        vinculosNorm = Array.from(vincMap.values());
+      }
+
+      this._promotores = promotoresNorm;
+      this._vinculos = vinculosNorm;
+
+      await Promise.all([
+        dbPutAll(STORES.PROMOTORES, this._promotores, true),
+        dbPutAll(STORES.VINCULOS_PROMOTORES, this._vinculos, true),
+      ]);
+
+      this.notify();
+    } catch (err) {
+      this._promotores = snapshot.promotores;
+      this._vinculos = snapshot.vinculos;
+      throw err;
+    }
+  }
+
+  // =========================================================================
   // HELPER INTERNO FIRESTORE
   // =========================================================================
 
   private syncDocToFirestore<T>(collectionName: string, docId: string, data: T) {
-    if (!db) return;
+    if (!db || isFirestoreQuotaExceeded() || isModoAtualizacaoLocalAtivo()) return;
     try {
       const docRef = doc(db, collectionName, docId);
       setDoc(docRef, cleanForFirestore(data), { merge: true }).catch((err) => {
+        if (isQuotaError(err)) {
+          markQuotaExceeded(err?.message, detectQuotaResourceType(err));
+        }
         console.warn(`Aviso ao persistir em Firestore (${collectionName}/${docId}):`, err.message);
       });
     } catch (err) {

@@ -13,7 +13,7 @@ import React, { useEffect, useState } from 'react';
 import { cloudSyncService, SyncStatusInfo } from '../services/cloudSyncService';
 import { syncQueueService } from '../services/syncQueueService';
 import { productRepository } from '../services/productRepository';
-import { isFirestoreQuotaExceeded } from '../services/firebase';
+import { isFirestoreQuotaExceeded, subscribeQuotaStatus } from '../services/firebase';
 import { nuvemSyncEngine } from '../services/nuvemSyncEngine';
 import { MetadadosBase } from '../types';
 
@@ -40,6 +40,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [pendingCount, setPendingCount] = useState<number>(() => syncQueueService.getPendingCount());
   const [nuvemContadores, setNuvemContadores] = useState(() => nuvemSyncEngine.getContadores());
   const [hasErrors, setHasErrors] = useState<boolean>(() => syncQueueService.hasErrors());
+  const [quotaBlocked, setQuotaBlocked] = useState<boolean>(() => isFirestoreQuotaExceeded());
   const [isManualSyncing, setIsManualSyncing] = useState(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
 
@@ -52,10 +53,14 @@ export const Header: React.FC<HeaderProps> = ({
     const unsubNuvem = nuvemSyncEngine.subscribe(() => {
       setNuvemContadores(nuvemSyncEngine.getContadores());
     });
+    const unsubQuota = subscribeQuotaStatus((qState) => {
+      setQuotaBlocked(qState.bloqueado);
+    });
     return () => {
       unsubCloud();
       unsubQueue();
       unsubNuvem();
+      unsubQuota();
     };
   }, []);
 
@@ -159,8 +164,8 @@ export const Header: React.FC<HeaderProps> = ({
             title={
               isSyncing
                 ? 'Sincronizando dados com a nuvem...'
-                : isFirestoreQuotaExceeded()
-                ? 'Cota diária da nuvem atingida. Modo local ativo com IndexedDB 100% seguro.'
+                : quotaBlocked
+                ? 'Cota diária gratuita do Firebase Spark aguardando liberação. Modo local ativo com IndexedDB 100% seguro.'
                 : hasErrors || nuvemContadores.erros > 0
                 ? 'Erro de sincronização. Clique para tentar novamente.'
                 : (pendingCount + nuvemContadores.pendentes) > 0
@@ -172,7 +177,7 @@ export const Header: React.FC<HeaderProps> = ({
             className={`flex items-center gap-1.5 px-3 py-2 rounded-xl font-bold text-xs uppercase tracking-wide transition-all border shrink-0 cursor-pointer ${
               isSyncing
                 ? 'bg-amber-500/25 text-amber-100 border-amber-300/50 animate-pulse'
-                : isFirestoreQuotaExceeded()
+                : quotaBlocked
                 ? 'bg-cyan-900/40 hover:bg-cyan-900/50 text-cyan-100 border-cyan-400/40'
                 : hasErrors || nuvemContadores.erros > 0
                 ? 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-100 border-rose-300/50'
@@ -187,7 +192,7 @@ export const Header: React.FC<HeaderProps> = ({
           >
             {isSyncing ? (
               <RefreshCw className="w-4 h-4 animate-spin text-amber-300" />
-            ) : isFirestoreQuotaExceeded() ? (
+            ) : quotaBlocked ? (
               <Database className="w-4 h-4 text-cyan-300" />
             ) : hasErrors || nuvemContadores.erros > 0 ? (
               <CloudOff className="w-4 h-4 text-rose-300" />
@@ -203,7 +208,7 @@ export const Header: React.FC<HeaderProps> = ({
             <span className="inline">
               {isSyncing
                 ? 'Sincronizando...'
-                : isFirestoreQuotaExceeded()
+                : quotaBlocked
                 ? 'Modo Local (Cota)'
                 : hasErrors || nuvemContadores.erros > 0
                 ? 'Erro Nuvem'

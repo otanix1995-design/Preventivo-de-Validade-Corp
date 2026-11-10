@@ -20,7 +20,13 @@ import {
   setDoc,
   where
 } from 'firebase/firestore';
-import { db } from './firebase';
+import {
+  db,
+  detectQuotaResourceType,
+  isFirestoreQuotaExceeded,
+  isQuotaError,
+  markQuotaExceeded,
+} from './firebase';
 import { productRepository } from './productRepository';
 import { promotorService } from './promotorService';
 import { buildVencimentoKey } from './deviceId';
@@ -266,6 +272,10 @@ export class AnalisePromotorService {
     onError?: (err: any) => void
   ): () => void {
     const filialPadrao = filialId || '172';
+    if (isFirestoreQuotaExceeded()) {
+      callback([]);
+      return () => {};
+    }
 
     try {
       const q = query(
@@ -297,6 +307,9 @@ export class AnalisePromotorService {
         },
         (error) => {
           console.warn('[AnalisePromotorService] Erro no listener em tempo real:', error);
+          if (isQuotaError(error)) {
+            markQuotaExceeded(error?.message, detectQuotaResourceType(error));
+          }
           onError?.(error);
         }
       );
@@ -304,6 +317,9 @@ export class AnalisePromotorService {
       return unsubscribe;
     } catch (err) {
       console.warn('[AnalisePromotorService] Falha ao configurar listener:', err);
+      if (isQuotaError(err)) {
+        markQuotaExceeded((err as any)?.message, detectQuotaResourceType(err));
+      }
       onError?.(err);
       return () => {};
     }
@@ -313,6 +329,7 @@ export class AnalisePromotorService {
    * Busca pontual filtrada no Firestore de solicitações pendentes (para fallback ou contadores)
    */
   public async getSolicitacoesPendentes(filialId: string = '172'): Promise<SolicitacaoVencimentoPromotor[]> {
+    if (isFirestoreQuotaExceeded()) return [];
     try {
       const q = query(
         collection(db, 'solicitacoesVencimentoPromotor'),
@@ -328,6 +345,9 @@ export class AnalisePromotorService {
       marcarDuplicidadesPendentes(lista);
       return lista;
     } catch (err) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded((err as any)?.message, detectQuotaResourceType(err));
+      }
       console.warn('[AnalisePromotorService] Erro ao buscar solicitações pendentes:', err);
       return [];
     }

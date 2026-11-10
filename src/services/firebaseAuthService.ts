@@ -22,7 +22,15 @@ import {
   onSnapshot,
   Unsubscribe,
 } from 'firebase/firestore';
-import { auth, db, ensureAuth } from './firebase';
+import {
+  auth,
+  db,
+  detectQuotaResourceType,
+  ensureAuth,
+  isFirestoreQuotaExceeded,
+  isQuotaError,
+  markQuotaExceeded,
+} from './firebase';
 import { authRoleService, PapelOperacional, UsuarioOperacional } from './authRoleService';
 
 export interface PerfilServidorUsuario {
@@ -117,6 +125,13 @@ class FirebaseAuthService {
 
   private async _carregarOuProvisionarPerfilServidor(user: User): Promise<void> {
     if (!db) return;
+    if (isFirestoreQuotaExceeded()) {
+      this._atualizarEstado({
+        carregando: false,
+        mensagem: 'Modo local ativo (cota diária Spark aguardando liberação).',
+      });
+      return;
+    }
 
     try {
       const userDocRef = doc(db, 'usuarios_autorizados', user.uid);
@@ -143,16 +158,28 @@ class FirebaseAuthService {
         });
 
         // Escuta alterações em tempo real do documento no servidor (ex: revogação de permissão)
-        this._unsubDoc = onSnapshot(userDocRef, (docSnap) => {
-          if (docSnap.exists()) {
-            const atualizado = docSnap.data() as PerfilServidorUsuario;
-            this._atualizarEstado({
-              isVerificadoServidor: atualizado.ativo === true,
-              perfil: atualizado,
-            });
-            authRoleService.setUsuario({ papel: atualizado.papel, filialId: atualizado.filialId });
+        this._unsubDoc = onSnapshot(
+          userDocRef,
+          (docSnap) => {
+            if (docSnap.exists()) {
+              const atualizado = docSnap.data() as PerfilServidorUsuario;
+              this._atualizarEstado({
+                isVerificadoServidor: atualizado.ativo === true,
+                perfil: atualizado,
+              });
+              authRoleService.setUsuario({ papel: atualizado.papel, filialId: atualizado.filialId });
+            }
+          },
+          (err) => {
+            if (isQuotaError(err)) {
+              markQuotaExceeded(err?.message, detectQuotaResourceType(err));
+              if (this._unsubDoc) {
+                this._unsubDoc();
+                this._unsubDoc = null;
+              }
+            }
           }
-        });
+        );
       } else {
         // Se o usuário é o administrador inicial autorizado (jottarms@gmail.com), cria o registro mestre da Filial 172
         const isMasterAdmin = user.email?.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
@@ -186,6 +213,9 @@ class FirebaseAuthService {
         });
       }
     } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded(err?.message, detectQuotaResourceType(err));
+      }
       console.warn('[FirebaseAuthService] Falha ao verificar perfil no Firestore:', err?.message);
       this._atualizarEstado({
         carregando: false,

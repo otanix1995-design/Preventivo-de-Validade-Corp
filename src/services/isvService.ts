@@ -23,6 +23,7 @@ import { productRepository } from './productRepository';
 import { promotorService } from './promotorService';
 import { formatarCnpj, normalizarCnpj } from './spcoi007Parser';
 import { getProdutos } from './storage';
+import { notificarAlteracaoParaPacoteLocal } from './localPackageMode';
 
 type IsvChangeListener = () => void;
 
@@ -422,11 +423,14 @@ class IsvService {
       this._registrosIsvOperacional = regIsv || [];
       this._historicoIsv = histIsv || [];
 
-      // Se a base de indústrias estiver vazia, verificar se não foi limpa intencionalmente antes de semear
+      // Se a base de indústrias estiver vazia, verificar se não foi limpa ou gerenciada por pacote antes de semear
       if (this._industrias.length === 0 && this._fornecedores.length === 0) {
-        const metaSpcoi = await dbGetMeta<any>('meta_spcoi_sync', null);
-        if (metaSpcoi?.status === 'LIMPA_AGUARDANDO_IMPORTACAO') {
-          console.log('[IsvService] Base SPCOI007 está limpa aguardando importação. Não injetando dados de demonstração.');
+        const [metaSpcoi, metaPacote] = await Promise.all([
+          dbGetMeta<any>('meta_spcoi_sync', null),
+          dbGetMeta<any>('meta_pacote_atualizacao_isv', null),
+        ]);
+        if (metaSpcoi?.status === 'LIMPA_AGUARDANDO_IMPORTACAO' || metaPacote?.versaoInstaladaId) {
+          console.log('[IsvService] Base SPCOI007 gerenciada ou aguardando importação. Não injetando dados de demonstração.');
         } else {
           await this._seedInitialData();
         }
@@ -613,6 +617,11 @@ class IsvService {
       dbPutAll(STORES.HISTORICO_IMPORTACOES_SPCOI007, this._historicoSpcoi),
     ]);
 
+    notificarAlteracaoParaPacoteLocal(
+      'SPCOI007',
+      `SPCOI007 atualizado (${fornecedores.length} fornecedores, ${industriasAtualizadas.length} indústrias)`
+    );
+
     this._notify();
   }
 
@@ -632,6 +641,11 @@ class IsvService {
       dbPutAll(STORES.ISV_REGISTROS_OPERACIONAIS, registros),
       dbPutAll(STORES.HISTORICO_IMPORTACOES_ISV, this._historicoIsv),
     ]);
+
+    notificarAlteracaoParaPacoteLocal(
+      'BASE_RUB',
+      `Registros operacionais BASE RUB atualizados (${registros.length} itens)`
+    );
 
     this._notify();
   }
@@ -960,6 +974,10 @@ class IsvService {
 
     this._rebuildIndices();
     await dbPut(STORES.INDUSTRIAS, item);
+    notificarAlteracaoParaPacoteLocal(
+      'VINCULO_COMERCIAL',
+      `Indústria atualizada: ${item.razao_social || item.cnpj}`
+    );
     this._notify();
   }
 
@@ -1021,6 +1039,10 @@ class IsvService {
 
     this._rebuildIndices();
     await dbPut(STORES.VINCULOS_PROMOTOR_INDUSTRIA, novoVinculo);
+    notificarAlteracaoParaPacoteLocal(
+      'VINCULO_COMERCIAL',
+      `Vínculo criado: ${promotor.nome} ↔ CNPJ ${cnpjNorm}`
+    );
     this._notify();
   }
 
@@ -1049,6 +1071,10 @@ class IsvService {
 
     this._rebuildIndices();
     await dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos);
+    notificarAlteracaoParaPacoteLocal(
+      'VINCULO_COMERCIAL',
+      `Vínculo removido: ${promotorId} ↔ CNPJ ${cnpjNorm}`
+    );
     this._notify();
   }
 
@@ -1981,6 +2007,81 @@ class IsvService {
     this._solicitacoesAjuste[idx] = item;
     await dbPut(STORES.ISV_SOLICITACOES_AJUSTE, item);
     this._notify();
+  }
+
+  /**
+   * Aplica bases SPCOI007, BASE RUB operacional e vínculos comerciais a partir de um Pacote Local Único (.zip),
+   * sem disparar alertas de desatualização e preservando solicitações de ajuste locais.
+   */
+  public async aplicarDadosPacote(params: {
+    registrosOperacionais: RegistroPlanilhaIsv[];
+    fornecedores: FornecedorSPCOI007[];
+    industrias: Industria[];
+    vinculosPromotorIndustria: VinculoPromotorIndustria[];
+    historicoIsv?: ResumoImportacaoIsv[];
+    historicoSpcoi?: ResumoImportacaoSPCOI007[];
+    preservarAlteracoesComerciaisLocais?: boolean;
+  }): Promise<void> {
+    const snapshot = {
+      fornecedores: this._fornecedores,
+      industrias: this._industrias,
+      vinculos: this._vinculos,
+      registros: this._registrosIsvOperacional,
+      historicoSpcoi: this._historicoSpcoi,
+      historicoIsv: this._historicoIsv,
+    };
+
+    try {
+      const vinculosFinais = params.preservarAlteracoesComerciaisLocais
+        ? this._vinculos
+        : params.vinculosPromotorIndustria;
+
+      const promotoresPorCnpj = new Map<string, string[]>();
+      for (const v of vinculosFinais) {
+        const list = promotoresPorCnpj.get(v.cnpj) || [];
+        if (!list.includes(v.promotorNome)) list.push(v.promotorNome);
+        promotoresPorCnpj.set(v.cnpj, list);
+      }
+
+      const industriasAtualizadas = params.industrias.map((ind) => ({
+        ...ind,
+        promotores_responsaveis:
+          promotoresPorCnpj.get(ind.cnpj) || ind.promotores_responsaveis || [],
+      }));
+
+      this._fornecedores = params.fornecedores;
+      this._industrias = industriasAtualizadas;
+      this._vinculos = vinculosFinais;
+      this._registrosIsvOperacional = params.registrosOperacionais;
+      if (params.historicoSpcoi && params.historicoSpcoi.length > 0) {
+        this._historicoSpcoi = params.historicoSpcoi;
+      }
+      if (params.historicoIsv && params.historicoIsv.length > 0) {
+        this._historicoIsv = params.historicoIsv;
+      }
+
+      this._rebuildIndices();
+
+      await Promise.all([
+        dbPutAll(STORES.SPCOI007_FORNECEDORES, this._fornecedores, true),
+        dbPutAll(STORES.INDUSTRIAS, this._industrias, true),
+        dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos, true),
+        dbPutAll(STORES.ISV_REGISTROS_OPERACIONAIS, this._registrosIsvOperacional, true),
+        dbPutAll(STORES.HISTORICO_IMPORTACOES_SPCOI007, this._historicoSpcoi, true),
+        dbPutAll(STORES.HISTORICO_IMPORTACOES_ISV, this._historicoIsv, true),
+      ]);
+
+      this._notify();
+    } catch (err) {
+      this._fornecedores = snapshot.fornecedores;
+      this._industrias = snapshot.industrias;
+      this._vinculos = snapshot.vinculos;
+      this._registrosIsvOperacional = snapshot.registros;
+      this._historicoSpcoi = snapshot.historicoSpcoi;
+      this._historicoIsv = snapshot.historicoIsv;
+      this._rebuildIndices();
+      throw err;
+    }
   }
 
   /**

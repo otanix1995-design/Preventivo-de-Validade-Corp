@@ -4,7 +4,14 @@
  * and conflict-free background synchronizations to Firebase/Firestore.
  */
 
-import { db, ensureAuth, isFirestoreQuotaExceeded, isQuotaError, markQuotaExceeded } from './firebase';
+import {
+  db,
+  detectQuotaResourceType,
+  ensureAuth,
+  isFirestoreQuotaExceeded,
+  isQuotaError,
+  markQuotaExceeded,
+} from './firebase';
 import { doc, setDoc } from 'firebase/firestore';
 import {
   buildVencimentoCentralPayload,
@@ -51,6 +58,7 @@ class SyncQueueService {
     // Listen to network status
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => {
+        if (isFirestoreQuotaExceeded()) return;
         console.log('[SyncQueue] Conexão restabelecida. Processando fila pendente...');
         this.processQueue().catch(() => {});
       });
@@ -228,7 +236,9 @@ class SyncQueueService {
   }
 
   private triggerProcessBackground(): void {
+    if (isFirestoreQuotaExceeded()) return;
     setTimeout(() => {
+      if (isFirestoreQuotaExceeded()) return;
       this.processQueue().catch((err) => {
         console.warn('[SyncQueue] Aviso em segundo plano ao processar fila:', err);
       });
@@ -288,7 +298,7 @@ class SyncQueueService {
           console.warn(`[SyncQueue] Falha ao sincronizar operação ${op.operationId} (${op.tipoOperacao}):`, err?.message);
           
           if (isQuotaError(err)) {
-            markQuotaExceeded();
+            markQuotaExceeded(err?.message, detectQuotaResourceType(err));
             op.status = 'ERRO';
             op.erroMensagem = 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.';
             this.saveToStorage();

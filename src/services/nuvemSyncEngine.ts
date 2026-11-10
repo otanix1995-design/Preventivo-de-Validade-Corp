@@ -30,7 +30,14 @@ import {
   where,
   QueryDocumentSnapshot,
 } from 'firebase/firestore';
-import { db, ensureAuth, isFirestoreQuotaExceeded, isQuotaError, markQuotaExceeded } from './firebase';
+import {
+  db,
+  detectQuotaResourceType,
+  ensureAuth,
+  isFirestoreQuotaExceeded,
+  isQuotaError,
+  markQuotaExceeded,
+} from './firebase';
 import { authRoleService } from './authRoleService';
 import { getDeviceId } from './deviceId';
 import { LoteVencimento, DivergenciaRegistro } from '../types';
@@ -89,6 +96,7 @@ class NuvemSyncEngine {
     this.carregarFilaPersistente();
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => {
+        if (isFirestoreQuotaExceeded()) return;
         console.log('[NuvemSyncEngine] Conexão restabelecida. Disparando sincronização transacional...');
         this.processarFila().catch(() => {});
         this.executarSincronizacaoIncremental().catch(() => {});
@@ -465,8 +473,10 @@ class NuvemSyncEngine {
   }
 
   private agendarProcessamento(): void {
+    if (isFirestoreQuotaExceeded()) return;
     if (typeof window !== 'undefined' && navigator.onLine) {
       setTimeout(() => {
+        if (isFirestoreQuotaExceeded()) return;
         this.processarFila().catch((err) => {
           console.warn('[NuvemSyncEngine] Falha ao processar fila em background:', err);
         });
@@ -521,7 +531,7 @@ class NuvemSyncEngine {
           erros++;
 
           if (isQuotaError(err)) {
-            markQuotaExceeded();
+            markQuotaExceeded(err?.message, detectQuotaResourceType(err));
             op.status = 'ERRO';
             op.erroMensagem = 'Cota do Firestore temporariamente indisponível. Dados salvos com segurança no dispositivo.';
             this._statusMap.set(op.loteId, 'ERRO');
@@ -777,6 +787,9 @@ class NuvemSyncEngine {
         localStorage.setItem(STORAGE_KEY_LAST_SYNC, agora);
       }
     } catch (e: any) {
+      if (isQuotaError(e)) {
+        markQuotaExceeded(e?.message, detectQuotaResourceType(e));
+      }
       console.warn('[NuvemSyncEngine] Aviso no sync incremental:', e?.message);
     } finally {
       this._isIncrementalSyncing = false;

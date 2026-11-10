@@ -88,6 +88,16 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
       badge: 'Novo Módulo',
     },
     {
+      id: 'pacote_local_isv',
+      icon: Database,
+      iconColor: 'text-orange-700',
+      iconBg: 'bg-orange-100',
+      title: 'Atualização Local por Arquivo Único (.zip) — Filial 172',
+      desc: 'Baixar ou importar o pacote consolidado (.zip) das 3 bases, promotores, agências e vínculos sem consumir cota do Firestore.',
+      badge: 'Arquivo Único',
+      onClick: () => onNavigateSub('importacao'),
+    },
+    {
       id: 'importacao',
       icon: FileSpreadsheet,
       iconColor: 'text-emerald-700',

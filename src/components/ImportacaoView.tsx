@@ -35,10 +35,23 @@ import { clearAllData, getHistoricoImportacoes, getProdutos, loadDemoData, repro
 import { MetadadosBase, ProdutoSMG, ResumoImportacao, ResumoImportacaoIsv, ResumoImportacaoSPCOI007 } from '../types';
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 import { BasesSyncStatusCard } from './BasesSyncStatusCard';
+import { AtualizacaoPacoteIsvSection } from './AtualizacaoPacoteIsvSection';
 import { rubSyncService } from '../services/rubSyncService';
 import { spcoiSyncService } from '../services/spcoiSyncService';
 import { saeouSyncService } from '../services/saeouSyncService';
 import { authRoleService } from '../services/authRoleService';
+import { isModoAtualizacaoLocalAtivo } from '../services/localPackageMode';
+import {
+  ImportacaoEstadoFinalUI,
+  ImportModalPhase,
+  resolverEstadoPublicacaoImportacao,
+} from '../services/importacaoResultadoHelper';
+import {
+  getQuotaLockState,
+  QuotaLockState,
+  subscribeQuotaStatus,
+  verificarLiberacaoCotaNoServidor,
+} from '../services/firebase';
 
 interface ImportacaoViewProps {
   metadados: MetadadosBase;
@@ -55,6 +68,10 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'BASE_RUB' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007' | 'HISTORICO'>('BASE_RUB');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [importModalPhase, setImportModalPhase] = useState<ImportModalPhase>('PROCESSING');
+  const [importModalDetail, setImportModalDetail] = useState<string | null>(null);
+  const [cloudFeedbackBanner, setCloudFeedbackBanner] = useState<ImportacaoEstadoFinalUI | null>(null);
   const [progressPercent, setProgressPercent] = useState<number>(0);
   const [progressStatus, setProgressStatus] = useState<string>('Iniciando processamento...');
   const [processingFileType, setProcessingFileType] = useState<'BASE_RUB' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007'>('BASE_RUB');
@@ -71,13 +88,45 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
   const [syncStatus, setSyncStatus] = useState<SyncStatusInfo>(cloudSyncService.getStatus());
   const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const [syncFeedbackMsg, setSyncFeedbackMsg] = useState<string | null>(null);
+  const [quotaState, setQuotaState] = useState<QuotaLockState>(() => getQuotaLockState());
+  const [isCheckingQuota, setIsCheckingQuota] = useState(false);
 
   useEffect(() => {
-    const unsub = cloudSyncService.subscribeStatus(setSyncStatus);
-    return unsub;
+    const unsubSync = cloudSyncService.subscribeStatus(setSyncStatus);
+    const unsubQuota = subscribeQuotaStatus(setQuotaState);
+    return () => {
+      unsubSync();
+      unsubQuota();
+    };
   }, []);
 
+  const hasImportacaoOuPublicacaoAtiva = (): boolean => {
+    return (
+      isProcessing ||
+      rubSyncService.getStatusPublicacao().emAndamento ||
+      spcoiSyncService.getStatus().emAndamento ||
+      saeouSyncService.getStatus().emAndamento
+    );
+  };
+
+  const handleVerificarLiberacaoCota = async () => {
+    if (isCheckingQuota) return;
+    setIsCheckingQuota(true);
+    try {
+      const res = await verificarLiberacaoCotaNoServidor();
+      setSyncFeedbackMsg(res.mensagem);
+    } finally {
+      setIsCheckingQuota(false);
+    }
+  };
+
   const handleSyncWithCloud = async () => {
+    if (quotaState.bloqueado) {
+      setSyncFeedbackMsg(
+        'Sincronização em nuvem pausada: cota diária gratuita do Firebase Spark aguardando liberação. Operando localmente via IndexedDB.'
+      );
+      return;
+    }
     setIsSyncingCloud(true);
     setSyncFeedbackMsg('Verificando e sincronizando com a nuvem...');
     try {
@@ -112,8 +161,15 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
   const handleProcessFileEan = async (file: File) => {
     if (!file) return;
+    if (hasImportacaoOuPublicacaoAtiva()) {
+      setErroGlobal('Já existe uma importação ou publicação em andamento. Aguarde a conclusão antes de iniciar outra.');
+      return;
+    }
 
     setIsProcessing(true);
+    setIsImportModalOpen(true);
+    setImportModalPhase('PROCESSING');
+    setImportModalDetail(null);
     setProcessingFileType('VINCULOS_EAN');
     setProgressPercent(0);
     setProgressStatus('Lendo e analisando arquivo de Vínculos EAN...');
@@ -122,17 +178,25 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
     try {
       const resumo = await processarVinculosEAN(file, (percent, status) => {
-        setProgressPercent(percent);
+        setProgressPercent(Math.min(98, percent));
         setProgressStatus(status);
       });
+      setProgressPercent(100);
+      setImportModalPhase('CONFIRMED');
+      setProgressStatus('Vínculos EAN importados e sincronizados com sucesso!');
       setUltimoResumo(resumo);
       if (onImportComplete) onImportComplete();
+      await new Promise((r) => setTimeout(r, 1200));
+      setIsImportModalOpen(false);
     } catch (err: any) {
       console.error('Erro ao importar Vínculos EAN:', err);
-      setErroGlobal(
+      const msg =
         err.message ||
-          'Erro ao processar a planilha de Vínculos EAN. Verifique se contém colunas de Código Interno e EAN.'
-      );
+        'Erro ao processar a planilha de Vínculos EAN. Verifique se contém colunas de Código Interno e EAN.';
+      setErroGlobal(msg);
+      setImportModalPhase('ERROR');
+      setProgressStatus('Falha ao importar Vínculos EAN');
+      setImportModalDetail(msg);
     } finally {
       setIsProcessing(false);
       if (fileInputEanRef.current) fileInputEanRef.current.value = '';
@@ -141,55 +205,103 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
   const handleProcessFileSaeou = async (file: File) => {
     if (!file) return;
+    if (hasImportacaoOuPublicacaoAtiva()) {
+      setErroGlobal('Já existe uma importação ou publicação em andamento. Aguarde a conclusão antes de iniciar outra.');
+      return;
+    }
 
     setIsProcessing(true);
+    setIsImportModalOpen(true);
+    setImportModalPhase('PROCESSING');
+    setImportModalDetail(null);
+    setCloudFeedbackBanner(null);
     setProcessingFileType('SAEOU060');
     setProgressPercent(0);
     setProgressStatus('Lendo e analisando arquivo SAEOU060...');
     setErroGlobal(null);
     setUltimoResumo(null);
 
+    let ultimoProgressoMapeado = 80;
+
     try {
       const resultado = await processarSAEOU060(file, (percent, status) => {
         const pct = Math.min(70, Math.round((percent / 100) * 70));
+        ultimoProgressoMapeado = pct;
         setProgressPercent(pct);
         setProgressStatus(status);
       });
       setProgressPercent(75);
+      ultimoProgressoMapeado = 75;
       setProgressStatus('Gravando registros SAEOU060 no IndexedDB local...');
-      await productRepository.aplicarNovoSnapshotSaeou060(resultado.registros, file.name);
+      await productRepository.aplicarNovoSnapshotSaeou060(resultado.registros, file.name, {
+        skipLegacyCloudSync: true,
+      });
       await productRepository.addHistorico(resultado.resumo);
       setUltimoResumo(resultado.resumo);
 
-      // Publicação centralizada no Firestore (Filial 172) com progresso contínuo real
+      // Gravação local no IndexedDB concluída; no modo de pacote único não há envio em massa ao Firestore
+      if (isModoAtualizacaoLocalAtivo()) {
+        setProgressPercent(100);
+        setProgressStatus('SAEOU060 salvo localmente com sucesso!');
+        setImportModalPhase('CONFIRMED');
+        setImportModalDetail(
+          `SAEOU060 gravado no IndexedDB (${resultado.registros.length} registros). Pacote de atualização ISV atualizado e pronto para download manual em "BAIXAR ATUALIZAÇÃO ISV" (nenhuma gravação em massa foi feita no Firestore).`
+        );
+        setCloudFeedbackBanner({
+          phase: 'CONFIRMED',
+          progressPercent: 100,
+          titulo: 'SAEOU060 salvo no dispositivo (Filial 172)',
+          mensagem: `${resultado.registros.length} registros gravados no IndexedDB. Use "BAIXAR ATUALIZAÇÃO ISV" quando finalizar as importações para distribuir o pacote único.`,
+          shouldAutoClose: true,
+        });
+        if (onImportComplete) onImportComplete();
+        await new Promise((r) => setTimeout(r, 1500));
+        setIsImportModalOpen(false);
+        return;
+      }
+
+      // Publicação centralizada legada (desativada no modo de pacote único da Filial 172)
       setProgressPercent(80);
+      ultimoProgressoMapeado = 80;
       setProgressStatus('Preparando envio do SAEOU060 para a nuvem central...');
       const resPub = await saeouSyncService.publicarSaeouCentral(
         resultado.registros,
         '172',
         (pct, msg, chunkAtual, totalChunks) => {
           const mapped = Math.min(98, Math.round(80 + (pct / 100) * 18));
+          ultimoProgressoMapeado = mapped;
           setProgressPercent(mapped);
           setProgressStatus(chunkAtual && totalChunks ? `${msg} (${chunkAtual}/${totalChunks})` : msg);
         }
       );
 
-      if (resPub.sucesso) {
-        setProgressPercent(100);
-        setProgressStatus(`SAEOU060 publicado e ativado com sucesso na nuvem central! (${resultado.registros.length} registros)`);
-      } else {
-        setProgressPercent(100);
-        setProgressStatus(`SAEOU060 salvo localmente no dispositivo. Nuvem: ${resPub.mensagem}`);
-      }
+      const estadoFinal = resolverEstadoPublicacaoImportacao(
+        'SAEOU060',
+        resPub,
+        ultimoProgressoMapeado,
+        `SAEOU060 gravado (${resultado.registros.length} registros).`
+      );
+      setProgressPercent(estadoFinal.progressPercent);
+      setProgressStatus(estadoFinal.titulo);
+      setImportModalPhase(estadoFinal.phase);
+      setImportModalDetail(estadoFinal.detalheTecnico || estadoFinal.mensagem);
+      setCloudFeedbackBanner(estadoFinal);
 
       if (onImportComplete) onImportComplete();
-      await new Promise((r) => setTimeout(r, 1800));
+
+      if (estadoFinal.shouldAutoClose) {
+        await new Promise((r) => setTimeout(r, 1800));
+        setIsImportModalOpen(false);
+      }
     } catch (err: any) {
       console.error('Erro ao importar SAEOU060:', err);
-      setErroGlobal(
+      const msg =
         err.message ||
-          'Erro ao processar a planilha SAEOU060. Verifique se contém colunas válidas de Código, Vencimento e Quantidade.'
-      );
+        'Erro ao processar a planilha SAEOU060. Verifique se contém colunas válidas de Código, Vencimento e Quantidade.';
+      setErroGlobal(msg);
+      setImportModalPhase('ERROR');
+      setProgressStatus('Falha ao importar SAEOU060');
+      setImportModalDetail(msg);
     } finally {
       setIsProcessing(false);
       if (fileInputSaeouRef.current) fileInputSaeouRef.current.value = '';
@@ -212,14 +324,24 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
   const handleProcessFileSpcoi = async (file: File) => {
     if (!file) return;
+    if (hasImportacaoOuPublicacaoAtiva()) {
+      setErroGlobal('Já existe uma importação ou publicação em andamento. Aguarde a conclusão antes de iniciar outra.');
+      return;
+    }
 
     setIsProcessing(true);
+    setIsImportModalOpen(true);
+    setImportModalPhase('PROCESSING');
+    setImportModalDetail(null);
+    setCloudFeedbackBanner(null);
     setProcessingFileType('SPCOI007');
     setProgressPercent(0);
     setProgressStatus('Lendo e analisando arquivo SPCOI007...');
     setErroGlobal(null);
     setUltimoResumo(null);
     setUltimoResumoSpcoi(null);
+
+    let ultimoProgressoMapeado = 80;
 
     try {
       const produtosAtuais = getProdutos();
@@ -230,12 +352,14 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         industriasAtuais,
         (percent, status) => {
           const pct = Math.min(70, Math.round((percent / 100) * 70));
+          ultimoProgressoMapeado = pct;
           setProgressPercent(pct);
           setProgressStatus(status);
         }
       );
 
       setProgressPercent(75);
+      ultimoProgressoMapeado = 75;
       setProgressStatus('Gravando fornecedores e indústrias no IndexedDB local...');
       await isvService.salvarImportacaoSpcoi(
         resultado.fornecedores,
@@ -243,8 +367,31 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         resultado.resumo
       );
 
-      // Publicação centralizada no Firestore (Filial 172) com progresso real contínuo
+      // Modo atualização local por arquivo único (.zip): não envia SPCOI007 em massa ao Firestore
+      if (isModoAtualizacaoLocalAtivo()) {
+        setProgressPercent(100);
+        setProgressStatus('SPCOI007 salvo localmente com sucesso!');
+        setImportModalPhase('CONFIRMED');
+        setImportModalDetail(
+          `SPCOI007 gravado no IndexedDB (${resultado.fornecedores.length} fornecedores, ${resultado.industrias.length} indústrias). Pronto para empacotar manualmente em "BAIXAR ATUALIZAÇÃO ISV".`
+        );
+        setCloudFeedbackBanner({
+          phase: 'CONFIRMED',
+          progressPercent: 100,
+          titulo: 'SPCOI007 salvo no dispositivo (Filial 172)',
+          mensagem: `${resultado.fornecedores.length} fornecedores e ${resultado.industrias.length} indústrias salvos no IndexedDB sem consumir cota do Firestore.`,
+          shouldAutoClose: true,
+        });
+        setUltimoResumoSpcoi(resultado.resumo);
+        if (onImportComplete) onImportComplete();
+        await new Promise((r) => setTimeout(r, 1500));
+        setIsImportModalOpen(false);
+        return;
+      }
+
+      // Publicação centralizada legada
       setProgressPercent(80);
+      ultimoProgressoMapeado = 80;
       setProgressStatus('Preparando envio do SPCOI007 para a nuvem central...');
       const resPub = await spcoiSyncService.publicarSpcoiCentral(
         resultado.fornecedores,
@@ -253,28 +400,40 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         '172',
         (pct, msg, chunkAtual, totalChunks) => {
           const mapped = Math.min(98, Math.round(80 + (pct / 100) * 18));
+          ultimoProgressoMapeado = mapped;
           setProgressPercent(mapped);
           setProgressStatus(chunkAtual && totalChunks ? `${msg} (${chunkAtual}/${totalChunks})` : msg);
         }
       );
 
-      if (resPub.sucesso) {
-        setProgressPercent(100);
-        setProgressStatus(`SPCOI007 publicado e sincronizado com sucesso na nuvem central! (${resultado.fornecedores.length} fornecedores)`);
-      } else {
-        setProgressPercent(100);
-        setProgressStatus(`SPCOI007 salvo localmente no dispositivo. Nuvem: ${resPub.mensagem}`);
-      }
+      const estadoFinal = resolverEstadoPublicacaoImportacao(
+        'SPCOI007',
+        resPub,
+        ultimoProgressoMapeado,
+        `SPCOI007 gravado (${resultado.fornecedores.length} fornecedores, ${resultado.industrias.length} indústrias).`
+      );
+      setProgressPercent(estadoFinal.progressPercent);
+      setProgressStatus(estadoFinal.titulo);
+      setImportModalPhase(estadoFinal.phase);
+      setImportModalDetail(estadoFinal.detalheTecnico || estadoFinal.mensagem);
+      setCloudFeedbackBanner(estadoFinal);
 
       setUltimoResumoSpcoi(resultado.resumo);
       if (onImportComplete) onImportComplete();
-      await new Promise((r) => setTimeout(r, 1800));
+
+      if (estadoFinal.shouldAutoClose) {
+        await new Promise((r) => setTimeout(r, 1800));
+        setIsImportModalOpen(false);
+      }
     } catch (err: any) {
       console.error('Erro ao importar SPCOI007:', err);
-      setErroGlobal(
+      const msg =
         err.message ||
-          'Erro ao processar a planilha SPCOI007. Verifique se o arquivo possui colunas válidas de CNPJ, Razão Social e Código do Produto.'
-      );
+        'Erro ao processar a planilha SPCOI007. Verifique se o arquivo possui colunas válidas de CNPJ, Razão Social e Código do Produto.';
+      setErroGlobal(msg);
+      setImportModalPhase('ERROR');
+      setProgressStatus('Falha ao importar SPCOI007');
+      setImportModalDetail(msg);
     } finally {
       setIsProcessing(false);
       if (fileInputSpcoiRef.current) fileInputSpcoiRef.current.value = '';
@@ -290,13 +449,23 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
   const handleProcessFileIsv = async (file: File) => {
     if (!file) return;
+    if (hasImportacaoOuPublicacaoAtiva()) {
+      setErroGlobal('Já existe uma importação ou publicação em andamento. Aguarde a conclusão antes de iniciar outra.');
+      return;
+    }
 
     setIsProcessing(true);
+    setIsImportModalOpen(true);
+    setImportModalPhase('PROCESSING');
+    setImportModalDetail(null);
+    setCloudFeedbackBanner(null);
     setProcessingFileType('BASE_RUB');
     setProgressPercent(0);
     setProgressStatus('Lendo e analisando BASE DO RUB (36 colunas)...');
     setErroGlobal(null);
     setUltimoResumoIsv(null);
+
+    let ultimoProgressoMapeado = 86;
 
     try {
       const produtosAtuais = getProdutos();
@@ -308,6 +477,7 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         (percent, status) => {
           // Mapeia o progresso do parser da planilha para 0% a 65%
           const pct = Math.min(65, Math.round((percent / 100) * 65));
+          ultimoProgressoMapeado = pct;
           setProgressPercent(pct);
           setProgressStatus(
             status.includes('concluída com sucesso')
@@ -319,6 +489,7 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
       // 1. Salvar registros operacionais no isvService
       setProgressPercent(70);
+      ultimoProgressoMapeado = 70;
       setProgressStatus('Gravando registros operacionais da BASE RUB no IndexedDB local...');
       await isvService.salvarImportacaoPlanilhaIsv(
         resultado.registros,
@@ -349,31 +520,78 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         }
 
         const pct = Math.round(70 + (i / totalRegistros) * 15);
+        ultimoProgressoMapeado = pct;
         setProgressPercent(pct);
         setProgressStatus(`Indexando catálogo da BASE DO RUB (${Math.min(i + CHUNK_SIZE, totalRegistros)} de ${totalRegistros})...`);
         await new Promise((r) => setTimeout(r, 0));
       }
 
-      // 3. Gravar catálogo indexado no IndexedDB (local-first, não bloqueia em nuvem)
+      // 3. Gravar catálogo indexado no IndexedDB sem disparar sincronização legada concorrente
       setProgressPercent(85);
+      ultimoProgressoMapeado = 85;
       setProgressStatus('Confirmando gravação local no IndexedDB...');
-      await productRepository.saveProducts(produtosConvertidos);
+      await productRepository.saveProducts(produtosConvertidos, undefined, {
+        skipLegacyCloudSync: true,
+      });
 
-      // 4. Verificação estrita de autorização administrativa antes da publicação na nuvem
-      const permissaoGerencia = authRoleService.podePublicarRub();
-      if (!permissaoGerencia.permitido) {
-        // Usuário sem papel GERENCIA_ADMIN:
-        // Mantém a base 100% segura no IndexedDB e informa claramente que a publicação central requer gerência
+      // 4. No modo de atualização local por arquivo único (.zip), finaliza localmente sem publicação em massa no Firestore
+      if (isModoAtualizacaoLocalAtivo()) {
         setProgressPercent(100);
-        setProgressStatus('BASE RUB salva no dispositivo (IndexedDB). Publicação na nuvem requer papel Gerência / Administrador.');
+        setProgressStatus('BASE RUB (36 colunas) salva localmente com sucesso!');
+        setImportModalPhase('CONFIRMED');
+        setImportModalDetail(
+          `BASE RUB gravada no IndexedDB (${produtosConvertidos.length} produtos). Pacote único de atualização atualizado para download manual via "BAIXAR ATUALIZAÇÃO ISV".`
+        );
+        setCloudFeedbackBanner({
+          phase: 'CONFIRMED',
+          progressPercent: 100,
+          titulo: 'BASE RUB salva no dispositivo (Filial 172)',
+          mensagem: `${produtosConvertidos.length} produtos e ${resultado.registros.length} registros operacionais gravados localmente. Use "BAIXAR ATUALIZAÇÃO ISV" para gerar o pacote único.`,
+          shouldAutoClose: true,
+        });
         setUltimoResumoIsv(resultado.resumo);
-        if (onImportComplete) onImportComplete();
-        await new Promise((r) => setTimeout(r, 2200));
+        if (onImportComplete) {
+          try {
+            onImportComplete();
+          } catch (cbErr) {
+            console.warn('[ImportacaoView] Aviso ao notificar onImportComplete:', cbErr);
+          }
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+        setIsImportModalOpen(false);
         return;
       }
 
-      // 5. Publicar na nuvem central da Filial 172 (Gerência autenticada) com progresso real contínuo
+      // 5. Verificação estrita de autorização administrativa antes da publicação legada na nuvem
+      const permissaoGerencia = authRoleService.podePublicarRub();
+      if (!permissaoGerencia.permitido) {
+        const estadoSemPermissao = resolverEstadoPublicacaoImportacao(
+          'BASE RUB',
+          {
+            sucesso: false,
+            estadoPublicacao: 'RECUSADA_PERMISSAO',
+            versaoConfirmadaNoServidor: false,
+            mensagem:
+              permissaoGerencia.motivoRecusa ||
+              'Apenas usuários autenticados com perfil GERENCIA_ADMIN podem publicar a BASE RUB na nuvem central.',
+            motivoRecusa: permissaoGerencia.motivoRecusa,
+          },
+          85,
+          `BASE RUB gravada localmente (${produtosConvertidos.length} produtos).`
+        );
+        setProgressPercent(estadoSemPermissao.progressPercent);
+        setProgressStatus(estadoSemPermissao.titulo);
+        setImportModalPhase(estadoSemPermissao.phase);
+        setImportModalDetail(estadoSemPermissao.detalheTecnico || estadoSemPermissao.mensagem);
+        setCloudFeedbackBanner(estadoSemPermissao);
+        setUltimoResumoIsv(resultado.resumo);
+        if (onImportComplete) onImportComplete();
+        return;
+      }
+
+      // 6. Publicar na nuvem central legada da Filial 172 (Gerência autenticada)
       setProgressPercent(86);
+      ultimoProgressoMapeado = 86;
       setProgressStatus('Iniciando publicação da BASE RUB na nuvem central da Filial 172...');
       const metaAtual = productRepository.getMetadados();
       const resPub = await rubSyncService.publicarBaseRubCentral(
@@ -382,19 +600,24 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         '172',
         (pct, msg, chunkAtual, totalChunks) => {
           const mapped = Math.min(98, Math.round(86 + (pct / 100) * 12));
+          ultimoProgressoMapeado = mapped;
           setProgressPercent(mapped);
           setProgressStatus(chunkAtual && totalChunks ? `${msg} (${chunkAtual}/${totalChunks})` : msg);
         }
       );
 
-      // 6. Confirmação real sem falso sucesso
-      if (resPub.sucesso) {
-        setProgressPercent(100);
-        setProgressStatus(`BASE RUB publicada e ativada na nuvem central com sucesso! (${resPub.totalChunks || 1} partes)`);
-      } else {
-        setProgressPercent(100);
-        setProgressStatus(`Salvo localmente no dispositivo. Nuvem: ${resPub.mensagem}`);
-      }
+      // 7. Confirmação real sem falso sucesso
+      const estadoFinal = resolverEstadoPublicacaoImportacao(
+        'BASE RUB',
+        resPub,
+        ultimoProgressoMapeado,
+        `BASE RUB gravada (${produtosConvertidos.length} produtos).`
+      );
+      setProgressPercent(estadoFinal.progressPercent);
+      setProgressStatus(estadoFinal.titulo);
+      setImportModalPhase(estadoFinal.phase);
+      setImportModalDetail(estadoFinal.detalheTecnico || estadoFinal.mensagem);
+      setCloudFeedbackBanner(estadoFinal);
 
       setUltimoResumoIsv(resultado.resumo);
 
@@ -405,13 +628,20 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
           console.warn('[ImportacaoView] Aviso ao notificar onImportComplete:', cbErr);
         }
       }
-      await new Promise((r) => setTimeout(r, 1800));
+
+      if (estadoFinal.shouldAutoClose) {
+        await new Promise((r) => setTimeout(r, 1800));
+        setIsImportModalOpen(false);
+      }
     } catch (err: any) {
       console.error('Erro ao importar BASE DO RUB:', err);
-      setErroGlobal(
+      const msg =
         err.message ||
-          'Erro ao processar a BASE DO RUB. Verifique se o arquivo possui as colunas obrigatórias: "Valor Disponível", "Estoque", "Código/Código Interno" e "Nome".'
-      );
+        'Erro ao processar a BASE DO RUB. Verifique se o arquivo possui as colunas obrigatórias: "Valor Disponível", "Estoque", "Código/Código Interno" e "Nome".';
+      setErroGlobal(msg);
+      setImportModalPhase('ERROR');
+      setProgressStatus('Falha ao importar BASE RUB');
+      setImportModalDetail(msg);
     } finally {
       setIsProcessing(false);
       if (fileInputIsvRef.current) fileInputIsvRef.current.value = '';
@@ -519,20 +749,52 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
   return (
     <div id="view-importacao" className="space-y-4 pb-24 max-w-4xl mx-auto">
-      {/* Loading Modal Overlay with 0 to 100% Animation */}
-      {isProcessing && (
+      {/* Loading & Result Modal Overlay (Never auto-closes on failures/pending) */}
+      {isImportModalOpen && (
         <div
           id="import-progress-modal"
           className="fixed inset-0 z-50 bg-gray-950/80 backdrop-blur-xs flex items-center justify-center p-4"
         >
-          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border border-gray-200 text-center space-y-5">
+          <div className="bg-white rounded-2xl p-6 max-w-md w-full shadow-2xl border border-gray-200 text-center space-y-5 relative">
+            {!isProcessing && (
+              <button
+                type="button"
+                id="btn-fechar-modal-importacao"
+                onClick={() => setIsImportModalOpen(false)}
+                className="absolute top-3.5 right-3.5 p-1.5 rounded-lg text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors cursor-pointer"
+                aria-label="Fechar modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+
             <div className="flex items-center justify-center">
               <div className="relative w-24 h-24 flex items-center justify-center">
-                {/* Outer spin ring */}
-                <div className="absolute inset-0 rounded-full border-4 border-blue-100 border-t-blue-700 animate-spin" />
-                {/* Center Percentage Display */}
-                <div className="flex flex-col items-center justify-center">
-                  <span className="text-2xl font-black font-mono text-blue-700">
+                {importModalPhase === 'PROCESSING' ? (
+                  <div className="absolute inset-0 rounded-full border-4 border-blue-100 border-t-blue-700 animate-spin" />
+                ) : importModalPhase === 'CONFIRMED' ? (
+                  <div className="absolute inset-0 rounded-full border-4 border-emerald-200 bg-emerald-50/40" />
+                ) : importModalPhase === 'AUTH_REQUIRED' || importModalPhase === 'LOCAL_ONLY' || importModalPhase === 'QUOTA_EXCEEDED' ? (
+                  <div className="absolute inset-0 rounded-full border-4 border-amber-300 bg-amber-50/40" />
+                ) : importModalPhase === 'PENDING_CONFIRMATION' ? (
+                  <div className="absolute inset-0 rounded-full border-4 border-orange-300 bg-orange-50/40" />
+                ) : (
+                  <div className="absolute inset-0 rounded-full border-4 border-rose-300 bg-rose-50/40" />
+                )}
+                <div className="flex flex-col items-center justify-center z-10">
+                  <span
+                    className={`text-2xl font-black font-mono ${
+                      importModalPhase === 'CONFIRMED'
+                        ? 'text-emerald-700'
+                        : importModalPhase === 'ERROR'
+                        ? 'text-rose-700'
+                        : importModalPhase === 'PENDING_CONFIRMATION'
+                        ? 'text-orange-700'
+                        : importModalPhase === 'AUTH_REQUIRED' || importModalPhase === 'LOCAL_ONLY' || importModalPhase === 'QUOTA_EXCEEDED'
+                        ? 'text-amber-700'
+                        : 'text-blue-700'
+                    }`}
+                  >
                     {progressPercent}%
                   </span>
                 </div>
@@ -549,42 +811,115 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
                   ? 'Importando SPCOI007'
                   : 'Importando Vínculos EAN'}
               </h3>
-              <p className="text-xs font-bold text-gray-600 min-h-[32px] flex items-center justify-center">
+              <p className="text-xs font-bold text-gray-700 min-h-[32px] flex items-center justify-center">
                 {progressStatus}
               </p>
             </div>
 
-            {/* Linear Progress Bar with Smooth Animation */}
+            {/* Linear Progress Bar */}
             <div className="space-y-1.5">
               <div className="w-full bg-gray-100 rounded-full h-3.5 overflow-hidden p-0.5 border border-gray-200">
                 <div
-                  className="bg-linear-to-r from-blue-600 via-blue-700 to-indigo-600 h-full rounded-full transition-all duration-200 ease-out shadow-xs"
+                  className={`h-full rounded-full transition-all duration-200 ease-out shadow-xs ${
+                    importModalPhase === 'CONFIRMED'
+                      ? 'bg-emerald-600'
+                      : importModalPhase === 'ERROR'
+                      ? 'bg-rose-600'
+                      : importModalPhase === 'PENDING_CONFIRMATION'
+                      ? 'bg-orange-500'
+                      : importModalPhase === 'AUTH_REQUIRED' || importModalPhase === 'LOCAL_ONLY' || importModalPhase === 'QUOTA_EXCEEDED'
+                      ? 'bg-amber-500'
+                      : 'bg-linear-to-r from-blue-600 via-blue-700 to-indigo-600'
+                  }`}
                   style={{ width: `${progressPercent}%` }}
                 />
               </div>
               <div className="flex justify-between text-[10px] font-bold text-gray-400 uppercase font-mono">
                 <span>0% INÍCIO</span>
                 <span>{progressPercent}% PROCESSADO</span>
-                <span>100% FINAL</span>
+                <span>100% CONFIRMADO</span>
               </div>
             </div>
 
-            {progressPercent >= 100 ? (
-              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-2.5 text-[11px] text-emerald-900 font-semibold flex items-center justify-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>Processamento e confirmação concluídos! Finalizando...</span>
+            {importModalPhase === 'CONFIRMED' && (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-[11px] text-emerald-900 font-semibold flex items-start gap-2 text-left">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div>
+                  <span className="block font-black uppercase">Publicação confirmada no servidor</span>
+                  <span className="font-medium">{importModalDetail}</span>
+                </div>
               </div>
-            ) : (
+            )}
+
+            {(importModalPhase === 'AUTH_REQUIRED' || importModalPhase === 'LOCAL_ONLY' || importModalPhase === 'QUOTA_EXCEEDED') && (
+              <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 text-[11px] text-amber-950 font-medium flex items-start gap-2 text-left">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <span className="block font-black uppercase text-amber-900">
+                    {importModalPhase === 'AUTH_REQUIRED'
+                      ? 'Perfil GERENCIA_ADMIN necessário para nuvem'
+                      : importModalPhase === 'QUOTA_EXCEEDED'
+                      ? 'Aguardando liberação da cota Firebase Spark'
+                      : 'Armazenado apenas localmente (IndexedDB)'}
+                  </span>
+                  <p>{importModalDetail}</p>
+                </div>
+              </div>
+            )}
+
+            {importModalPhase === 'PENDING_CONFIRMATION' && (
+              <div className="bg-orange-50 border border-orange-300 rounded-xl p-3 text-[11px] text-orange-950 font-medium flex items-start gap-2 text-left">
+                <AlertTriangle className="w-4 h-4 text-orange-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <span className="block font-black uppercase text-orange-900">
+                    Confirmação na nuvem pendente (versão não ativada)
+                  </span>
+                  <p>{importModalDetail}</p>
+                </div>
+              </div>
+            )}
+
+            {importModalPhase === 'ERROR' && (
+              <div className="bg-rose-50 border border-rose-300 rounded-xl p-3 text-[11px] text-rose-950 font-medium flex items-start gap-2 text-left">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <span className="block font-black uppercase text-rose-900">
+                    Falha na publicação em nuvem
+                  </span>
+                  <p>{importModalDetail}</p>
+                </div>
+              </div>
+            )}
+
+            {importModalPhase === 'PROCESSING' ? (
               <div className="bg-blue-50 border border-blue-100 rounded-xl p-2.5 text-[11px] text-blue-900 font-medium flex items-center justify-center gap-2">
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-700 shrink-0" />
                 <span>Enviando dados com segurança. Por favor, aguarde sem fechar a tela.</span>
               </div>
+            ) : (
+              <button
+                type="button"
+                id="btn-confirmar-fechar-modal-importacao"
+                onClick={() => setIsImportModalOpen(false)}
+                className={`w-full py-2.5 rounded-xl font-black text-xs uppercase tracking-wider text-white shadow-sm cursor-pointer transition-colors ${
+                  importModalPhase === 'CONFIRMED'
+                    ? 'bg-emerald-600 hover:bg-emerald-700'
+                    : importModalPhase === 'ERROR'
+                    ? 'bg-rose-600 hover:bg-rose-700'
+                    : 'bg-amber-600 hover:bg-amber-700'
+                }`}
+              >
+                {importModalPhase === 'CONFIRMED' ? 'Concluir' : 'Entendi / Fechar'}
+              </button>
             )}
           </div>
         </div>
       )}
 
-      {/* Cartão de Sincronização Unificada das 3 Bases Operacionais (Filial 172) */}
+      {/* Seção Principal: Sistema de Atualização Local por Arquivo Único (.zip) */}
+      <AtualizacaoPacoteIsvSection onPackageInstalled={onImportComplete} />
+
+      {/* Cartão de Status das 3 Bases Operacionais (Filial 172) */}
       <BasesSyncStatusCard />
 
       {/* Top Header Card with Bold Typography */}
@@ -717,13 +1052,53 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         <button
           type="button"
           onClick={handleSyncWithCloud}
-          disabled={isSyncingCloud || syncStatus.state === 'syncing'}
+          disabled={isSyncingCloud || syncStatus.state === 'syncing' || quotaState.bloqueado}
           className="px-3.5 py-2 rounded-xl bg-white text-blue-900 hover:bg-blue-50 active:bg-blue-100 font-black text-xs uppercase tracking-wide flex items-center justify-center gap-1.5 transition-all shadow-sm active:scale-95 disabled:opacity-60 cursor-pointer shrink-0"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCloud || syncStatus.state === 'syncing' ? 'animate-spin text-blue-600' : 'text-blue-700'}`} />
-          <span>{isSyncingCloud || syncStatus.state === 'syncing' ? 'Sincronizando...' : 'Sincronizar Agora'}</span>
+          <span>
+            {quotaState.bloqueado
+              ? 'Modo Local (Cota Spark)'
+              : isSyncingCloud || syncStatus.state === 'syncing'
+              ? 'Sincronizando...'
+              : 'Sincronizar Agora'}
+          </span>
         </button>
       </div>
+
+      {/* Persistent Spark Free-Tier Quota Lock Notice */}
+      {quotaState.bloqueado && (
+        <div
+          id="importacao-spark-quota-banner"
+          className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-xs text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div className="flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <span className="font-black uppercase text-amber-900 block">
+                Publicação em nuvem aguardando liberação da cota gratuita Firebase Spark ({quotaState.recurso})
+              </span>
+              <p className="font-medium">
+                As planilhas importadas continuam sendo salvas e operadas normalmente no IndexedDB local (sem perda de dados e sem retentativas em loop).
+              </p>
+              {quotaState.ultimaRespostaServidor && (
+                <p className="text-[11px] text-amber-800">
+                  Última verificação: {quotaState.ultimaRespostaServidor}
+                </p>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleVerificarLiberacaoCota}
+            disabled={isCheckingQuota}
+            className="shrink-0 px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-black text-[11px] uppercase tracking-wide flex items-center justify-center gap-1.5 shadow-xs disabled:opacity-60 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isCheckingQuota ? 'animate-spin' : ''}`} />
+            <span>{isCheckingQuota ? 'Consultando...' : 'Verificar se a cota já foi liberada'}</span>
+          </button>
+        </div>
+      )}
 
       {/* Diagnóstico da Base de Dados */}
       <div className="bg-white rounded-xl p-4 border border-gray-200 shadow-xs space-y-3">
@@ -792,6 +1167,47 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Persistent Cloud Publication Outcome Banner */}
+      {!isImportModalOpen && cloudFeedbackBanner && (
+        <div
+          id="cloud-feedback-banner"
+          className={`rounded-xl p-4 text-xs border flex items-start justify-between gap-3 ${
+            cloudFeedbackBanner.phase === 'CONFIRMED'
+              ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+              : cloudFeedbackBanner.phase === 'ERROR'
+              ? 'bg-rose-50 border-rose-300 text-rose-950'
+              : cloudFeedbackBanner.phase === 'PENDING_CONFIRMATION'
+              ? 'bg-orange-50 border-orange-300 text-orange-950'
+              : 'bg-amber-50 border-amber-300 text-amber-950'
+          }`}
+        >
+          <div className="flex items-start gap-2.5">
+            {cloudFeedbackBanner.phase === 'CONFIRMED' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            ) : cloudFeedbackBanner.phase === 'ERROR' ? (
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-0.5">
+              <span className="font-black uppercase block">{cloudFeedbackBanner.titulo}</span>
+              <p className="font-medium">{cloudFeedbackBanner.mensagem}</p>
+              {cloudFeedbackBanner.detalheTecnico && (
+                <p className="text-[11px] opacity-85">{cloudFeedbackBanner.detalheTecnico}</p>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setCloudFeedbackBanner(null)}
+            className="p-1 rounded hover:bg-black/5 shrink-0 cursor-pointer"
+            aria-label="Dispensar aviso"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
 
       {/* Global Error Banner */}
       {erroGlobal && (

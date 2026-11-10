@@ -14,6 +14,12 @@ import { spcoiSyncService, PublicacaoSpcoiStatus } from './spcoiSyncService';
 import { saeouSyncService, PublicacaoSaeouStatus } from './saeouSyncService';
 import { productRepository } from './productRepository';
 import { isvService } from './isvService';
+import {
+  getQuotaLockState,
+  isFirestoreQuotaExceeded,
+  QuotaLockState,
+  subscribeQuotaStatus,
+} from './firebase';
 import { useState, useEffect } from 'react';
 
 export interface BaseStatusItem {
@@ -35,6 +41,7 @@ export interface TresBasesStatus {
   saeou: BaseStatusItem;
   filialId: string;
   ultimaVerificacao: string;
+  quotaBloqueada: QuotaLockState;
 }
 
 type TresBasesListener = (status: TresBasesStatus) => void;
@@ -69,6 +76,7 @@ class BaseSyncStatusService {
       totalRegistros: 0,
       mensagem: 'Pronto no IndexedDB',
     },
+    quotaBloqueada: getQuotaLockState(),
   };
 
   constructor() {
@@ -76,6 +84,12 @@ class BaseSyncStatusService {
   }
 
   private _conectarServicos(): void {
+    // 0. Escutar estado global de cota Firebase Spark
+    subscribeQuotaStatus((qState) => {
+      this._statusState.quotaBloqueada = qState;
+      this._notificar();
+    });
+
     // 1. Escutar BASE RUB
     rubSyncService.subscribeStatus((rubStatus: PublicacaoRubStatus) => {
       const versaoRemota = rubSyncService.getVersaoAtivaRemota();
@@ -85,6 +99,10 @@ class BaseSyncStatusService {
       let statusCalculado: StatusSyncBase = rubStatus.status;
       if (rubStatus.emAndamento) {
         statusCalculado = 'PUBLICANDO';
+      } else if (rubStatus.status === 'BLOQUEADO_COTA') {
+        statusCalculado = 'BLOQUEADO_COTA';
+      } else if (rubStatus.status === 'PENDENTE_CONFIRMACAO' || rubStatus.etapa === 'PENDENTE_CONFIRMACAO') {
+        statusCalculado = 'PENDENTE_CONFIRMACAO';
       } else if (rubStatus.etapa === 'ERRO') {
         statusCalculado = 'ERRO';
       } else if (versaoRemota && versaoLocal && versaoRemota.versaoId === versaoLocal) {
@@ -117,6 +135,10 @@ class BaseSyncStatusService {
       let statusCalculado: StatusSyncBase = spcoiStatus.status;
       if (spcoiStatus.emAndamento) {
         statusCalculado = 'PUBLICANDO';
+      } else if (spcoiStatus.status === 'BLOQUEADO_COTA') {
+        statusCalculado = 'BLOQUEADO_COTA';
+      } else if (spcoiStatus.status === 'PENDENTE_CONFIRMACAO' || spcoiStatus.etapa === 'PENDENTE_CONFIRMACAO') {
+        statusCalculado = 'PENDENTE_CONFIRMACAO';
       } else if (spcoiStatus.etapa === 'ERRO') {
         statusCalculado = 'ERRO';
       } else if (versaoRemota && versaoLocal && versaoRemota.versaoId === versaoLocal) {
@@ -149,6 +171,10 @@ class BaseSyncStatusService {
       let statusCalculado: StatusSyncBase = saeouStatus.status;
       if (saeouStatus.emAndamento) {
         statusCalculado = 'PUBLICANDO';
+      } else if (saeouStatus.status === 'BLOQUEADO_COTA') {
+        statusCalculado = 'BLOQUEADO_COTA';
+      } else if (saeouStatus.status === 'PENDENTE_CONFIRMACAO' || saeouStatus.etapa === 'PENDENTE_CONFIRMACAO') {
+        statusCalculado = 'PENDENTE_CONFIRMACAO';
       } else if (saeouStatus.etapa === 'ERRO') {
         statusCalculado = 'ERRO';
       } else if (versaoRemota && versaoLocal && versaoRemota.versaoId === versaoLocal) {
@@ -206,6 +232,14 @@ class BaseSyncStatusService {
     spcoi: { sucesso: boolean; mensagem: string };
     saeou: { sucesso: boolean; mensagem: string };
   }> {
+    if (isFirestoreQuotaExceeded()) {
+      const msg = 'Cota diária do Firebase Spark aguardando liberação. Operação mantida no IndexedDB local.';
+      return {
+        rub: { sucesso: false, mensagem: msg },
+        spcoi: { sucesso: false, mensagem: msg },
+        saeou: { sucesso: false, mensagem: msg },
+      };
+    }
     const resRub = await rubSyncService.verificarSincronizacaoComRemoto(filialId).then(() => ({
       sucesso: true,
       mensagem: 'BASE RUB verificada com sucesso',

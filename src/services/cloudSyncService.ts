@@ -31,11 +31,13 @@ import {
 } from '../types';
 import {
   db,
+  detectQuotaResourceType,
   ensureAuth,
   isFirestoreQuotaExceeded,
   isQuotaError,
   logFirestoreRead,
   markQuotaExceeded,
+  subscribeQuotaStatus,
 } from './firebase';
 import {
   normalizeVencimentoRecord,
@@ -44,6 +46,7 @@ import {
   cleanForFirestore as cleanCentralForFirestore,
 } from './deviceId';
 import { nuvemSyncEngine } from './nuvemSyncEngine';
+import { isModoAtualizacaoLocalAtivo } from './localPackageMode';
 
 export type SyncState = 'connecting' | 'connected' | 'syncing' | 'offline' | 'error';
 
@@ -97,6 +100,8 @@ class CloudSyncService {
   private _localCatalogoVersion = 0;
   private _localVinculosVersion = 0;
   private _localSaeou060Version = 0;
+  private _lastPullCheckMs = 0;
+  private _usaVersionadoFilial172 = true;
 
   // External repository callback hooks (injected to avoid circular import issues)
   private _onRemoteCatalogoReceived?: (produtos: ProdutoSMG[], meta: MetadadosBase) => Promise<void>;
@@ -106,17 +111,29 @@ class CloudSyncService {
   private _onRemoteHistoricoReceived?: (historico: ResumoImportacao[]) => void;
 
   constructor() {
+    subscribeQuotaStatus((qState) => {
+      if (qState.bloqueado) {
+        this.destroy();
+        this.updateStatus({
+          state: 'connected',
+          message: 'Modo local offline ativo (Cota diária Spark protegida — IndexedDB seguro)',
+        });
+      }
+    });
+
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => {
         this.updateStatus({ isOnline: true, state: 'connected' });
-        this.pullLatestIfOutdated();
+        if (!isFirestoreQuotaExceeded()) {
+          this.pullLatestIfOutdated();
+        }
       });
       window.addEventListener('offline', () => {
         this.updateStatus({ isOnline: false, state: 'offline', message: 'Sem conexão com a internet' });
       });
       if (typeof document !== 'undefined') {
         document.addEventListener('visibilitychange', () => {
-          if (document.visibilityState === 'visible') {
+          if (document.visibilityState === 'visible' && !isFirestoreQuotaExceeded()) {
             this.pullLatestIfOutdated();
           }
         });
@@ -312,6 +329,10 @@ class CloudSyncService {
    */
   public async pullLatestIfOutdated(): Promise<void> {
     if (isFirestoreQuotaExceeded()) return;
+    const agora = Date.now();
+    if (agora - this._lastPullCheckMs < 60_000) return;
+    this._lastPullCheckMs = agora;
+
     try {
       await ensureAuth().catch(() => null);
       const metaDocRef = doc(db, 'metadados', 'geral');
@@ -319,21 +340,22 @@ class CloudSyncService {
       if (!metaSnap.exists()) return;
 
       const data = metaSnap.data();
-      // Na Filial 172, a BASE RUB oficial é gerenciada pelo rubSyncService sob /filiais/172/catalogo_rub_versoes.
-      // Removemos a leitura irrestrita da coleção legada catalogo_chunks para evitar exceder o limite de 128 MiB do Firestore.
-      const isBaseRubAtiva = data.status_base === 'BASE_RUB' || data.filial_numero === '172';
+      // Na Filial 172, a BASE RUB e o SAEOU060 oficiais são distribuídos localmente por pacote único (.zip)
+      const isBaseRubAtiva =
+        isModoAtualizacaoLocalAtivo() || data.status_base === 'BASE_RUB' || data.filial_numero === '172';
+      this._usaVersionadoFilial172 = (data.filial_numero || '172') === '172';
       if (!isBaseRubAtiva && (data.catalogo_version || 0) > this._localCatalogoVersion && data.total_produtos > 0) {
         await this.pullCatalogoFromCloud(data.catalogo_version);
       }
       if ((data.vinculos_version || 0) > this._localVinculosVersion && data.total_eans > 0) {
         await this.pullVinculosFromCloud(data.vinculos_version);
       }
-      if ((data.saeou060_version || 0) > this._localSaeou060Version && data.total_saeou060 > 0) {
+      if (!isBaseRubAtiva && (data.saeou060_version || 0) > this._localSaeou060Version && data.total_saeou060 > 0) {
         await this.pullSaeou060FromCloud(data.saeou060_version);
       }
     } catch (err: any) {
       if (isQuotaError(err)) {
-        markQuotaExceeded();
+        markQuotaExceeded(err?.message, detectQuotaResourceType(err));
         this.destroy();
         this.updateStatus({
           state: 'connected',
@@ -385,22 +407,28 @@ class CloudSyncService {
       logFirestoreRead('verificarMetadados', 'metadados/geral', metaSnap.exists() ? 1 : 0);
       const nowStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
+      const usaVersionadoFilial172 = isModoAtualizacaoLocalAtivo() || (localMeta.filial_numero || '172') === '172';
+      this._usaVersionadoFilial172 = usaVersionadoFilial172;
+      const isBaseRubLocal = localMeta.status_base === 'BASE_RUB' || (localProdutos.length > 0 && localMeta.status_base !== 'SMGOI013');
+
       if (!metaSnap.exists()) {
         // Cloud has no documents yet
         if (localProdutos.length > 0) {
-          await this.pushCatalogoToCloud(localProdutos, localMeta);
+          if (!usaVersionadoFilial172 && !isBaseRubLocal) {
+            await this.pushCatalogoToCloud(localProdutos, localMeta);
+          }
           if (localVinculos.length > 0) await this.pushVinculosToCloud(localVinculos);
-          if (localSaeou.length > 0) await this.pushSaeou060ToCloud(localSaeou);
+          if (localSaeou.length > 0 && !usaVersionadoFilial172) await this.pushSaeou060ToCloud(localSaeou);
           if (localVencimentos.length > 0) await this.pushAllLotesToCloud(localVencimentos);
 
           this.updateStatus({
             state: 'connected',
             lastSyncTime: nowStr,
-            message: `Base local enviada para a nuvem (${localProdutos.length} produtos)`,
+            message: `Sincronização concluída (${localVencimentos.length} lotes e ${localVinculos.length} vínculos verificados).`,
           });
           return {
             success: true,
-            message: `Nuvem conectada! ${localProdutos.length} produtos enviados para compartilhamento.`,
+            message: `Nuvem conectada! Vínculos e vencimentos sincronizados com segurança.`,
           };
         } else {
           // Initialize empty metadata document in cloud
@@ -429,15 +457,14 @@ class CloudSyncService {
 
       let msg = 'Conectado à nuvem. Dados já estão em dia.';
 
-      // BASE RUB é soberana: se a base local já possui produtos ou status BASE_RUB, não puxar catálogo legado da nuvem
-      const isBaseRubLocal = localMeta.status_base === 'BASE_RUB' || (localProdutos.length > 0 && localMeta.status_base !== 'SMGOI013');
+      // BASE RUB é soberana: se a base local já possui produtos ou status BASE_RUB, não puxar nem empurrar catálogo legado
       const localCatVersion = localMeta.catalogo_version || this._localCatalogoVersion || 0;
 
-      if (!isBaseRubLocal && remoteTotal > 0 && (remoteCatVersion > localCatVersion || localProdutos.length === 0)) {
+      if (!usaVersionadoFilial172 && !isBaseRubLocal && remoteTotal > 0 && (remoteCatVersion > localCatVersion || localProdutos.length === 0)) {
         // Apenas puxar catálogo se local estiver completamente vazio e não for BASE RUB
         await this.pullCatalogoFromCloud(remoteCatVersion);
         msg = `Catálogo atualizado da nuvem (${remoteTotal} produtos).`;
-      } else if (localProdutos.length > 0 && (remoteTotal === 0 || localCatVersion > remoteCatVersion)) {
+      } else if (!usaVersionadoFilial172 && !isBaseRubLocal && localProdutos.length > 0 && (remoteTotal === 0 || localCatVersion > remoteCatVersion)) {
         // Se a cota permitir, atualizar nuvem
         if (!isFirestoreQuotaExceeded()) {
           await this.pushCatalogoToCloud(localProdutos, localMeta);
@@ -454,13 +481,15 @@ class CloudSyncService {
         await this.pushVinculosToCloud(localVinculos);
       }
 
-      // Sync SAEOU060
+      // Sync SAEOU060 legado apenas quando não utiliza publicação versionada V3 da Filial 172
       const remoteSaeouVersion = data.saeou060_version || 0;
       const localSaeouVersion = localMeta.saeou060_version || this._localSaeou060Version || 0;
-      if (remoteSaeouVersion > localSaeouVersion || (localSaeou.length === 0 && (data.total_saeou060 || 0) > 0)) {
-        await this.pullSaeou060FromCloud(remoteSaeouVersion);
-      } else if (localSaeou.length > 0 && ((data.total_saeou060 || 0) === 0 || localSaeouVersion > remoteSaeouVersion)) {
-        await this.pushSaeou060ToCloud(localSaeou);
+      if (!usaVersionadoFilial172) {
+        if (remoteSaeouVersion > localSaeouVersion || (localSaeou.length === 0 && (data.total_saeou060 || 0) > 0)) {
+          await this.pullSaeou060FromCloud(remoteSaeouVersion);
+        } else if (localSaeou.length > 0 && ((data.total_saeou060 || 0) === 0 || localSaeouVersion > remoteSaeouVersion)) {
+          await this.pushSaeou060ToCloud(localSaeou);
+        }
       }
 
       // Sync vencimentos: bidirectional merge paginado sem truncamento de 250
@@ -672,6 +701,10 @@ class CloudSyncService {
     onProgress?: (pct: number, msg: string) => void
   ): Promise<boolean> {
     if (isFirestoreQuotaExceeded()) return false;
+    if ((meta?.filial_numero || '172') === '172' || meta?.status_base === 'BASE_RUB') {
+      // Na Filial 172 / BASE RUB, a publicação central é exclusiva do rubSyncService V3.
+      return false;
+    }
     this.updateStatus({ state: 'syncing', message: 'Enviando catálogo para a nuvem...' });
 
     try {
@@ -809,6 +842,10 @@ class CloudSyncService {
 
   public async pushSaeou060ToCloud(registros: RegistroSaeou060[]): Promise<boolean> {
     if (isFirestoreQuotaExceeded()) return false;
+    if (this._usaVersionadoFilial172) {
+      // Na Filial 172, o SAEOU060 é publicado exclusivamente via saeouSyncService V3.
+      return false;
+    }
     try {
       await ensureAuth();
       const CHUNK_SIZE = 400;
@@ -1019,11 +1056,15 @@ class CloudSyncService {
   }
 
   public async pushHistoricoToCloud(hist: ResumoImportacao): Promise<void> {
+    if (isFirestoreQuotaExceeded()) return;
     try {
       await ensureAuth();
       const histDocRef = doc(db, 'historico_importacoes', hist.id || `hist-${Date.now()}`);
       await setDoc(histDocRef, cleanForFirestore(hist));
-    } catch (err) {
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded(err?.message, detectQuotaResourceType(err));
+      }
       console.warn('[CloudSync] Error saving historico to cloud:', err);
     }
   }

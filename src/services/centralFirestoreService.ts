@@ -24,7 +24,14 @@ import {
   where,
   writeBatch
 } from 'firebase/firestore';
-import { db, ensureAuth } from './firebase';
+import {
+  db,
+  detectQuotaResourceType,
+  ensureAuth,
+  isFirestoreQuotaExceeded,
+  isQuotaError,
+  markQuotaExceeded,
+} from './firebase';
 import {
   LoteVencimento,
   ProdutoSMG,
@@ -237,6 +244,20 @@ export class CentralFirestoreService {
       throw new Error('Uma sincronização com a nuvem já está em andamento.');
     }
 
+    if (isFirestoreQuotaExceeded()) {
+      return {
+        sucesso: false,
+        mensagem: 'Cota diária do Firebase Spark aguardando liberação. Dados locais preservados no IndexedDB.',
+        stats: {
+          produtos: 0,
+          vinculosEan: 0,
+          vencimentos: 0,
+          promotores: 0,
+          vinculosPromotor: 0,
+        },
+      };
+    }
+
     if (!db) {
       throw new Error('Banco de dados Firestore não inicializado.');
     }
@@ -286,6 +307,7 @@ export class CentralFirestoreService {
       updateProgress();
 
       for (let i = 0; i < dadosLocais.produtos.length; i += BATCH_SIZE) {
+        if (isFirestoreQuotaExceeded()) break;
         const batch = writeBatch(db);
         const chunk = dadosLocais.produtos.slice(i, i + BATCH_SIZE);
 
@@ -336,6 +358,7 @@ export class CentralFirestoreService {
       updateProgress();
 
       for (let i = 0; i < dadosLocais.vinculos.length; i += BATCH_SIZE) {
+        if (isFirestoreQuotaExceeded()) break;
         const batch = writeBatch(db);
         const chunk = dadosLocais.vinculos.slice(i, i + BATCH_SIZE);
 
@@ -371,6 +394,7 @@ export class CentralFirestoreService {
       updateProgress();
 
       for (let i = 0; i < dadosLocais.vencimentos.length; i += BATCH_SIZE) {
+        if (isFirestoreQuotaExceeded()) break;
         const batch = writeBatch(db);
         const chunk = dadosLocais.vencimentos.slice(i, i + BATCH_SIZE);
 
@@ -485,6 +509,9 @@ export class CentralFirestoreService {
         },
       };
     } catch (err: any) {
+      if (isQuotaError(err)) {
+        markQuotaExceeded(err?.message, detectQuotaResourceType(err));
+      }
       info.etapa = 'ERRO';
       info.mensagem = `Erro na sincronização: ${err.message || err}`;
       updateProgress();

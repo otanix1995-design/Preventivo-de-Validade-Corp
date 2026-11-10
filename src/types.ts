@@ -842,3 +842,196 @@ export interface ResumoImportacaoIsv {
   avisos: string[];
 }
 
+// ==========================================
+// SISTEMA DE ATUALIZAÇÃO LOCAL POR ARQUIVO ÚNICO (FILIAL 172)
+// ==========================================
+
+export interface AgenciaComercial {
+  agenciaId: string;
+  nome: string;
+  nomeNormalizado: string;
+  filialId: string;
+  ativo: boolean;
+  totalPromotores?: number;
+  totalIndustrias?: number;
+}
+
+export interface VinculoPromotorAgencia {
+  id: string;
+  promotorId: string;
+  promotorNome: string;
+  agenciaId: string;
+  agenciaNome: string;
+  filialId: string;
+}
+
+export interface VinculoAgenciaIndustria {
+  id: string;
+  agenciaId: string;
+  agenciaNome: string;
+  cnpj: string;
+  industriaRazaoSocial: string;
+  filialId: string;
+}
+
+export type EstadoAutenticidadePacote =
+  | 'INTEGRIDADE_VERIFICADA_SEM_ASSINATURA_PKI'
+  | 'REJEITADO_CORROMPIDO'
+  | 'REJEITADO_FILIAL_INCOMPATIVEL'
+  | 'REJEITADO_FORMATO_INVALIDO';
+
+export interface PacoteArquivoChecksumEntry {
+  caminho: string;
+  sha256: string;
+  bytes: number;
+}
+
+export interface IsvPacoteManifesto {
+  formato: 'ISV_FILIAL_172_PACOTE_LOCAL';
+  versaoFormato: number;
+  filialId: '172';
+  filialNome: string;
+  versaoId: string;
+  geradoEmIso: string;
+  geradoEmTs: number;
+  geradoPorUid?: string;
+  geradoPorNome?: string;
+  geradoPorEmail?: string;
+  assinaturaCriptograficaPresente: false;
+  autenticidadeStatusPadrao: 'INTEGRIDADE_VERIFICADA_SEM_ASSINATURA_PKI';
+  autenticidadeNota: string;
+  regraFornecedor: 'RAZAO_SOCIAL_SPCOI007';
+  contagens: {
+    produtos: number;
+    registrosOperacionais: number;
+    fornecedores: number;
+    industrias: number;
+    saeou060: number;
+    promotores: number;
+    agencias: number;
+    vinculosPromotorIndustria: number;
+    vinculosPromotorAgencia: number;
+    vinculosAgenciaIndustria: number;
+    vinculosDispositivoPromotor: number;
+    historicoIsv: number;
+    historicoSpcoi: number;
+  };
+  partesBaseRubProdutos: number;
+  partesBaseRubOperacional: number;
+  sha256DadosConsolidados: string;
+  entradas: PacoteArquivoChecksumEntry[];
+}
+
+export interface IsvPacoteContagensSnapshot {
+  produtos: number;
+  registrosOperacionais: number;
+  fornecedores: number;
+  industrias: number;
+  saeou060: number;
+  promotores: number;
+  agencias: number;
+  vinculos: number;
+}
+
+export interface IsvPacoteStatusLocal {
+  filialId: '172';
+  modoAtualizacaoLocalAtivo: boolean;
+  versaoInstaladaId: string | null;
+  ultimaAtualizacaoIso: string | null;
+  ultimaAtualizacaoTs: number | null;
+  origemUltimaAtualizacao: 'GERACAO_LOCAL' | 'IMPORTACAO_PACOTE' | 'NENHUMA';
+  ultimaGeracaoIso: string | null;
+  ultimaGeracaoVersaoId: string | null;
+  atualizacaoDisponivel: boolean;
+  motivosDesatualizacao: string[];
+  basesObrigatoriasOk: boolean;
+  detalhesBasesObrigatorias: {
+    baseRubOk: boolean;
+    baseRubMotivo?: string;
+    spcoi007Ok: boolean;
+    spcoi007Motivo?: string;
+    saeou060Ok: boolean;
+    saeou060Motivo?: string;
+  };
+  alteracoesComerciaisLocaisPendentes: boolean;
+  ultimaAlteracaoComercialIso: string | null;
+  ultimasAlteracoesComerciaisResumo: string[];
+  contagensAtuais: IsvPacoteContagensSnapshot;
+}
+
+export type ComparacaoVersaoPacote =
+  | 'PRIMEIRA_INSTALACAO'
+  | 'NOVA_VERSAO'
+  | 'MESMA_VERSAO'
+  | 'VERSAO_ANTERIOR_DOWNGRADE';
+
+export interface ConflitoCadastroComercial {
+  tipo: 'PROMOTOR' | 'AGENCIA' | 'VINCULO';
+  descricao: string;
+}
+
+export type ResolucaoConflitoPacote = 'SUBSTITUIR_PELO_PACOTE' | 'MANTER_ALTERACOES_LOCAIS';
+
+export interface ResumoComparacaoPacote {
+  comparacaoVersao: ComparacaoVersaoPacote;
+  exigeConfirmacaoDowngrade: boolean;
+  versaoAtualId: string | null;
+  versaoPacoteId: string;
+  contagensAtuais: IsvPacoteContagensSnapshot;
+  contagensPacote: IsvPacoteContagensSnapshot;
+  conflitosComerciais: ConflitoCadastroComercial[];
+  avisos: string[];
+}
+
+export interface IsvPacotePayloadExtraido {
+  manifesto: IsvPacoteManifesto;
+  produtos: ProdutoSMG[];
+  registrosOperacionais: RegistroPlanilhaIsv[];
+  fornecedores: FornecedorSPCOI007[];
+  industrias: Industria[];
+  saeou060: RegistroSaeou060[];
+  promotores: Promotor[];
+  agencias: AgenciaComercial[];
+  vinculosPromotorIndustria: VinculoPromotorIndustria[];
+  vinculosPromotorAgencia: VinculoPromotorAgencia[];
+  vinculosAgenciaIndustria: VinculoAgenciaIndustria[];
+  vinculosDispositivoPromotor: VinculoPromotor[];
+  historicoIsv: ResumoImportacaoIsv[];
+  historicoSpcoi: ResumoImportacaoSPCOI007[];
+}
+
+export interface ResultadoInspecaoPacoteIsv {
+  validoParaInstalacao: boolean;
+  autenticidadeStatus: EstadoAutenticidadePacote;
+  autenticidadeMensagem: string;
+  integridadeSha256Ok: boolean;
+  arquivosVerificados: number;
+  manifesto?: IsvPacoteManifesto;
+  resumoComparacao?: ResumoComparacaoPacote;
+  espacoEstimado?: {
+    disponivelBytes: number | null;
+    quotaBytes: number | null;
+    necessarioEstimadoBytes: number;
+    suficiente: boolean;
+    aviso?: string;
+  };
+  errosBloqueantes: string[];
+  payload?: IsvPacotePayloadExtraido;
+}
+
+export interface ResultadoInstalacaoPacoteIsv {
+  sucesso: boolean;
+  mensagem: string;
+  versaoInstaladaId?: string;
+  etapaFalha?: string;
+  rollbackExecutado?: boolean;
+  resumoComparacao?: ResumoComparacaoPacote;
+  preservacaoGarantida?: {
+    vencimentosPreservados: number;
+    vinculosEanPreservados: number;
+    filaSyncPreservada: boolean;
+  };
+  avisos: string[];
+}
+
+
