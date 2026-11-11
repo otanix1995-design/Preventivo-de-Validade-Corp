@@ -657,6 +657,10 @@ class IsvService {
     this._notify();
   }
 
+  public isInitialized(): boolean {
+    return this._isInitialized;
+  }
+
   public getRegistrosIsvOperacional(): RegistroPlanilhaIsv[] {
     return this._registrosIsvOperacional;
   }

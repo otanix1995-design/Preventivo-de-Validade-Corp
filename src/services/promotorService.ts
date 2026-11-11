@@ -309,6 +309,10 @@ class PromotorService {
   // CONSULTAS E INDICADORES
   // =========================================================================
 
+  public isInitialized(): boolean {
+    return this._isInitialized;
+  }
+
   public getPromotores(): Promotor[] {
     return [...this._promotores];
   }

@@ -36,6 +36,7 @@ import { MetadadosBase, ProdutoSMG, ResumoImportacao, ResumoImportacaoIsv, Resum
 import { LimparDadosAntigosModal } from './LimparDadosAntigosModal';
 import { BasesSyncStatusCard } from './BasesSyncStatusCard';
 import { AtualizacaoPacoteIsvSection } from './AtualizacaoPacoteIsvSection';
+import { DiagnosticoDadosLocaisCard } from './DiagnosticoDadosLocaisCard';
 import { rubSyncService } from '../services/rubSyncService';
 import { spcoiSyncService } from '../services/spcoiSyncService';
 import { saeouSyncService } from '../services/saeouSyncService';
@@ -918,6 +919,9 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
 
       {/* Seção Principal: Sistema de Atualização Local por Arquivo Único (.zip) */}
       <AtualizacaoPacoteIsvSection onPackageInstalled={onImportComplete} />
+
+      {/* Diagnóstico Somente Leitura dos Dados Locais no IndexedDB */}
+      <DiagnosticoDadosLocaisCard />
 
       {/* Cartão de Status das 3 Bases Operacionais (Filial 172) */}
       <BasesSyncStatusCard />
