@@ -936,6 +936,12 @@ export interface IsvPacoteContagensSnapshot {
 export interface IsvPacoteStatusLocal {
   filialId: '172';
   modoAtualizacaoLocalAtivo: boolean;
+  basesCarregando: boolean;
+  servicosProntos: {
+    catalogo: boolean;
+    isv: boolean;
+    promotores: boolean;
+  };
   versaoInstaladaId: string | null;
   ultimaAtualizacaoIso: string | null;
   ultimaAtualizacaoTs: number | null;

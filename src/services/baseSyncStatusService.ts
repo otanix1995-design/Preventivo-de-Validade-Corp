@@ -197,6 +197,36 @@ class BaseSyncStatusService {
       };
       this._notificar();
     });
+
+    // 4. Atualizar contagens locais imediatamente quando os repositórios IndexedDB carregarem
+    const atualizarContagensLocais = () => {
+      const produtos = productRepository.getProdutos();
+      const saeou = productRepository.getSaeou060Registros();
+      const fornecedores = isvService.getFornecedores();
+
+      if (!this._statusState.rub.emAndamento && produtos.length > 0) {
+        this._statusState.rub = {
+          ...this._statusState.rub,
+          totalRegistros: produtos.length,
+        };
+      }
+      if (!this._statusState.spcoi.emAndamento && fornecedores.length > 0) {
+        this._statusState.spcoi = {
+          ...this._statusState.spcoi,
+          totalRegistros: fornecedores.length,
+        };
+      }
+      if (!this._statusState.saeou.emAndamento) {
+        this._statusState.saeou = {
+          ...this._statusState.saeou,
+          totalRegistros: saeou.length,
+        };
+      }
+      this._notificar();
+    };
+
+    productRepository.subscribe(atualizarContagensLocais);
+    isvService.subscribe(atualizarContagensLocais);
   }
 
   public getStatus(): TresBasesStatus {

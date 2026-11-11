@@ -116,6 +116,7 @@ class PromotorService {
   private _operacoes: OperacaoPromotorSync[] = [];
   private _listeners = new Set<PromotoresListener>();
   private _isInitialized = false;
+  private _initPromise: Promise<void> | null = null;
   private _firestoreUnsubs: Unsubscribe[] = [];
 
   constructor() {
@@ -158,63 +159,70 @@ class PromotorService {
    */
   public async init(): Promise<void> {
     if (this._isInitialized) return;
+    if (this._initPromise) return this._initPromise;
 
-    try {
-      // 1. Carregar do IndexedDB primeiro para resposta instantânea
-      const [localPromotores, localVinculos, localAuditorias, localOperacoes] = await Promise.all([
-        dbGetAll<Promotor>(STORES.PROMOTORES),
-        dbGetAll<VinculoPromotor>(STORES.VINCULOS_PROMOTORES),
-        dbGetAll<RegistroAuditoriaPromotor>(STORES.AUDITORIA_PROMOTORES),
-        dbGetAll<OperacaoPromotorSync>(STORES.OPERACOES_PROMOTORES),
-      ]);
+    this._initPromise = (async () => {
+      try {
+        // 1. Carregar do IndexedDB primeiro para resposta instantânea
+        const [localPromotores, localVinculos, localAuditorias, localOperacoes] = await Promise.all([
+          dbGetAll<Promotor>(STORES.PROMOTORES),
+          dbGetAll<VinculoPromotor>(STORES.VINCULOS_PROMOTORES),
+          dbGetAll<RegistroAuditoriaPromotor>(STORES.AUDITORIA_PROMOTORES),
+          dbGetAll<OperacaoPromotorSync>(STORES.OPERACOES_PROMOTORES),
+        ]);
 
-      if (localPromotores.length > 0) this._promotores = localPromotores.map(normalizePromotor);
-      if (localVinculos.length > 0) this._vinculos = localVinculos.map(normalizeVinculo);
-      if (localAuditorias.length > 0) this._auditorias = localAuditorias;
-      if (localOperacoes.length > 0) this._operacoes = localOperacoes;
+        if (localPromotores.length > 0) this._promotores = localPromotores.map(normalizePromotor);
+        if (localVinculos.length > 0) this._vinculos = localVinculos.map(normalizeVinculo);
+        if (localAuditorias.length > 0) this._auditorias = localAuditorias;
+        if (localOperacoes.length > 0) this._operacoes = localOperacoes;
 
-      // Garantir existência de MARIA apenas em ambiente inicial sem pacote instalado
-      const metaPacote = await dbGetMeta<any>('meta_pacote_atualizacao_isv', null);
-      const temMaria = this._promotores.some((p) => p.nome.toUpperCase().includes('MARIA'));
-      if (!temMaria && !metaPacote?.versaoInstaladaId && this._promotores.length === 0) {
-        const agora = new Date().toISOString();
-        const mariaPadrao: Promotor = {
-          promotorId: 'promotor_maria_seara_172',
-          nome: 'MARIA SILVA',
-          agenciaNome: 'SEARA',
-          matricula: 'SR-17201',
-          filialId: '172',
-          filialNome: 'Cascavel',
-          setores: ['FRIOS', 'LOJA'],
-          setorId: 'FRIOS',
-          setorNome: 'FRIOS • LOJA',
-          status: 'ATIVO',
-          permissoes: { ...PERMISSOES_PADRAO_PROMOTOR },
-          dispositivoVinculado: null,
-          dataCadastro: agora,
-          dataVinculo: null,
-          ultimoAcesso: agora,
-          ultimaSincronizacao: agora,
-          criadoPor: 'SISTEMA_PRINCIPAL',
-          atualizadoPor: 'SISTEMA_PRINCIPAL',
-        };
-        this._promotores = [mariaPadrao, ...this._promotores];
-        dbPut(STORES.PROMOTORES, mariaPadrao).catch(() => {});
-        this.syncDocToFirestore('promotores', mariaPadrao.promotorId, mariaPadrao);
+        // Garantir existência de MARIA apenas em ambiente inicial sem pacote instalado
+        const metaPacote = await dbGetMeta<any>('meta_pacote_atualizacao_isv', null);
+        const temMaria = this._promotores.some((p) => p.nome.toUpperCase().includes('MARIA'));
+        if (!temMaria && !metaPacote?.versaoInstaladaId && this._promotores.length === 0) {
+          const agora = new Date().toISOString();
+          const mariaPadrao: Promotor = {
+            promotorId: 'promotor_maria_seara_172',
+            nome: 'MARIA SILVA',
+            agenciaNome: 'SEARA',
+            matricula: 'SR-17201',
+            filialId: '172',
+            filialNome: 'Cascavel',
+            setores: ['FRIOS', 'LOJA'],
+            setorId: 'FRIOS',
+            setorNome: 'FRIOS • LOJA',
+            status: 'ATIVO',
+            permissoes: { ...PERMISSOES_PADRAO_PROMOTOR },
+            dispositivoVinculado: null,
+            dataCadastro: agora,
+            dataVinculo: null,
+            ultimoAcesso: agora,
+            ultimaSincronizacao: agora,
+            criadoPor: 'SISTEMA_PRINCIPAL',
+            atualizadoPor: 'SISTEMA_PRINCIPAL',
+          };
+          this._promotores = [mariaPadrao, ...this._promotores];
+          dbPut(STORES.PROMOTORES, mariaPadrao).catch(() => {});
+          this.syncDocToFirestore('promotores', mariaPadrao.promotorId, mariaPadrao);
+        }
+
+        this.verificarExpiracaoVinculos();
+
+        // 2. Conectar com Firestore em tempo real apenas quando NÃO estiver no modo de atualização local
+        if (!isModoAtualizacaoLocalAtivo()) {
+          this.initFirestoreSync();
+        }
+
+        this._isInitialized = true;
+        this.notify();
+      } catch (err) {
+        console.warn('Erro ao inicializar PromotorService via IndexedDB:', err);
+        this._isInitialized = true;
+        this.notify();
       }
+    })();
 
-      this.verificarExpiracaoVinculos();
-      this.notify();
-
-      // 2. Conectar com Firestore em tempo real apenas quando NÃO estiver no modo de atualização local
-      if (!isModoAtualizacaoLocalAtivo()) {
-        this.initFirestoreSync();
-      }
-
-      this._isInitialized = true;
-    } catch (err) {
-      console.warn('Erro ao inicializar PromotorService via IndexedDB:', err);
-    }
+    return this._initPromise;
   }
 
   private initFirestoreSync() {

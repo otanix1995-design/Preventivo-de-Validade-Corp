@@ -19,6 +19,8 @@ import { SincronizacaoCentralModal } from './components/SincronizacaoCentralModa
 import { NuvemV3ControlCenterModal } from './components/NuvemV3ControlCenterModal';
 import { NuvemV3ConflictModal } from './components/NuvemV3ConflictModal';
 import { nuvemSyncEngine, ConflitoSincronizacao } from './services/nuvemSyncEngine';
+import { isvService } from './services/isvService';
+import { promotorService } from './services/promotorService';
 import { VencimentosView } from './components/VencimentosView';
 import { VincularEanModal } from './components/VincularEanModal';
 import {
@@ -76,6 +78,12 @@ export default function App() {
       setVinculosEan(getVinculosEan());
       setDivergencias(getDivergencias());
       setMetadados(getMetadados());
+    });
+    isvService.init().catch((err) => {
+      console.warn('Erro ao inicializar IsvService no boot:', err);
+    });
+    promotorService.init().catch((err) => {
+      console.warn('Erro ao inicializar PromotorService no boot:', err);
     });
 
     const unsubscribe = subscribeToStore(() => {

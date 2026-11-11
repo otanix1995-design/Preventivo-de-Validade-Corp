@@ -78,7 +78,10 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
   const [processingFileType, setProcessingFileType] = useState<'BASE_RUB' | 'VINCULOS_EAN' | 'SAEOU060' | 'SPCOI007'>('BASE_RUB');
   const [ultimoResumo, setUltimoResumo] = useState<ResumoImportacao | null>(null);
   const [ultimoResumoSpcoi, setUltimoResumoSpcoi] = useState<ResumoImportacaoSPCOI007 | null>(null);
-  const [ultimoResumoIsv, setUltimoResumoIsv] = useState<ResumoImportacaoIsv | null>(isvService.getResumoIsvAtual());
+  const [ultimoResumoIsv, setUltimoResumoIsv] = useState<ResumoImportacaoIsv | null>(() =>
+    isvService.getResumoIsvAtual()
+  );
+  const [, setIsvVersionTick] = useState(0);
   const [erroGlobal, setErroGlobal] = useState<string | null>(null);
   const [isDraggingEan, setIsDraggingEan] = useState(false);
   const [isDraggingSaeou, setIsDraggingSaeou] = useState(false);
@@ -93,9 +96,15 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
   const [isCheckingQuota, setIsCheckingQuota] = useState(false);
 
   useEffect(() => {
+    isvService.init().catch(() => {});
+    const unsubIsv = isvService.subscribe(() => {
+      setIsvVersionTick((t) => t + 1);
+      setUltimoResumoIsv(isvService.getResumoIsvAtual());
+    });
     const unsubSync = cloudSyncService.subscribeStatus(setSyncStatus);
     const unsubQuota = subscribeQuotaStatus(setQuotaState);
     return () => {
+      unsubIsv();
       unsubSync();
       unsubQuota();
     };

@@ -106,6 +106,9 @@ export interface LocalPackageDependencies {
   clearStaging?: () => Promise<void>;
   estimateStorage?: () => Promise<{ quota: number | null; usage: number | null }>;
   autoSubscribeEvents?: boolean;
+  initDependencies?: () => Promise<void>;
+  getServicosProntos?: () => { catalogo: boolean; isv: boolean; promotores: boolean };
+  subscribeStoreUpdates?: (listener: () => void) => () => void;
 }
 
 interface PersistedPackageMeta {
@@ -177,11 +180,22 @@ export class LocalUpdatePackageService {
   private _deps: Required<LocalPackageDependencies>;
   private _persistedMeta: PersistedPackageMeta = { ...DEFAULT_PERSISTED_META };
   private _initialized = false;
+  private _initPromise: Promise<void> | null = null;
   private _listeners = new Set<(status: IsvPacoteStatusLocal) => void>();
   private _unsubChangeBus: (() => void) | null = null;
+  private _unsubStoreUpdates: (() => void) | null = null;
   private _operacaoEmCurso: 'NENHUMA' | 'EXPORTANDO' | 'INSPECIONANDO' | 'INSTALANDO' = 'NENHUMA';
 
   constructor(deps?: LocalPackageDependencies) {
+    const hasCustomDataGetters = Boolean(
+      deps?.getProdutos ||
+        deps?.getRegistrosOperacionais ||
+        deps?.getFornecedores ||
+        deps?.getIndustrias ||
+        deps?.getSaeou060 ||
+        deps?.getPromotores
+    );
+
     this._deps = {
       getAuthEstado: deps?.getAuthEstado ?? (() => firebaseAuthService.getEstado()),
       getProdutos: deps?.getProdutos ?? (() => productRepository.getProdutos()),
@@ -240,6 +254,40 @@ export class LocalUpdatePackageService {
           return { quota: null, usage: null };
         }),
       autoSubscribeEvents: deps?.autoSubscribeEvents ?? true,
+      initDependencies:
+        deps?.initDependencies ??
+        (hasCustomDataGetters
+          ? async () => {}
+          : async () => {
+              await Promise.all([
+                productRepository.init(),
+                isvService.init(),
+                promotorService.init(),
+              ]);
+            }),
+      getServicosProntos:
+        deps?.getServicosProntos ??
+        (hasCustomDataGetters
+          ? () => ({ catalogo: true, isv: true, promotores: true })
+          : () => ({
+              catalogo: productRepository.isLoaded(),
+              isv: isvService.isInitialized(),
+              promotores: promotorService.isInitialized(),
+            })),
+      subscribeStoreUpdates:
+        deps?.subscribeStoreUpdates ??
+        (hasCustomDataGetters
+          ? () => () => {}
+          : (listener: () => void) => {
+              const u1 = productRepository.subscribe(listener);
+              const u2 = isvService.subscribe(listener);
+              const u3 = promotorService.subscribe(listener);
+              return () => {
+                u1();
+                u2();
+                u3();
+              };
+            }),
     };
 
     if (this._deps.autoSubscribeEvents) {
@@ -247,6 +295,9 @@ export class LocalUpdatePackageService {
         this.registrarAlteracaoExterna(ev).catch((err) => {
           console.warn('[LocalPackage] Erro ao registrar alteração:', err);
         });
+      });
+      this._unsubStoreUpdates = this._deps.subscribeStoreUpdates(() => {
+        this.notify();
       });
     }
   }
@@ -256,30 +307,56 @@ export class LocalUpdatePackageService {
       this._unsubChangeBus();
       this._unsubChangeBus = null;
     }
+    if (this._unsubStoreUpdates) {
+      this._unsubStoreUpdates();
+      this._unsubStoreUpdates = null;
+    }
     this._listeners.clear();
   }
 
   public async init(): Promise<void> {
-    if (this._initialized) return;
-    try {
-      const saved = await this._deps.getMeta<PersistedPackageMeta | null>(META_KEY_PACOTE, null);
-      if (saved && typeof saved === 'object') {
-        this._persistedMeta = {
-          ...DEFAULT_PERSISTED_META,
-          ...saved,
-          motivosDesatualizacao: Array.isArray(saved.motivosDesatualizacao)
-            ? saved.motivosDesatualizacao
-            : [],
-          ultimasAlteracoesComerciaisResumo: Array.isArray(saved.ultimasAlteracoesComerciaisResumo)
-            ? saved.ultimasAlteracoesComerciaisResumo
-            : [],
-        };
+    const prontos = this._deps.getServicosProntos();
+    if (this._initialized && prontos.catalogo && prontos.isv && prontos.promotores) return;
+    if (this._initPromise) return this._initPromise;
+
+    this._initPromise = (async () => {
+      try {
+        try {
+          const saved = await this._deps.getMeta<PersistedPackageMeta | null>(META_KEY_PACOTE, null);
+          if (saved && typeof saved === 'object') {
+            this._persistedMeta = {
+              ...DEFAULT_PERSISTED_META,
+              ...saved,
+              motivosDesatualizacao: Array.isArray(saved.motivosDesatualizacao)
+                ? saved.motivosDesatualizacao
+                : [],
+              ultimasAlteracoesComerciaisResumo: Array.isArray(
+                saved.ultimasAlteracoesComerciaisResumo
+              )
+                ? saved.ultimasAlteracoesComerciaisResumo
+                : [],
+            };
+          }
+        } catch (e) {
+          console.warn('[LocalPackage] Falha ao carregar metadados do pacote local:', e);
+        }
+
+        this.notify();
+
+        try {
+          await this._deps.initDependencies();
+        } catch (e) {
+          console.warn('[LocalPackage] Falha ao inicializar serviços dependentes:', e);
+        }
+
+        this._initialized = true;
+        this.notify();
+      } finally {
+        this._initPromise = null;
       }
-    } catch (e) {
-      console.warn('[LocalPackage] Falha ao carregar metadados do pacote local:', e);
-    }
-    this._initialized = true;
-    this.notify();
+    })();
+
+    return this._initPromise;
   }
 
   public subscribe(listener: (status: IsvPacoteStatusLocal) => void): () => void {
@@ -533,6 +610,8 @@ export class LocalUpdatePackageService {
   }
 
   public validarCompletudeBasesObrigatorias(): {
+    basesCarregando: boolean;
+    servicosProntos: { catalogo: boolean; isv: boolean; promotores: boolean };
     baseRubOk: boolean;
     baseRubMotivo?: string;
     spcoi007Ok: boolean;
@@ -541,46 +620,74 @@ export class LocalUpdatePackageService {
     saeou060Motivo?: string;
     todasOk: boolean;
   } {
+    const servicosProntos = this._deps.getServicosProntos();
+    const basesCarregando =
+      !servicosProntos.catalogo || !servicosProntos.isv || !servicosProntos.promotores;
+
     const produtos = this._deps.getProdutos();
     const registrosOp = this._deps.getRegistrosOperacionais();
     const fornecedores = this._deps.getFornecedores();
     const industrias = this._deps.getIndustrias();
     const saeou060 = this._deps.getSaeou060();
 
-    const baseRubOk = produtos.length > 0 && registrosOp.length > 0;
-    const baseRubMotivo = baseRubOk
-      ? undefined
-      : produtos.length === 0
-      ? 'BASE RUB sem produtos indexados no catálogo local.'
-      : 'BASE RUB incompleta: os registros operacionais (36 colunas) não estão carregados.';
+    let baseRubOk = false;
+    let baseRubMotivo: string | undefined;
+    if (!servicosProntos.catalogo || !servicosProntos.isv) {
+      baseRubOk = false;
+      baseRubMotivo = 'Carregando BASE RUB (36 colunas) do IndexedDB local...';
+    } else {
+      baseRubOk = produtos.length > 0 && registrosOp.length > 0;
+      baseRubMotivo = baseRubOk
+        ? undefined
+        : produtos.length === 0
+        ? 'BASE RUB sem produtos indexados no catálogo local.'
+        : 'BASE RUB incompleta: os registros operacionais (36 colunas) não estão carregados.';
+    }
 
-    const spcoiSemRazao = fornecedores.some(
-      (f) => !f.cnpj || !f.razao_social || !f.razao_social.trim()
-    );
-    const spcoi007Ok = fornecedores.length > 0 && industrias.length > 0 && !spcoiSemRazao;
-    const spcoi007Motivo = spcoi007Ok
-      ? undefined
-      : fornecedores.length === 0 || industrias.length === 0
-      ? 'SPCOI007 vazia: importe fornecedores e indústrias antes de gerar o pacote.'
-      : 'SPCOI007 incompleta: existem vínculos sem CNPJ ou Razão Social da Indústria.';
+    let spcoi007Ok = false;
+    let spcoi007Motivo: string | undefined;
+    if (!servicosProntos.isv) {
+      spcoi007Ok = false;
+      spcoi007Motivo = 'Carregando fornecedores e indústrias SPCOI007 do IndexedDB local...';
+    } else {
+      const spcoiSemRazao = fornecedores.some(
+        (f) => !f.cnpj || !f.razao_social || !f.razao_social.trim()
+      );
+      spcoi007Ok = fornecedores.length > 0 && industrias.length > 0 && !spcoiSemRazao;
+      spcoi007Motivo = spcoi007Ok
+        ? undefined
+        : fornecedores.length === 0 || industrias.length === 0
+        ? 'SPCOI007 vazia: importe fornecedores e indústrias antes de gerar o pacote.'
+        : 'SPCOI007 incompleta: existem vínculos sem CNPJ ou Razão Social da Indústria.';
+    }
 
-    const saeou060Ok = saeou060.length > 0;
-    const saeou060Motivo = saeou060Ok
-      ? undefined
-      : 'SAEOU060 vazia: importe a planilha de vencimentos/apontamentos SAEOU060.';
+    let saeou060Ok = false;
+    let saeou060Motivo: string | undefined;
+    if (!servicosProntos.catalogo) {
+      saeou060Ok = false;
+      saeou060Motivo = 'Carregando registros SAEOU060 do IndexedDB local...';
+    } else {
+      saeou060Ok = saeou060.length > 0;
+      saeou060Motivo = saeou060Ok
+        ? undefined
+        : 'SAEOU060 ausente (0 registros no IndexedDB). Importe a planilha SAEOU060 na aba SAEOU060 antes de gerar o pacote completo.';
+    }
 
     return {
+      basesCarregando,
+      servicosProntos,
       baseRubOk,
       baseRubMotivo,
       spcoi007Ok,
       spcoi007Motivo,
       saeou060Ok,
       saeou060Motivo,
-      todasOk: baseRubOk && spcoi007Ok && saeou060Ok,
+      todasOk: !basesCarregando && baseRubOk && spcoi007Ok && saeou060Ok,
     };
   }
 
   public getStatusPacote(): IsvPacoteStatusLocal {
+    const detalhesBases = this.validarCompletudeBasesObrigatorias();
     const produtos = this._deps.getProdutos();
     const registrosOp = this._deps.getRegistrosOperacionais();
     const fornecedores = this._deps.getFornecedores();
@@ -594,8 +701,6 @@ export class LocalUpdatePackageService {
       industrias,
       vinculosPromotorIndustria: vincPI,
     });
-
-    const detalhesBases = this.validarCompletudeBasesObrigatorias();
 
     const contagensAtuais: IsvPacoteContagensSnapshot = {
       produtos: produtos.length,
@@ -614,6 +719,8 @@ export class LocalUpdatePackageService {
     return {
       filialId: '172',
       modoAtualizacaoLocalAtivo: isModoAtualizacaoLocalAtivo(),
+      basesCarregando: detalhesBases.basesCarregando,
+      servicosProntos: detalhesBases.servicosProntos,
       versaoInstaladaId: this._persistedMeta.versaoInstaladaId,
       ultimaAtualizacaoIso: this._persistedMeta.ultimaAtualizacaoIso,
       ultimaAtualizacaoTs: this._persistedMeta.ultimaAtualizacaoTs,
@@ -674,6 +781,14 @@ export class LocalUpdatePackageService {
     }
 
     const basesCheck = this.validarCompletudeBasesObrigatorias();
+    if (basesCheck.basesCarregando) {
+      return {
+        sucesso: false,
+        mensagem:
+          'As bases locais ainda estão sendo carregadas do IndexedDB. Aguarde a conclusão antes de gerar o pacote.',
+      };
+    }
+
     if (!basesCheck.todasOk) {
       const faltando = [
         basesCheck.baseRubMotivo,
@@ -683,6 +798,16 @@ export class LocalUpdatePackageService {
       return {
         sucesso: false,
         mensagem: `Não é possível gerar o pacote com bases incompletas: ${faltando.join(' | ')}`,
+      };
+    }
+
+    const produtos = this._deps.getProdutos();
+    const registrosOperacionais = this._deps.getRegistrosOperacionais();
+    if (registrosOperacionais.length === 0) {
+      return {
+        sucesso: false,
+        mensagem:
+          'Registros operacionais completos da BASE RUB (isv_registros_operacionais) não carregados. Não é permitido gerar pacote apenas com resumo de catálogo.',
       };
     }
 
@@ -696,8 +821,6 @@ export class LocalUpdatePackageService {
       const geradoEmTs = agora.getTime();
       const fileName = `ISV_FILIAL_172_ATUALIZACAO_${formatDateYyyyMmDdLocal(agora)}.zip`;
 
-      const produtos = this._deps.getProdutos();
-      const registrosOperacionais = this._deps.getRegistrosOperacionais();
       const fornecedores = this._deps.getFornecedores();
       const industrias = this._deps.getIndustrias();
       const saeou060 = this._deps.getSaeou060();

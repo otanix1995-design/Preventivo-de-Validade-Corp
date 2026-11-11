@@ -289,6 +289,7 @@ class IsvService {
   private _historicoIsv: ResumoImportacaoIsv[] = [];
   private _listeners = new Set<IsvChangeListener>();
   private _isInitialized = false;
+  private _initPromise: Promise<void> | null = null;
 
   // --- ÍNDICES E CACHES DE ALTA VELOCIDADE (O(1)) ---
   private _regOpByCod = new Map<string, RegistroPlanilhaIsv>();
@@ -403,46 +404,57 @@ class IsvService {
 
   public async init(): Promise<void> {
     if (this._isInitialized) return;
+    if (this._initPromise) return this._initPromise;
 
-    try {
-      const [fornec, indus, vincs, ajus, hist, regIsv, histIsv] = await Promise.all([
-        dbGetAll<FornecedorSPCOI007>(STORES.SPCOI007_FORNECEDORES),
-        dbGetAll<Industria>(STORES.INDUSTRIAS),
-        dbGetAll<VinculoPromotorIndustria>(STORES.VINCULOS_PROMOTOR_INDUSTRIA),
-        dbGetAll<SolicitacaoAjusteIsv>(STORES.ISV_SOLICITACOES_AJUSTE),
-        dbGetAll<ResumoImportacaoSPCOI007>(STORES.HISTORICO_IMPORTACOES_SPCOI007),
-        dbGetAll<RegistroPlanilhaIsv>(STORES.ISV_REGISTROS_OPERACIONAIS),
-        dbGetAll<ResumoImportacaoIsv>(STORES.HISTORICO_IMPORTACOES_ISV),
-      ]);
-
-      this._fornecedores = fornec || [];
-      this._industrias = indus || [];
-      this._vinculos = vincs || [];
-      this._solicitacoesAjuste = ajus || [];
-      this._historicoSpcoi = hist || [];
-      this._registrosIsvOperacional = regIsv || [];
-      this._historicoIsv = histIsv || [];
-
-      // Se a base de indústrias estiver vazia, verificar se não foi limpa ou gerenciada por pacote antes de semear
-      if (this._industrias.length === 0 && this._fornecedores.length === 0) {
-        const [metaSpcoi, metaPacote] = await Promise.all([
-          dbGetMeta<any>('meta_spcoi_sync', null),
-          dbGetMeta<any>('meta_pacote_atualizacao_isv', null),
+    this._initPromise = (async () => {
+      try {
+        const [fornec, indus, vincs, ajus, hist, regIsv, histIsv] = await Promise.all([
+          dbGetAll<FornecedorSPCOI007>(STORES.SPCOI007_FORNECEDORES),
+          dbGetAll<Industria>(STORES.INDUSTRIAS),
+          dbGetAll<VinculoPromotorIndustria>(STORES.VINCULOS_PROMOTOR_INDUSTRIA),
+          dbGetAll<SolicitacaoAjusteIsv>(STORES.ISV_SOLICITACOES_AJUSTE),
+          dbGetAll<ResumoImportacaoSPCOI007>(STORES.HISTORICO_IMPORTACOES_SPCOI007),
+          dbGetAll<RegistroPlanilhaIsv>(STORES.ISV_REGISTROS_OPERACIONAIS),
+          dbGetAll<ResumoImportacaoIsv>(STORES.HISTORICO_IMPORTACOES_ISV),
         ]);
-        if (metaSpcoi?.status === 'LIMPA_AGUARDANDO_IMPORTACAO' || metaPacote?.versaoInstaladaId) {
-          console.log('[IsvService] Base SPCOI007 gerenciada ou aguardando importação. Não injetando dados de demonstração.');
-        } else {
-          await this._seedInitialData();
-        }
-      }
 
-      this._rebuildIndices();
-      this._isInitialized = true;
-    } catch (err) {
-      console.warn('Erro ao carregar dados do ISV do IndexedDB:', err);
-      this._rebuildIndices();
-      this._isInitialized = true;
-    }
+        this._fornecedores = fornec || [];
+        this._industrias = indus || [];
+        this._vinculos = vincs || [];
+        this._solicitacoesAjuste = ajus || [];
+        this._historicoSpcoi = hist || [];
+        this._registrosIsvOperacional = regIsv || [];
+        this._historicoIsv = histIsv || [];
+
+        // Se a base de indústrias e fornecedores estiver vazia (e sem registros operacionais), verificar se não foi limpa ou gerenciada por pacote antes de semear
+        if (
+          this._industrias.length === 0 &&
+          this._fornecedores.length === 0 &&
+          this._registrosIsvOperacional.length === 0
+        ) {
+          const [metaSpcoi, metaPacote] = await Promise.all([
+            dbGetMeta<any>('meta_spcoi_sync', null),
+            dbGetMeta<any>('meta_pacote_atualizacao_isv', null),
+          ]);
+          if (metaSpcoi?.status === 'LIMPA_AGUARDANDO_IMPORTACAO' || metaPacote?.versaoInstaladaId) {
+            console.log('[IsvService] Base SPCOI007 gerenciada ou aguardando importação. Não injetando dados de demonstração.');
+          } else {
+            await this._seedInitialData();
+          }
+        }
+
+        this._rebuildIndices();
+        this._isInitialized = true;
+        this._notify();
+      } catch (err) {
+        console.warn('Erro ao carregar dados do ISV do IndexedDB:', err);
+        this._rebuildIndices();
+        this._isInitialized = true;
+        this._notify();
+      }
+    })();
+
+    return this._initPromise;
   }
 
   public subscribe(listener: IsvChangeListener): () => void {

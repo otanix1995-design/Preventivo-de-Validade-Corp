@@ -95,7 +95,11 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
   }, []);
 
   const permAdmin = localUpdatePackageService.verificarPermissaoExportacaoAdmin();
-  const podeExportar = permAdmin.permitido && statusPacote.basesObrigatoriasOk && !emOperacao;
+  const podeExportar =
+    !statusPacote.basesCarregando &&
+    permAdmin.permitido &&
+    statusPacote.basesObrigatoriasOk &&
+    !emOperacao;
 
   const handleLoginGerencia = async () => {
     setFeedback(null);
@@ -218,7 +222,12 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
     setProgressoTexto(null);
   };
 
-  const { contagensAtuais, detalhesBasesObrigatorias } = statusPacote;
+  const { contagensAtuais, detalhesBasesObrigatorias, basesCarregando, servicosProntos } =
+    statusPacote;
+  const rubPronto = servicosProntos.catalogo && servicosProntos.isv;
+  const spcoiPronto = servicosProntos.isv;
+  const saeouPronto = servicosProntos.catalogo;
+  const comercialPronto = servicosProntos.isv && servicosProntos.promotores;
 
   return (
     <section
@@ -258,6 +267,76 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
       </div>
 
       <div className="p-5 space-y-4">
+        {/* Banner CARREGANDO enquanto os serviços IndexedDB inicializam */}
+        {basesCarregando && (
+          <div
+            id="banner-pacote-carregando"
+            className="bg-blue-50 border border-blue-300 rounded-lg p-3.5 text-xs text-blue-950 flex items-start gap-2.5"
+          >
+            <Loader2 className="w-4 h-4 text-blue-700 animate-spin shrink-0 mt-0.5" />
+            <div className="space-y-1.5 flex-1">
+              <div className="font-black uppercase text-blue-900">
+                CARREGANDO BASES LOCAIS DO INDEXEDDB...
+              </div>
+              <p className="text-[11px] text-blue-900">
+                Recuperando registros operacionais completos da BASE RUB, fornecedores SPCOI007, SAEOU060, promotores e vínculos locais antes de calcular os indicadores do pacote.
+              </p>
+              <div className="flex flex-wrap gap-2 text-[10px] font-bold uppercase">
+                <span
+                  className={`px-2 py-0.5 rounded border ${
+                    servicosProntos.catalogo
+                      ? 'bg-emerald-100 border-emerald-300 text-emerald-900'
+                      : 'bg-white border-blue-300 text-blue-800'
+                  }`}
+                >
+                  {servicosProntos.catalogo ? 'Catálogo/SAEOU: Pronto' : 'Catálogo/SAEOU: Carregando'}
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded border ${
+                    servicosProntos.isv
+                      ? 'bg-emerald-100 border-emerald-300 text-emerald-900'
+                      : 'bg-white border-blue-300 text-blue-800'
+                  }`}
+                >
+                  {servicosProntos.isv ? 'BASE RUB Op./SPCOI007: Pronto' : 'BASE RUB Op./SPCOI007: Carregando'}
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded border ${
+                    servicosProntos.promotores
+                      ? 'bg-emerald-100 border-emerald-300 text-emerald-900'
+                      : 'bg-white border-blue-300 text-blue-800'
+                  }`}
+                >
+                  {servicosProntos.promotores ? 'Promotores/Vínculos: Pronto' : 'Promotores/Vínculos: Carregando'}
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Aviso claro quando BASE RUB e SPCOI007 estão carregadas e apenas SAEOU060 está ausente */}
+        {!basesCarregando &&
+          detalhesBasesObrigatorias.baseRubOk &&
+          detalhesBasesObrigatorias.spcoi007Ok &&
+          !detalhesBasesObrigatorias.saeou060Ok && (
+            <div
+              id="banner-aviso-saeou060-ausente"
+              className="bg-amber-50 border border-amber-300 rounded-lg p-3.5 text-xs text-amber-950 flex items-start gap-2.5"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-black uppercase text-amber-900">
+                  Importe a planilha SAEOU060 antes de gerar o pacote completo
+                </div>
+                <p className="text-[11px] text-amber-950 leading-snug">
+                  Os dados locais de <strong>BASE RUB ({contagensAtuais.registrosOperacionais.toLocaleString('pt-BR')} registros operacionais)</strong>,{' '}
+                  <strong>SPCOI007 ({contagensAtuais.fornecedores.toLocaleString('pt-BR')} fornecedores / {contagensAtuais.industrias.toLocaleString('pt-BR')} indústrias)</strong> e{' '}
+                  <strong>Promotores ({contagensAtuais.promotores.toLocaleString('pt-BR')})</strong> já foram carregados do IndexedDB. Porém, a <strong>SAEOU060 está com 0 registros</strong> no armazenamento local — selecione a aba <strong>SAEOU060</strong> acima e importe o arquivo oficial antes de gerar o pacote <code className="font-mono">.zip</code>.
+                </p>
+              </div>
+            </div>
+          )}
+
         {/* Aviso de Atualização Pronta (Candidata) após alterações locais */}
         {statusPacote.atualizacaoDisponivel && (
           <div
@@ -285,22 +364,32 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
           <div
             className={`rounded-lg p-3 border ${
-              detalhesBasesObrigatorias.baseRubOk
+              !rubPronto
+                ? 'bg-blue-50 border-blue-200 text-blue-950'
+                : detalhesBasesObrigatorias.baseRubOk
                 ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
                 : 'bg-amber-50 border-amber-300 text-amber-950'
             }`}
           >
             <div className="flex items-center justify-between font-black uppercase">
               <span>1. BASE RUB (36 Col.)</span>
-              {detalhesBasesObrigatorias.baseRubOk ? (
+              {!rubPronto ? (
+                <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+              ) : detalhesBasesObrigatorias.baseRubOk ? (
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
               ) : (
                 <AlertTriangle className="w-4 h-4 text-amber-600" />
               )}
             </div>
             <div className="mt-1 font-mono text-[11px] font-bold">
-              {contagensAtuais.produtos.toLocaleString('pt-BR')} produtos /{' '}
-              {contagensAtuais.registrosOperacionais.toLocaleString('pt-BR')} op.
+              {!rubPronto ? (
+                'CARREGANDO DO INDEXEDDB...'
+              ) : (
+                <>
+                  {contagensAtuais.produtos.toLocaleString('pt-BR')} produtos /{' '}
+                  {contagensAtuais.registrosOperacionais.toLocaleString('pt-BR')} op.
+                </>
+              )}
             </div>
             {detalhesBasesObrigatorias.baseRubMotivo && (
               <p className="text-[11px] mt-1">{detalhesBasesObrigatorias.baseRubMotivo}</p>
@@ -309,22 +398,32 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
 
           <div
             className={`rounded-lg p-3 border ${
-              detalhesBasesObrigatorias.spcoi007Ok
+              !spcoiPronto
+                ? 'bg-blue-50 border-blue-200 text-blue-950'
+                : detalhesBasesObrigatorias.spcoi007Ok
                 ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
                 : 'bg-amber-50 border-amber-300 text-amber-950'
             }`}
           >
             <div className="flex items-center justify-between font-black uppercase">
               <span>2. SPCOI007 (Fornec.)</span>
-              {detalhesBasesObrigatorias.spcoi007Ok ? (
+              {!spcoiPronto ? (
+                <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+              ) : detalhesBasesObrigatorias.spcoi007Ok ? (
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
               ) : (
                 <AlertTriangle className="w-4 h-4 text-amber-600" />
               )}
             </div>
             <div className="mt-1 font-mono text-[11px] font-bold">
-              {contagensAtuais.fornecedores.toLocaleString('pt-BR')} forn. /{' '}
-              {contagensAtuais.industrias.toLocaleString('pt-BR')} indústrias
+              {!spcoiPronto ? (
+                'CARREGANDO DO INDEXEDDB...'
+              ) : (
+                <>
+                  {contagensAtuais.fornecedores.toLocaleString('pt-BR')} forn. /{' '}
+                  {contagensAtuais.industrias.toLocaleString('pt-BR')} indústrias
+                </>
+              )}
             </div>
             {detalhesBasesObrigatorias.spcoi007Motivo && (
               <p className="text-[11px] mt-1">{detalhesBasesObrigatorias.spcoi007Motivo}</p>
@@ -333,21 +432,27 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
 
           <div
             className={`rounded-lg p-3 border ${
-              detalhesBasesObrigatorias.saeou060Ok
+              !saeouPronto
+                ? 'bg-blue-50 border-blue-200 text-blue-950'
+                : detalhesBasesObrigatorias.saeou060Ok
                 ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
                 : 'bg-amber-50 border-amber-300 text-amber-950'
             }`}
           >
             <div className="flex items-center justify-between font-black uppercase">
               <span>3. SAEOU060</span>
-              {detalhesBasesObrigatorias.saeou060Ok ? (
+              {!saeouPronto ? (
+                <Loader2 className="w-4 h-4 text-blue-600 animate-spin" />
+              ) : detalhesBasesObrigatorias.saeou060Ok ? (
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
               ) : (
                 <AlertTriangle className="w-4 h-4 text-amber-600" />
               )}
             </div>
             <div className="mt-1 font-mono text-[11px] font-bold">
-              {contagensAtuais.saeou060.toLocaleString('pt-BR')} registros
+              {!saeouPronto
+                ? 'CARREGANDO DO INDEXEDDB...'
+                : `${contagensAtuais.saeou060.toLocaleString('pt-BR')} registros`}
             </div>
             {detalhesBasesObrigatorias.saeou060Motivo && (
               <p className="text-[11px] mt-1">{detalhesBasesObrigatorias.saeou060Motivo}</p>
@@ -358,12 +463,12 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
         {/* Grid de Quantidades Consolidadas */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-center">
           {[
-            { label: 'Produtos', valor: contagensAtuais.produtos },
-            { label: 'Fornecedores', valor: contagensAtuais.fornecedores },
-            { label: 'Indústrias', valor: contagensAtuais.industrias },
-            { label: 'Promotores', valor: contagensAtuais.promotores },
-            { label: 'Agências', valor: contagensAtuais.agencias },
-            { label: 'Vínculos Comerc.', valor: contagensAtuais.vinculos },
+            { label: 'Produtos', valor: contagensAtuais.produtos, pronto: servicosProntos.catalogo },
+            { label: 'Fornecedores', valor: contagensAtuais.fornecedores, pronto: spcoiPronto },
+            { label: 'Indústrias', valor: contagensAtuais.industrias, pronto: spcoiPronto },
+            { label: 'Promotores', valor: contagensAtuais.promotores, pronto: servicosProntos.promotores },
+            { label: 'Agências', valor: contagensAtuais.agencias, pronto: comercialPronto },
+            { label: 'Vínculos Comerc.', valor: contagensAtuais.vinculos, pronto: comercialPronto },
           ].map((stat) => (
             <div
               key={stat.label}
@@ -373,7 +478,7 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
                 {stat.label}
               </span>
               <span className="text-base font-black font-mono tabular-nums text-slate-900">
-                {stat.valor.toLocaleString('pt-BR')}
+                {stat.pronto ? stat.valor.toLocaleString('pt-BR') : 'CARREGANDO'}
               </span>
             </div>
           ))}
@@ -443,20 +548,29 @@ export const AtualizacaoPacoteIsvSection: React.FC<AtualizacaoPacoteIsvSectionPr
             onClick={handleBaixarAtualizacaoIsv}
             disabled={!podeExportar}
             title={
-              !permAdmin.permitido
+              statusPacote.basesCarregando
+                ? 'Aguarde o carregamento das bases locais do IndexedDB.'
+                : !permAdmin.permitido
                 ? permAdmin.motivo
                 : !statusPacote.basesObrigatoriasOk
-                ? 'Importe primeiro as 3 bases obrigatórias (BASE RUB, SPCOI007 e SAEOU060).'
+                ? detalhesBasesObrigatorias.saeou060Motivo ||
+                  'Importe primeiro as 3 bases obrigatórias (BASE RUB, SPCOI007 e SAEOU060).'
                 : 'Gerar e baixar o arquivo único ISV_FILIAL_172_ATUALIZACAO_YYYY-MM-DD.zip'
             }
             className="flex-1 py-3 px-4 rounded-xl bg-orange-600 hover:bg-orange-700 disabled:bg-slate-200 disabled:text-slate-500 text-white font-black uppercase tracking-wider text-xs shadow-sm flex items-center justify-center gap-2 transition-all cursor-pointer disabled:cursor-not-allowed"
           >
-            {emOperacao && progressoTexto?.toLowerCase().includes('empacotando') ? (
+            {statusPacote.basesCarregando ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : emOperacao && progressoTexto?.toLowerCase().includes('empacotando') ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
               <Download className="w-4 h-4 stroke-[2.5]" />
             )}
-            <span>BAIXAR ATUALIZAÇÃO ISV (.ZIP)</span>
+            <span>
+              {statusPacote.basesCarregando
+                ? 'CARREGANDO BASES LOCAIS...'
+                : 'BAIXAR ATUALIZAÇÃO ISV (.ZIP)'}
+            </span>
           </button>
 
           <input
