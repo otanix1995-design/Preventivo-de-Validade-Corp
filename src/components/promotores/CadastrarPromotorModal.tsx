@@ -1,14 +1,17 @@
 import {
   Check,
   CheckSquare,
+  Plus,
   ShieldCheck,
   Square,
   UserPlus,
   X
 } from 'lucide-react';
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { normalizarChaveAgencia } from '../../services/agenciaNormalizer';
 import { promotorService } from '../../services/promotorService';
 import {
+  AgenciaComercial,
   FILIAIS_DISPONIVEIS,
   PERMISSOES_PADRAO_PROMOTOR,
   PermissoesPromotor,
@@ -21,15 +24,20 @@ interface CadastrarPromotorModalProps {
   isOpen: boolean;
   onClose: () => void;
   onPromotorCadastrado: (promotor: Promotor) => void;
+  defaultAgenciaId?: string;
 }
 
 export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
   isOpen,
   onClose,
   onPromotorCadastrado,
+  defaultAgenciaId,
 }) => {
   const [nome, setNome] = useState('');
-  const [agenciaNome, setAgenciaNome] = useState('');
+  const [agencias, setAgencias] = useState<AgenciaComercial[]>([]);
+  const [agenciaId, setAgenciaId] = useState('');
+  const [criarNovaAgencia, setCriarNovaAgencia] = useState(false);
+  const [novaAgenciaNome, setNovaAgenciaNome] = useState('');
   const [matricula, setMatricula] = useState('');
   const [filialId, setFilialId] = useState('172');
   const [setores, setSetores] = useState<SetorPromotor[]>(['FRIOS']);
@@ -38,6 +46,38 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const sincronizarAgencias = () => {
+      const lista = promotorService.getAgencias();
+      setAgencias(lista);
+      setAgenciaId((prev) => {
+        if (defaultAgenciaId && lista.some((a) => a.agenciaId === defaultAgenciaId)) {
+          return defaultAgenciaId;
+        }
+        if (prev && lista.some((a) => a.agenciaId === prev)) return prev;
+        return lista[0]?.agenciaId || '';
+      });
+      if (lista.length === 0 && !defaultAgenciaId) {
+        setCriarNovaAgencia(true);
+      } else if (defaultAgenciaId) {
+        setCriarNovaAgencia(false);
+      }
+    };
+
+    promotorService.init().then(sincronizarAgencias);
+    const unsub = promotorService.subscribe(sincronizarAgencias);
+    setErro(null);
+    return () => unsub();
+  }, [isOpen, defaultAgenciaId]);
+
+  const agenciaDuplicadaDetectada = useMemo(() => {
+    if (!criarNovaAgencia || !novaAgenciaNome.trim()) return null;
+    const chave = normalizarChaveAgencia(novaAgenciaNome);
+    if (!chave) return null;
+    return agencias.find((a) => normalizarChaveAgencia(a.nome) === chave) || null;
+  }, [criarNovaAgencia, novaAgenciaNome, agencias]);
 
   if (!isOpen) return null;
 
@@ -80,9 +120,19 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
       return;
     }
 
-    const agenciaFormatada = agenciaNome.trim();
-    if (!agenciaFormatada) {
-      setErro('A Agência / Empresa responsável pelo promotor é obrigatória.');
+    if (criarNovaAgencia) {
+      if (!novaAgenciaNome.trim()) {
+        setErro('Informe o nome da nova agência ou selecione uma existente.');
+        return;
+      }
+      if (agenciaDuplicadaDetectada) {
+        setErro(
+          `A agência "${agenciaDuplicadaDetectada.nome}" já existe. Selecione-a na lista para evitar duplicidade.`
+        );
+        return;
+      }
+    } else if (!agenciaId) {
+      setErro('Selecione uma Agência / Empresa responsável ou clique em "Criar Nova Agência".');
       return;
     }
 
@@ -98,9 +148,17 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
 
     setIsSubmitting(true);
     try {
+      let agenciaIdFinal = agenciaId;
+      if (criarNovaAgencia) {
+        const criada = await promotorService.cadastrarAgencia({
+          nome: novaAgenciaNome.trim(),
+        });
+        agenciaIdFinal = criada.agenciaId;
+      }
+
       const novo = await promotorService.cadastrarPromotor({
         nome: nomeFormatado,
-        agenciaNome: agenciaFormatada,
+        agenciaId: agenciaIdFinal,
         matricula: matricula.trim() || undefined,
         filialId: filialSelecionada.filialId,
         filialNome: filialSelecionada.filialNome,
@@ -110,7 +168,8 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
 
       // Reset form
       setNome('');
-      setAgenciaNome('');
+      setNovaAgenciaNome('');
+      setCriarNovaAgencia(false);
       setMatricula('');
       setSetores(['FRIOS']);
       setPermissoes({ ...PERMISSOES_PADRAO_PROMOTOR });
@@ -179,8 +238,9 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-1 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+            className="p-1 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -188,7 +248,7 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
 
         {erro && (
           <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold rounded-xl flex items-center gap-2">
-            <span>⚠ {erro}</span>
+            <span>{erro}</span>
           </div>
         )}
 
@@ -209,18 +269,56 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
           </div>
 
           {/* 2. AGÊNCIA / EMPRESA */}
-          <div>
-            <label className="block text-xs font-black text-gray-700 uppercase tracking-wider mb-1">
-              AGÊNCIA / EMPRESA <span className="text-rose-600">*</span>
-            </label>
-            <input
-              type="text"
-              value={agenciaNome}
-              onChange={(e) => setAgenciaNome(e.target.value)}
-              placeholder="Ex: Agência responsável pelo promotor"
-              required
-              className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 placeholder:text-gray-400 transition-all outline-hidden"
-            />
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label className="block text-xs font-black text-gray-700 uppercase tracking-wider">
+                AGÊNCIA / EMPRESA <span className="text-rose-600">*</span>
+              </label>
+              {agencias.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCriarNovaAgencia((prev) => !prev);
+                    setNovaAgenciaNome('');
+                    setErro(null);
+                  }}
+                  className="text-[11px] font-black uppercase text-blue-700 hover:underline flex items-center gap-1 cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>{criarNovaAgencia ? 'Selecionar Agência Existente' : 'Criar Nova Agência'}</span>
+                </button>
+              )}
+            </div>
+
+            {!criarNovaAgencia && agencias.length > 0 ? (
+              <select
+                value={agenciaId}
+                onChange={(e) => setAgenciaId(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 transition-all outline-hidden bg-white"
+              >
+                <option value="">Selecione uma agência cadastrada...</option>
+                {agencias.map((ag) => (
+                  <option key={ag.agenciaId} value={ag.agenciaId}>
+                    {ag.nome}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="space-y-1">
+                <input
+                  type="text"
+                  value={novaAgenciaNome}
+                  onChange={(e) => setNovaAgenciaNome(e.target.value)}
+                  placeholder="Ex: SEARA, AGÊNCIA LÍDER..."
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-gray-300 focus:border-blue-600 focus:ring-2 focus:ring-blue-100 text-sm font-semibold text-gray-900 placeholder:text-gray-400 transition-all outline-hidden"
+                />
+                {agenciaDuplicadaDetectada && (
+                  <p className="text-[11px] text-rose-700 font-bold">
+                    Já existe a agência &ldquo;{agenciaDuplicadaDetectada.nome}&rdquo;. Selecione-a na lista para evitar duplicidade.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           {/* 3. IDENTIFICAÇÃO / MATRÍCULA & STATUS INICIAL */}
@@ -243,7 +341,7 @@ export const CadastrarPromotorModal: React.FC<CadastrarPromotorModalProps> = ({
                 STATUS INICIAL
               </label>
               <div className="px-3.5 py-2.5 rounded-xl bg-amber-50 border border-amber-200 text-xs font-black text-amber-900 uppercase flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                <span className="w-2 h-2 rounded-full bg-amber-500" />
                 <span>PENDENTE DE VÍNCULO</span>
               </div>
             </div>

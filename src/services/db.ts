@@ -4,7 +4,7 @@
  */
 
 const DB_NAME = 'ControleVencimentosDB_v2';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 
 export const STORES = {
   PRODUTOS: 'produtos',
@@ -26,6 +26,7 @@ export const STORES = {
   ISV_REGISTROS_OPERACIONAIS: 'isv_registros_operacionais',
   HISTORICO_IMPORTACOES_ISV: 'historico_importacoes_isv',
   PACOTE_STAGING: 'pacote_staging',
+  AGENCIAS: 'agencias',
 } as const;
 
 let dbPromise: Promise<IDBDatabase> | null = null;
@@ -100,6 +101,9 @@ export function getDB(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORES.PACOTE_STAGING)) {
         db.createObjectStore(STORES.PACOTE_STAGING, { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains(STORES.AGENCIAS)) {
+        db.createObjectStore(STORES.AGENCIAS, { keyPath: 'agenciaId' });
       }
     };
 
@@ -179,6 +183,8 @@ export async function dbPutAll<T>(storeName: string, items: T[], clearFirst = tr
             (item as any).operationId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
           } else if (keyPath === 'cnpj') {
             (item as any).cnpj = (item as any).cnpj || `00000000000000`;
+          } else if (keyPath === 'agenciaId') {
+            (item as any).agenciaId = `ag_${Date.now()}_${i}_${Math.random().toString(36).substring(2, 7)}`;
           }
         }
       }
@@ -228,6 +234,8 @@ export async function dbPut<T>(storeName: string, item: T): Promise<void> {
           (item as any).operationId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         } else if (keyPath === 'cnpj') {
           (item as any).cnpj = (item as any).cnpj || `00000000000000`;
+        } else if (keyPath === 'agenciaId') {
+          (item as any).agenciaId = `ag_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
         }
       }
     }
@@ -245,7 +253,13 @@ export async function dbPut<T>(storeName: string, item: T): Promise<void> {
 }
 
 export async function dbDelete(storeName: string, key: IDBValidKey): Promise<void> {
-  const db = await getDB();
+  let db: IDBDatabase;
+  try {
+    db = await getDB();
+  } catch {
+    return; // Fallback seguro para ambientes sem IndexedDB (Node / SSR / Testes)
+  }
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
@@ -257,7 +271,13 @@ export async function dbDelete(storeName: string, key: IDBValidKey): Promise<voi
 }
 
 export async function dbClear(storeName: string): Promise<void> {
-  const db = await getDB();
+  let db: IDBDatabase;
+  try {
+    db = await getDB();
+  } catch {
+    return; // Fallback seguro para ambientes sem IndexedDB (Node / SSR / Testes)
+  }
+
   return new Promise((resolve, reject) => {
     const tx = db.transaction(storeName, 'readwrite');
     const store = tx.objectStore(storeName);
@@ -322,4 +342,73 @@ export async function dbSetMeta<T>(key: string, value: T): Promise<void> {
   } catch (err) {
     console.error(`Erro ao salvar metadado ${key}:`, err);
   }
+}
+
+export type AtomicBatchOp =
+  | { storeName: string; type: 'putAll'; items: any[]; clearFirst?: boolean }
+  | { storeName: string; type: 'put'; item: any }
+  | { storeName: string; type: 'delete'; key: IDBValidKey }
+  | { storeName: string; type: 'setMeta'; key: string; value: any };
+
+/**
+ * Executa múltiplas gravações em uma única transação readwrite atômica do IndexedDB.
+ * Se qualquer operação falhar, toda a transação é abortada pelo motor ACID do IndexedDB.
+ */
+export async function dbRunAtomicBatch(operations: AtomicBatchOp[]): Promise<void> {
+  if (!operations || operations.length === 0) return;
+
+  let db: IDBDatabase;
+  try {
+    db = await getDB();
+  } catch {
+    return; // Fallback seguro para ambientes sem IndexedDB (Node / Testes)
+  }
+
+  const storeNames = Array.from(
+    new Set(
+      operations.map((op) => (op.type === 'setMeta' ? STORES.METADADOS : op.storeName))
+    )
+  );
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(storeNames, 'readwrite');
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('Erro na transação atômica IndexedDB.'));
+    tx.onabort = () => reject(tx.error || new Error('Transação atômica IndexedDB abortada.'));
+
+    try {
+      for (const op of operations) {
+        if (op.type === 'setMeta') {
+          const metaStore = tx.objectStore(STORES.METADADOS);
+          metaStore.put({ key: op.key, value: op.value });
+        } else if (op.type === 'putAll') {
+          const store = tx.objectStore(op.storeName);
+          if (op.clearFirst !== false) {
+            store.clear();
+          }
+          for (const item of op.items) {
+            if (item && typeof item === 'object') {
+              store.put(item);
+            }
+          }
+        } else if (op.type === 'put') {
+          const store = tx.objectStore(op.storeName);
+          if (op.item && typeof op.item === 'object') {
+            store.put(op.item);
+          }
+        } else if (op.type === 'delete') {
+          const store = tx.objectStore(op.storeName);
+          store.delete(op.key);
+        }
+      }
+    } catch (err) {
+      try {
+        tx.abort();
+      } catch {
+        // ignore abort error
+      }
+      reject(err);
+    }
+  });
 }

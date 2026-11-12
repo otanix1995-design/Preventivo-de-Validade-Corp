@@ -17,6 +17,7 @@ import {
   FileSpreadsheet,
   FileText,
   Filter,
+  Link as LinkIcon,
   Package,
   Plus,
   RefreshCw,
@@ -27,7 +28,7 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { formatarMoedaBR } from '../services/deviceId';
 import { gerarRelatorioEntidadeIsvA4Pdf, gerarRelatorioIsvA4Pdf } from '../services/isvPdfService';
 import { isvService } from '../services/isvService';
@@ -43,6 +44,7 @@ import {
   SETORES_OPERACIONAIS_CONFIG,
   SetorOperacionalIsv,
 } from '../types';
+import { ModalGerenciarVinculoIndustria } from './promotores/ModalGerenciarVinculoIndustria';
 
 interface DashboardViewProps {
   metadados: MetadadosBase;
@@ -87,7 +89,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     ordenacao: 'MAIOR_VALOR',
   });
 
-  // Modais de Drilldown
+  // Modais de Drilldown & Vinculação Bidirecional
   const [modalProduto, setModalProduto] = useState<ItemIsv | null>(null);
   const [modalIndustria, setModalIndustria] = useState<{
     cnpj: string;
@@ -103,16 +105,38 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     itens: ItemIsv[];
     valorTotal: number;
   } | null>(null);
+  const [modalGerenciarVinculo, setModalGerenciarVinculo] = useState<{
+    cnpj: string;
+    nome: string;
+    razaoSocial?: string;
+  } | null>(null);
+  const [filtroRankingIndustria, setFiltroRankingIndustria] = useState<
+    'TODAS' | 'COM_PROMOTOR' | 'SEM_PROMOTOR'
+  >('TODAS');
+  const [buscaRankingIndustria, setBuscaRankingIndustria] = useState('');
+  const [syncTick, setSyncTick] = useState(0);
 
   // Estados de busca interna e paginação para os modais
   const [buscaModal, setBuscaModal] = useState('');
   const [paginaModal, setPaginaModal] = useState(1);
   const ITENS_POR_PAGINA_MODAL = 10;
 
+  useEffect(() => {
+    Promise.all([isvService.init(), promotorService.init()]).then(() => {
+      setSyncTick((t) => t + 1);
+    });
+    const unsubIsv = isvService.subscribe(() => setSyncTick((t) => t + 1));
+    const unsubProm = promotorService.subscribe(() => setSyncTick((t) => t + 1));
+    return () => {
+      unsubIsv();
+      unsubProm();
+    };
+  }, []);
+
   // Carregar todos os itens ISV através do serviço otimizado (O(1) caches)
   const itensIsvBrutos = useMemo(() => {
     return isvService.getItensIsv(produtos);
-  }, [produtos]);
+  }, [produtos, syncTick]);
 
   // Aplicar filtros ativos aos itens
   const itensFiltrados = useMemo(() => {
@@ -120,8 +144,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }, [itensIsvBrutos, filtros]);
 
   // Listas para os filtros selects
-  const industrias = useMemo(() => isvService.getIndustrias(), []);
-  const promotores = useMemo(() => promotorService.getPromotores(), []);
+  const industrias = useMemo(() => isvService.getIndustrias(), [syncTick]);
+  const promotores = useMemo(() => promotorService.getPromotores(), [syncTick]);
   const agenciasDisponiveis = useMemo(() => {
     const set = new Set<string>();
     itensIsvBrutos.forEach((it) => {
@@ -129,13 +153,53 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         if (ag && ag.trim()) set.add(ag.trim());
       });
     });
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [itensIsvBrutos]);
+    promotorService.getAgencias().forEach((ag) => {
+      if (ag.nome && ag.nome.trim()) set.add(ag.nome.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [itensIsvBrutos, syncTick]);
 
   // 1. DADOS AGREGADOS DO DASHBOARD (O(1) instantâneo para filtros padrão ou Single-Pass O(N) unificado)
-  const { indicadores, top10Produtos, top10Industrias, top10Agencias } = useMemo(() => {
+  const {
+    indicadores,
+    top10Produtos,
+    top10Industrias,
+    rankingIndustriasTodos,
+    top10Agencias,
+  } = useMemo(() => {
     return isvService.getDashboardData(itensFiltrados, filtros);
-  }, [itensFiltrados, filtros]);
+  }, [itensFiltrados, filtros, syncTick]);
+
+  const industriasRankingExibidas = useMemo(() => {
+    const q = buscaRankingIndustria.trim().toLowerCase();
+    const base = rankingIndustriasTodos || top10Industrias;
+    if (filtroRankingIndustria === 'TODAS' && !q) {
+      return top10Industrias;
+    }
+    return base
+      .filter((ind) => {
+        if (filtroRankingIndustria === 'COM_PROMOTOR' && !ind.temPromotor) return false;
+        if (filtroRankingIndustria === 'SEM_PROMOTOR' && ind.temPromotor) return false;
+        if (q) {
+          const matchNome = ind.nome.toLowerCase().includes(q);
+          const matchCnpj =
+            ind.cnpj.includes(q) || (ind.cnpjFormatado || '').includes(q);
+          const matchProm = (ind.promotoresVinculados || []).some(
+            (p) =>
+              p.promotorNome.toLowerCase().includes(q) ||
+              p.agenciaNome.toLowerCase().includes(q)
+          );
+          return matchNome || matchCnpj || matchProm;
+        }
+        return true;
+      })
+      .slice(0, 20);
+  }, [
+    rankingIndustriasTodos,
+    top10Industrias,
+    filtroRankingIndustria,
+    buscaRankingIndustria,
+  ]);
 
   // Resumo de Vencimentos (preservado para acesso rápido)
   const vencimentosResumo = useMemo(() => {
@@ -330,11 +394,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <Building2 className="w-4 h-4 stroke-[2.5]" />
             </div>
           </div>
-          <div className="text-lg sm:text-2xl font-black text-purple-900 font-mono tracking-tight">
+          <div className="text-lg sm:text-2xl font-black text-purple-900 font-mono tracking-tight tabular-nums">
             {indicadores.totalIndustrias} <span className="text-xs font-bold text-slate-400">indústrias</span>
           </div>
-          <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">
-            Com produtos filtrados
+          <p className="text-[10px] text-slate-500 font-bold uppercase mt-1 font-mono tabular-nums">
+            {indicadores.industriasComPromotor ?? 0} c/ promotor · {indicadores.industriasSemPromotor ?? 0} s/ promotor
           </p>
         </div>
 
@@ -517,6 +581,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           >
             LOJA (CR. / OUTROS)
           </button>
+        </div>
+
+        {/* Linha 2.5: Situação de Vínculo Promotor ↔ Indústria */}
+        <div className="pt-1.5 flex items-center gap-1.5 overflow-x-auto text-xs pb-1 border-t border-slate-100">
+          <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
+            Vínculo:
+          </span>
+          {[
+            { id: 'TODOS' as const, label: 'Todas as Indústrias' },
+            { id: 'COM_PROMOTOR' as const, label: 'Com Promotor' },
+            { id: 'SEM_PROMOTOR' as const, label: 'Sem Promotor Vinculado' },
+            { id: 'MULTIPLOS_CNPJS' as const, label: 'Múltiplos CNPJs' },
+          ].map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setFiltros((prev) => ({ ...prev, situacaoVinculo: opt.id }))}
+              className={`px-2.5 py-1 rounded-md font-black text-[11px] uppercase transition-colors shrink-0 cursor-pointer ${
+                filtros.situacaoVinculo === opt.id
+                  ? opt.id === 'SEM_PROMOTOR'
+                    ? 'bg-amber-600 text-white'
+                    : 'bg-slate-900 text-white'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
 
         {/* Linha 3: DIAS SEM VENDA (Atalhos + Custom + Mínimo/Exato) */}
@@ -751,73 +843,156 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
 
-        {/* GRÁFICO 2 — INDÚSTRIAS COM MAIOR ISV */}
+        {/* GRÁFICO 2 — INDÚSTRIAS COM MAIOR ISV + VINCULAÇÃO BIDIRECIONAL */}
         <div className="bg-white rounded-2xl border border-slate-200 shadow-xs p-4 flex flex-col justify-between space-y-3">
           <div>
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100 gap-2">
               <div className="flex items-center gap-2">
-                <div className="w-7 h-7 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center">
+                <div className="w-7 h-7 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center shrink-0">
                   <Building2 className="w-4 h-4 stroke-[2.5]" />
                 </div>
                 <div>
                   <h2 className="text-xs font-black uppercase text-slate-800">
-                    Top 10 Indústrias em ISV
+                    Ranking de Indústrias em ISV
                   </h2>
-                  <p className="text-[10px] text-slate-400">
-                    Capital Parado Acumulado (Clique p/ Drilldown)
+                  <p className="text-[10px] text-slate-500 font-mono tabular-nums">
+                    {indicadores.industriasComPromotor ?? 0} c/ promotor · {indicadores.industriasSemPromotor ?? 0} sem promotor
                   </p>
                 </div>
               </div>
-              <span className="text-[10px] font-mono font-bold text-slate-400">
-                Acumulado
+              <span className="text-[10px] font-mono font-bold text-slate-400 shrink-0">
+                Vínculos
               </span>
             </div>
 
-            {/* Lista com Barras Interativas */}
-            <div className="divide-y divide-slate-100 mt-2 space-y-1">
-              {top10Industrias.length === 0 ? (
+            {/* Filtro rápido e busca direta no Ranking de Indústrias */}
+            <div className="mt-2.5 space-y-2">
+              <div className="flex items-center gap-1 text-[10px] font-black uppercase">
+                {[
+                  { id: 'TODAS' as const, label: 'Top 10' },
+                  { id: 'COM_PROMOTOR' as const, label: 'Com Promotor' },
+                  { id: 'SEM_PROMOTOR' as const, label: 'Sem Promotor' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setFiltroRankingIndustria(opt.id)}
+                    className={`px-2 py-1 rounded-md cursor-pointer transition-colors ${
+                      filtroRankingIndustria === opt.id
+                        ? opt.id === 'SEM_PROMOTOR'
+                          ? 'bg-amber-600 text-white'
+                          : 'bg-purple-700 text-white'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="relative">
+                <Search className="w-3 h-3 text-slate-400 absolute left-2.5 top-2" />
+                <input
+                  type="text"
+                  value={buscaRankingIndustria}
+                  onChange={(e) => setBuscaRankingIndustria(e.target.value)}
+                  placeholder="Filtrar indústria, CNPJ ou promotor..."
+                  className="w-full bg-slate-50 border border-slate-200 rounded-lg pl-7 pr-2.5 py-1 text-[11px] font-semibold text-slate-900 focus:bg-white focus:border-purple-600 focus:outline-hidden"
+                />
+              </div>
+            </div>
+
+            {/* Lista com Barras Interativas e Ação Direta de Vínculo */}
+            <div className="divide-y divide-slate-100 mt-2 space-y-1 max-h-[430px] overflow-y-auto pr-0.5">
+              {industriasRankingExibidas.length === 0 ? (
                 <div className="py-8 text-center text-xs text-slate-400">
                   Nenhuma indústria encontrada com os filtros atuais.
                 </div>
               ) : (
-                top10Industrias.map((ind, idx) => {
-                  const maxVal = top10Industrias[0]?.valorTotal || 1;
+                industriasRankingExibidas.map((ind, idx) => {
+                  const maxVal = industriasRankingExibidas[0]?.valorTotal || 1;
                   const pct = Math.min(100, Math.max(8, (ind.valorTotal / maxVal) * 100));
+                  const promotoresResumo = (ind.promotoresVinculados || [])
+                    .map((p) => (p.agenciaNome ? `${p.promotorNome} (${p.agenciaNome})` : p.promotorNome))
+                    .join(', ');
 
                   return (
-                    <button
+                    <div
                       key={`ind-rank-${ind.cnpj}-${idx}`}
-                      type="button"
-                      onClick={() => handleOpenIndustriaModal(ind)}
-                      className="w-full text-left py-2 px-1.5 rounded-lg hover:bg-purple-50/50 transition-colors group cursor-pointer block"
+                      className="py-2 px-1.5 rounded-lg hover:bg-purple-50/40 transition-colors space-y-1.5"
                     >
-                      <div className="flex items-center justify-between text-xs mb-1">
-                        <div className="flex items-center gap-1.5 min-w-0 pr-2">
-                          <span className="w-4 text-[10px] font-black text-slate-400 font-mono">
-                            #{idx + 1}
-                          </span>
-                          <span className="font-bold truncate text-[11px] text-slate-900 group-hover:text-purple-700" title={ind.nome}>
-                            {ind.nome}
+                      <button
+                        type="button"
+                        onClick={() => handleOpenIndustriaModal(ind)}
+                        className="w-full text-left group cursor-pointer block"
+                      >
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <div className="flex items-center gap-1.5 min-w-0 pr-2">
+                            <span className="w-5 text-[10px] font-black text-slate-400 font-mono tabular-nums">
+                              #{idx + 1}
+                            </span>
+                            <span className="font-bold truncate text-[11px] text-slate-900 group-hover:text-purple-700" title={ind.nome}>
+                              {ind.nome}
+                            </span>
+                          </div>
+                          <span className="font-mono font-black text-purple-950 shrink-0 text-xs tabular-nums">
+                            {formatarMoedaBR(ind.valorTotal)}
                           </span>
                         </div>
-                        <span className="font-mono font-black text-purple-950 shrink-0 text-xs">
-                          {formatarMoedaBR(ind.valorTotal)}
-                        </span>
-                      </div>
 
-                      {/* Barra de Progresso */}
-                      <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                        <div
-                          className="h-full bg-purple-600 rounded-full group-hover:bg-purple-700 transition-all"
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
+                        {/* Barra de Progresso */}
+                        <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-purple-600 rounded-full group-hover:bg-purple-700 transition-all"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
 
-                      <div className="flex items-center justify-between text-[10px] text-slate-400 mt-1">
-                        <span>{ind.cnpj === 'SEM_CNPJ' ? 'Não informada' : ind.cnpj}</span>
-                        <span className="font-bold text-purple-700">{ind.skusSet.size} SKUs em ISV</span>
+                        <div className="flex items-center justify-between text-[10px] text-slate-400 mt-1 font-mono tabular-nums">
+                          <span>{ind.cnpj === 'SEM_CNPJ' ? 'Sem CNPJ' : ind.cnpjFormatado || ind.cnpj}</span>
+                          <span className="font-bold text-purple-700">{ind.skusSet.size} SKUs em ISV</span>
+                        </div>
+                      </button>
+
+                      {/* Situação do Promotor + Ação Direta Bidirecional */}
+                      <div className="flex items-center justify-between gap-2 pl-5">
+                        <div className="min-w-0">
+                          {ind.temPromotor ? (
+                            <span
+                              className="inline-block max-w-full truncate text-[10px] font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded"
+                              title={promotoresResumo}
+                            >
+                              {promotoresResumo}
+                            </span>
+                          ) : (
+                            <span className="inline-block text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                              Sem promotor vinculado
+                            </span>
+                          )}
+                        </div>
+
+                        {ind.cnpj !== 'SEM_CNPJ' && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setModalGerenciarVinculo({
+                                cnpj: ind.cnpj,
+                                nome: ind.nome,
+                                razaoSocial: ind.razaoSocial,
+                              })
+                            }
+                            className={`px-2 py-0.5 rounded text-[10px] font-black uppercase flex items-center gap-1 shrink-0 cursor-pointer transition-colors ${
+                              ind.temPromotor
+                                ? 'bg-slate-100 hover:bg-purple-100 text-slate-700 hover:text-purple-900 border border-slate-200'
+                                : 'bg-purple-700 hover:bg-purple-800 text-white'
+                            }`}
+                          >
+                            <LinkIcon className="w-2.5 h-2.5" />
+                            <span>{ind.temPromotor ? 'Gerenciar vínculo' : 'Vincular promotor'}</span>
+                          </button>
+                        )}
                       </div>
-                    </button>
+                    </div>
                   );
                 })
               )}
@@ -825,7 +1000,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
 
           <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-purple-700 font-bold">
-            <span className="text-[10px] text-slate-400">Clique na barra para ver a lista de SKUs</span>
+            <span className="text-[10px] text-slate-400">Clique no nome p/ SKUs ou gerencie o promotor direto</span>
           </div>
         </div>
 
@@ -1161,22 +1336,41 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </div>
               </div>
 
-              {/* Botão Imprimir PDF A4 da Indústria */}
-              <button
-                type="button"
-                onClick={() =>
-                  gerarRelatorioEntidadeIsvA4Pdf(
-                    'INDUSTRIA',
-                    modalIndustria.nome,
-                    modalIndustria.cnpj !== 'SEM_CNPJ' ? `CNPJ: ${modalIndustria.cnpj}` : 'Indústria Vinculada',
-                    modalIndustria.itens
-                  )
-                }
-                className="px-3.5 py-2 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>Imprimir PDF (A4)</span>
-              </button>
+              <div className="flex items-center gap-2 flex-wrap">
+                {modalIndustria.cnpj !== 'SEM_CNPJ' && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setModalGerenciarVinculo({
+                        cnpj: modalIndustria.cnpj,
+                        nome: modalIndustria.nome,
+                        razaoSocial: modalIndustria.razaoSocial,
+                      })
+                    }
+                    className="px-3.5 py-2 rounded-xl bg-white hover:bg-purple-50 text-purple-800 border border-purple-300 font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-2xs cursor-pointer"
+                  >
+                    <LinkIcon className="w-3.5 h-3.5" />
+                    <span>Gerenciar Vínculo</span>
+                  </button>
+                )}
+
+                {/* Botão Imprimir PDF A4 da Indústria */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    gerarRelatorioEntidadeIsvA4Pdf(
+                      'INDUSTRIA',
+                      modalIndustria.nome,
+                      modalIndustria.cnpj !== 'SEM_CNPJ' ? `CNPJ: ${modalIndustria.cnpj}` : 'Indústria Vinculada',
+                      modalIndustria.itens
+                    )
+                  }
+                  className="px-3.5 py-2 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Imprimir PDF (A4)</span>
+                </button>
+              </div>
             </div>
 
             {/* Campo de Busca Interna */}
@@ -1433,6 +1627,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL 4: GERENCIAR VÍNCULO DA INDÚSTRIA (VINCULAÇÃO BIDIRECIONAL) */}
+      <ModalGerenciarVinculoIndustria
+        isOpen={Boolean(modalGerenciarVinculo)}
+        onClose={() => setModalGerenciarVinculo(null)}
+        industria={modalGerenciarVinculo}
+        onVinculoAlterado={() => setSyncTick((t) => t + 1)}
+      />
     </div>
   );
 };

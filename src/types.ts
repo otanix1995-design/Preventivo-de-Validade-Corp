@@ -290,7 +290,7 @@ export interface ProjecaoVencimento {
 // MÓDULO DE PROMOTORES - FASE 1
 // ==========================================
 
-export type StatusPromotor = 'ATIVO' | 'BLOQUEADO' | 'DESVINCULADO' | 'PENDENTE_VINCULO';
+export type StatusPromotor = 'ATIVO' | 'BLOQUEADO' | 'DESVINCULADO' | 'PENDENTE_VINCULO' | 'INATIVO';
 
 export interface PermissoesPromotor {
   consultarProduto: boolean;
@@ -322,6 +322,7 @@ export interface DispositivoVinculado {
 export interface Promotor {
   promotorId: string;
   nome: string;
+  agenciaId?: string | null;
   agenciaNome: string;
   matricula?: string;
   filialId: string;
@@ -336,6 +337,11 @@ export interface Promotor {
   dataVinculo?: string | null; // ISO
   ultimoAcesso?: string | null; // ISO
   ultimaSincronizacao?: string | null; // ISO
+  inativadoEm?: string | null; // ISO
+  reativadoEm?: string | null; // ISO
+  motivoInativacao?: string;
+  substituidoPorPromotorId?: string | null;
+  substituidoPorPromotorNome?: string | null;
   criadoPor: string;
   atualizadoPor: string;
 }
@@ -852,8 +858,53 @@ export interface AgenciaComercial {
   nomeNormalizado: string;
   filialId: string;
   ativo: boolean;
+  cnpj?: string;
+  telefone?: string;
+  contato?: string;
+  observacoes?: string;
+  criadoEm?: string;
+  atualizadoEm?: string;
   totalPromotores?: number;
+  totalPromotoresAtivos?: number;
   totalIndustrias?: number;
+}
+
+export type TipoMovimentacaoComercial =
+  | 'AGENCIA_CRIADA'
+  | 'AGENCIA_EDITADA'
+  | 'PROMOTOR_VINCULADO_AGENCIA'
+  | 'PROMOTOR_TRANSFERIDO_AGENCIA'
+  | 'PROMOTOR_DESVINCULADO_AGENCIA'
+  | 'PROMOTOR_INATIVADO'
+  | 'PROMOTOR_REATIVADO'
+  | 'PROMOTOR_SUBSTITUIDO'
+  | 'VINCULOS_INDUSTRIAS_TRANSFERIDOS';
+
+export interface HistoricoMovimentacaoComercial {
+  id: string;
+  tipo: TipoMovimentacaoComercial;
+  dataHora: string; // ISO
+  promotorId?: string;
+  promotorNome?: string;
+  promotorSubstitutoId?: string;
+  promotorSubstitutoNome?: string;
+  agenciaId?: string;
+  agenciaNome?: string;
+  agenciaAnteriorId?: string;
+  agenciaAnteriorNome?: string;
+  cnpjsTransferidos?: string[];
+  industriasTransferidas?: Array<{
+    cnpj: string;
+    cnpjFormatado?: string;
+    nome: string;
+  }>;
+  cnpjsOrigemAntes?: string[];
+  cnpjsIgnoradosDuplicidade?: string[];
+  modoTransferencia?: 'TODAS' | 'MANUAL' | 'NENHUMA';
+  inativacaoOrigem?: boolean;
+  motivo?: string;
+  detalhes: string;
+  realizadoPor: string;
 }
 
 export interface VinculoPromotorAgencia {
@@ -1004,6 +1055,7 @@ export interface IsvPacotePayloadExtraido {
   vinculosDispositivoPromotor: VinculoPromotor[];
   historicoIsv: ResumoImportacaoIsv[];
   historicoSpcoi: ResumoImportacaoSPCOI007[];
+  historicoMovimentacoes?: HistoricoMovimentacaoComercial[];
 }
 
 export interface ResultadoInspecaoPacoteIsv {

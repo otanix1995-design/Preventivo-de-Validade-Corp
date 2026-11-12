@@ -2,6 +2,7 @@ import {
   Activity,
   AlertCircle,
   ArrowLeft,
+  ArrowRightLeft,
   Building2,
   CheckCircle,
   Clock,
@@ -29,9 +30,11 @@ import {
   StatusPromotor
 } from '../types';
 import { AuditoriaPromotoresView } from './promotores/AuditoriaPromotoresView';
+import { AgenciasTab } from './promotores/AgenciasTab';
 import { CadastrarPromotorModal } from './promotores/CadastrarPromotorModal';
 import { DetalhePromotorModal } from './promotores/DetalhePromotorModal';
 import { GerarVinculoModal } from './promotores/GerarVinculoModal';
+import { SubstituirPromotorModal } from './promotores/SubstituirPromotorModal';
 import { VincularPromotorIndustriaTab } from './promotores/VincularPromotorIndustriaTab';
 
 interface PromotoresViewProps {
@@ -40,6 +43,7 @@ interface PromotoresViewProps {
 
 export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
   const [promotores, setPromotores] = useState<Promotor[]>([]);
+  const [agenciasCount, setAgenciasCount] = useState(0);
   const [indicators, setIndicators] = useState({
     totalAtivos: 0,
     totalOffline: 0,
@@ -47,23 +51,31 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
     acoesHoje: 0,
   });
 
-  const [activeTab, setActiveTab] = useState<'lista' | 'vinculo_industrias' | 'auditoria'>('lista');
+  const [activeTab, setActiveTab] = useState<'lista' | 'agencias' | 'vinculo_industrias' | 'auditoria'>('lista');
   const [searchQuery, setSearchQuery] = useState('');
   const [filtroStatus, setFiltroStatus] = useState<string>('TODOS');
   const [filtroSetor, setFiltroSetor] = useState<string>('TODOS');
 
   // Modals state
   const [isCadastrarModalOpen, setIsCadastrarModalOpen] = useState(false);
+  const [defaultAgenciaCadastro, setDefaultAgenciaCadastro] = useState<string | undefined>(undefined);
   const [isVinculoModalOpen, setIsVinculoModalOpen] = useState(false);
   const [isDetalheModalOpen, setIsDetalheModalOpen] = useState(false);
+  const [isSubstituirModalOpen, setIsSubstituirModalOpen] = useState(false);
+  const [promotorParaSubstituir, setPromotorParaSubstituir] = useState<Promotor | null>(null);
   const [selectedPromotor, setSelectedPromotor] = useState<Promotor | null>(null);
 
   // Auditoria filter state
   const [filtroPromotorAuditoria, setFiltroPromotorAuditoria] = useState<string | undefined>(undefined);
 
   const carregarDados = () => {
-    setPromotores(promotorService.getPromotores());
+    const lista = promotorService.getPromotores();
+    setPromotores(lista);
+    setAgenciasCount(promotorService.getAgencias().length);
     setIndicators(promotorService.getIndicators());
+    setSelectedPromotor((prev) =>
+      prev ? lista.find((item) => item.promotorId === prev.promotorId) || prev : null
+    );
   };
 
   useEffect(() => {
@@ -84,6 +96,7 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
       // Status filter
       if (filtroStatus === 'ATIVO' && p.status !== 'ATIVO') return false;
       if (filtroStatus === 'PENDENTE_VINCULO' && p.status !== 'PENDENTE_VINCULO') return false;
+      if (filtroStatus === 'INATIVO' && p.status !== 'INATIVO') return false;
       if (filtroStatus === 'BLOQUEADO' && p.status !== 'BLOQUEADO') return false;
       if (filtroStatus === 'OFFLINE') {
         const online = promotorService.isPromotorOnline(p);
@@ -125,6 +138,7 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
 
   const handlePromotorCadastrado = (novo: Promotor) => {
     setIsCadastrarModalOpen(false);
+    setDefaultAgenciaCadastro(undefined);
     carregarDados();
     // Como solicitado no fluxo: após cadastrar, abre imediatamente o modal de gerar vínculo
     setSelectedPromotor(novo);
@@ -177,16 +191,31 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
             </p>
           </div>
 
-          {/* Primary Action: Novo Promotor */}
-          <button
-            type="button"
-            id="btn-novo-promotor"
-            onClick={() => setIsCadastrarModalOpen(true)}
-            className="px-4 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-98 text-white text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer shrink-0"
-          >
-            <UserPlus className="w-4 h-4 stroke-[2.5]" />
-            <span>+ NOVO PROMOTOR</span>
-          </button>
+          {/* Primary Actions: Substituir/Transferir & Novo Promotor */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              id="btn-substituir-promotor-massa"
+              onClick={() => {
+                setPromotorParaSubstituir(null);
+                setIsSubstituirModalOpen(true);
+              }}
+              className="px-4 py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-900 text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-2xs transition-all cursor-pointer shrink-0"
+            >
+              <ArrowRightLeft className="w-4 h-4 stroke-[2.5]" />
+              <span>Substituir Promotor</span>
+            </button>
+
+            <button
+              type="button"
+              id="btn-novo-promotor"
+              onClick={() => setIsCadastrarModalOpen(true)}
+              className="px-4 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 active:scale-98 text-white text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-sm transition-all cursor-pointer shrink-0"
+            >
+              <UserPlus className="w-4 h-4 stroke-[2.5]" />
+              <span>+ NOVO PROMOTOR</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -273,9 +302,9 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
         </div>
       </div>
 
-      {/* Navigation Tabs (Promotores Cadastrados vs Auditoria) */}
-      <div className="flex items-center justify-between border-b border-gray-200 pt-2">
-        <div className="flex items-center gap-2">
+      {/* Navigation Tabs (Promotores Cadastrados vs Agências vs Vínculos vs Auditoria) */}
+      <div className="flex items-center justify-between border-b border-gray-200 pt-2 overflow-x-auto">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             type="button"
             onClick={() => setActiveTab('lista')}
@@ -287,6 +316,20 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
           >
             <Users className="w-4 h-4 stroke-[2.5]" />
             <span>Promotores Cadastrados ({promotores.length})</span>
+          </button>
+
+          <button
+            type="button"
+            id="tab-promotores-agencias"
+            onClick={() => setActiveTab('agencias')}
+            className={`pb-3 px-3 text-xs font-black uppercase tracking-wider border-b-2 flex items-center gap-2 transition-colors cursor-pointer ${
+              activeTab === 'agencias'
+                ? 'border-blue-700 text-blue-700'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            <Building2 className="w-4 h-4 stroke-[2.5]" />
+            <span>Agências ({agenciasCount})</span>
           </button>
 
           <button
@@ -361,6 +404,7 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
                   <option value="ATIVO">Ativos</option>
                   <option value="PENDENTE_VINCULO">Pendentes de Vínculo</option>
                   <option value="OFFLINE">Offline</option>
+                  <option value="INATIVO">Inativos</option>
                   <option value="BLOQUEADO">Bloqueados</option>
                 </select>
 
@@ -384,6 +428,7 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
                 { id: 'ATIVO', label: 'Ativos' },
                 { id: 'PENDENTE_VINCULO', label: 'Pendentes de Vínculo' },
                 { id: 'OFFLINE', label: 'Offline' },
+                { id: 'INATIVO', label: 'Inativos' },
                 { id: 'BLOQUEADO', label: 'Bloqueados' },
               ].map((chip) => (
                 <button
@@ -510,6 +555,11 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
                             ● PENDENTE DE VÍNCULO
                           </span>
                         )}
+                        {promotor.status === 'INATIVO' && (
+                          <span className="text-xs font-black text-slate-700 bg-slate-200 px-2.5 py-1 rounded-lg border border-slate-300 uppercase">
+                            INATIVO
+                          </span>
+                        )}
                         {promotor.status === 'BLOQUEADO' && (
                           <span className="text-xs font-black text-rose-800 bg-rose-100 px-2.5 py-1 rounded-lg border border-rose-200 uppercase">
                             ● BLOQUEADO
@@ -570,7 +620,7 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
                         <button
                           type="button"
                           onClick={() => handleOpenGerarVinculo(promotor)}
-                          disabled={promotor.status === 'BLOQUEADO'}
+                          disabled={promotor.status === 'BLOQUEADO' || promotor.status === 'INATIVO'}
                           className="px-3 py-1.5 rounded-lg bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-800 text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-40"
                         >
                           <QrCode className="w-3.5 h-3.5 text-blue-700 stroke-[2.5]" />
@@ -584,6 +634,17 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
                         >
                           <History className="w-3.5 h-3.5 text-gray-500" />
                           <span>Atividades</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setPromotorParaSubstituir(promotor);
+                            setIsSubstituirModalOpen(true);
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <ArrowRightLeft className="w-3.5 h-3.5" />
+                          <span>Substituir</span>
                         </button>
                       </div>
 
@@ -603,6 +664,16 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
         </div>
       )}
 
+      {/* Tab: AGÊNCIAS */}
+      {activeTab === 'agencias' && (
+        <AgenciasTab
+          onAbrirCadastroPromotorParaAgencia={(agId) => {
+            setDefaultAgenciaCadastro(agId);
+            setIsCadastrarModalOpen(true);
+          }}
+        />
+      )}
+
       {/* Tab: VINCULAR INDÚSTRIAS */}
       {activeTab === 'vinculo_industrias' && (
         <VincularPromotorIndustriaTab promotores={promotores} />
@@ -620,8 +691,12 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
       {/* Modals */}
       <CadastrarPromotorModal
         isOpen={isCadastrarModalOpen}
-        onClose={() => setIsCadastrarModalOpen(false)}
+        onClose={() => {
+          setIsCadastrarModalOpen(false);
+          setDefaultAgenciaCadastro(undefined);
+        }}
         onPromotorCadastrado={handlePromotorCadastrado}
+        defaultAgenciaId={defaultAgenciaCadastro}
       />
 
       <GerarVinculoModal
@@ -644,6 +719,18 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
         onGerarVinculo={handleOpenGerarVinculo}
         onVerAuditoria={handleVerAuditoriaDoPromotor}
         onRefresh={() => carregarDados()}
+      />
+
+      <SubstituirPromotorModal
+        isOpen={isSubstituirModalOpen}
+        onClose={() => {
+          setIsSubstituirModalOpen(false);
+          setPromotorParaSubstituir(null);
+        }}
+        promotorAntigo={promotorParaSubstituir}
+        onConcluido={() => {
+          carregarDados();
+        }}
       />
     </div>
   );

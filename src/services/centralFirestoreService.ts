@@ -37,6 +37,7 @@ import {
   ProdutoSMG,
   Promotor,
   RegistroAuditoriaPromotor,
+  StatusPromotor,
   VinculoEan,
   VinculoPromotor
 } from '../types';
@@ -107,7 +108,7 @@ export interface PromotorCentralDoc {
   filialId: string;
   setores: string[];
   permissoes: Record<string, boolean>;
-  status: 'ATIVO' | 'PENDENTE_VINCULO' | 'BLOQUEADO' | 'DESVINCULADO';
+  status: StatusPromotor;
   dispositivoVinculado: {
     dispositivoId: string;
     dispositivoNome: string;

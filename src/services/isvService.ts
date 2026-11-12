@@ -17,13 +17,26 @@ import {
   VinculoPromotorIndustria,
 } from '../types';
 import { calcularPosicaoEstoque, isProdutoPesavel, parseEmbalagem } from './codeParser';
-import { dbClear, dbGetAll, dbGetMeta, dbPut, dbPutAll, STORES } from './db';
+import { AtomicBatchOp, dbClear, dbGetAll, dbGetMeta, dbPut, dbPutAll, dbRunAtomicBatch, STORES } from './db';
 import { formatarMoedaBR } from './deviceId';
 import { productRepository } from './productRepository';
 import { promotorService } from './promotorService';
 import { formatarCnpj, normalizarCnpj } from './spcoi007Parser';
 import { getProdutos } from './storage';
 import { notificarAlteracaoParaPacoteLocal } from './localPackageMode';
+
+export interface ResultadoTransferenciaMassa {
+  cnpjsTransferidos: string[];
+  cnpjsNovosNoDestino: string[];
+  cnpjsJaExistentesNoDestino: string[];
+  cnpjsOrigemAntes: string[];
+  industriasTransferidasDetalhes: Array<{
+    cnpj: string;
+    cnpjFormatado: string;
+    nome: string;
+  }>;
+  rollback: () => Promise<void>;
+}
 
 type IsvChangeListener = () => void;
 
@@ -51,22 +64,35 @@ export interface ResultadoCalculoFinanceiro {
   fatorUtilizado: number;
 }
 
+export interface DashboardIndustriaRankingItem {
+  cnpj: string;
+  cnpjFormatado: string;
+  nome: string;
+  razaoSocial?: string;
+  valorTotal: number;
+  skusSet: Set<string>;
+  itens: ItemIsv[];
+  temPromotor: boolean;
+  promotoresVinculados: Array<{
+    promotorId: string;
+    promotorNome: string;
+    agenciaNome: string;
+    status?: string;
+  }>;
+}
+
 export interface DashboardData {
   indicadores: {
     valorTotal: number;
     totalSkus: number;
     totalIndustrias: number;
     totalAgencias: number;
+    industriasComPromotor: number;
+    industriasSemPromotor: number;
   };
   top10Produtos: ItemIsv[];
-  top10Industrias: {
-    cnpj: string;
-    nome: string;
-    razaoSocial?: string;
-    valorTotal: number;
-    skusSet: Set<string>;
-    itens: ItemIsv[];
-  }[];
+  top10Industrias: DashboardIndustriaRankingItem[];
+  rankingIndustriasTodos: DashboardIndustriaRankingItem[];
   top10Agencias: {
     nome: string;
     valorTotal: number;
@@ -312,6 +338,16 @@ class IsvService {
     try {
       productRepository.subscribe(() => {
         this.invalidarCache();
+      });
+    } catch {
+      // safe fallback
+    }
+    try {
+      promotorService.subscribe(() => {
+        if (this._isInitialized) {
+          this.invalidarCache();
+          this._notify();
+        }
       });
     } catch {
       // safe fallback
@@ -800,8 +836,11 @@ class IsvService {
     for (let i = 0; i < cnpjs.length; i++) {
       const vincs = this._vinculosPorCnpj.get(cnpjs[i]) || [];
       for (let j = 0; j < vincs.length; j++) {
-        promotoresSet.add(vincs[j].promotorNome);
-        if (vincs[j].agenciaNome) agenciasSet.add(vincs[j].agenciaNome);
+        const promVivo = promotorService.getPromotorById(vincs[j].promotorId);
+        const promNome = promVivo ? promVivo.nome : vincs[j].promotorNome;
+        const agNome = promVivo ? (promVivo.agenciaNome || '') : (vincs[j].agenciaNome || '');
+        if (promNome) promotoresSet.add(promNome);
+        if (agNome && agNome !== 'Agência não informada') agenciasSet.add(agNome);
       }
     }
 
@@ -1014,7 +1053,24 @@ class IsvService {
 
   public getPromotoresDaIndustria(cnpj: string): VinculoPromotorIndustria[] {
     const norm = normalizarCnpj(cnpj);
-    return this._vinculos.filter((v) => v.cnpj === norm);
+    return this._vinculos
+      .filter((v) => v.cnpj === norm)
+      .map((v) => {
+        const promVivo = promotorService.getPromotorById(v.promotorId);
+        if (!promVivo) return v;
+        return {
+          ...v,
+          promotorNome: promVivo.nome,
+          agenciaNome: promVivo.agenciaNome || '',
+        };
+      });
+  }
+
+  public getIndustriasSemPromotor(): Industria[] {
+    return this._industrias.filter((ind) => {
+      const vincs = this._vinculosPorCnpj.get(ind.cnpj) || [];
+      return vincs.length === 0;
+    });
   }
 
   /**
@@ -1027,6 +1083,9 @@ class IsvService {
     filialId = '172'
   ): Promise<void> {
     const cnpjNorm = normalizarCnpj(cnpj);
+    if (!cnpjNorm) {
+      throw new Error('CNPJ da indústria inválido para vinculação.');
+    }
     const id = `${promotor.promotorId}_${cnpjNorm}_${filialId}`;
 
     const jaExiste = this._vinculos.some((v) => v.id === id);
@@ -1036,7 +1095,7 @@ class IsvService {
       id,
       promotorId: promotor.promotorId,
       promotorNome: promotor.nome,
-      agenciaNome: promotor.agenciaNome || 'Agência não informada',
+      agenciaNome: promotor.agenciaNome || '',
       cnpj: cnpjNorm,
       filialId,
       criado_em: new Date().toISOString(),
@@ -1073,25 +1132,375 @@ class IsvService {
     const cnpjNorm = normalizarCnpj(cnpj);
     const id = `${promotorId}_${cnpjNorm}_${filialId}`;
 
-    this._vinculos = this._vinculos.filter((v) => v.id !== id);
+    this._vinculos = this._vinculos.filter(
+      (v) => v.id !== id && !(v.promotorId === promotorId && v.cnpj === cnpjNorm)
+    );
 
     // Atualizar indústria
     const ind = this._industrias.find((i) => i.cnpj === cnpjNorm);
     if (ind && ind.promotores_responsaveis) {
       const promotoresRestantes = this._vinculos
         .filter((v) => v.cnpj === cnpjNorm)
-        .map((v) => v.promotorNome);
-      ind.promotores_responsaveis = promotoresRestantes;
+        .map((v) => {
+          const promVivo = promotorService.getPromotorById(v.promotorId);
+          return promVivo ? promVivo.nome : v.promotorNome;
+        });
+      ind.promotores_responsaveis = Array.from(new Set(promotoresRestantes));
       await dbPut(STORES.INDUSTRIAS, ind);
     }
 
     this._rebuildIndices();
-    await dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos);
+    await dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos, true);
     notificarAlteracaoParaPacoteLocal(
       'VINCULO_COMERCIAL',
       `Vínculo removido: ${promotorId} ↔ CNPJ ${cnpjNorm}`
     );
     this._notify();
+  }
+
+  /**
+   * Atualiza nome/agência nos vínculos existentes quando o cadastro de um promotor é editado.
+   */
+  public async sincronizarPromotorNosVinculos(promotor: Promotor): Promise<void> {
+    let mudou = false;
+    const cnpjsAfetados = new Set<string>();
+
+    this._vinculos = this._vinculos.map((v) => {
+      if (v.promotorId !== promotor.promotorId) return v;
+      const novaAgencia = promotor.agenciaNome || '';
+      if (v.promotorNome === promotor.nome && v.agenciaNome === novaAgencia) {
+        return v;
+      }
+      mudou = true;
+      cnpjsAfetados.add(v.cnpj);
+      return {
+        ...v,
+        promotorNome: promotor.nome,
+        agenciaNome: novaAgencia,
+      };
+    });
+
+    if (!mudou) return;
+
+    for (const cnpj of cnpjsAfetados) {
+      const ind = this._industrias.find((i) => i.cnpj === cnpj);
+      if (ind) {
+        ind.promotores_responsaveis = Array.from(
+          new Set(
+            this._vinculos
+              .filter((v) => v.cnpj === cnpj)
+              .map((v) => v.promotorNome)
+          )
+        );
+        await dbPut(STORES.INDUSTRIAS, ind);
+      }
+    }
+
+    this._rebuildIndices();
+    await dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos, true);
+    this._notify();
+  }
+
+  /**
+   * Calcula a prévia da transferência de indústrias sem modificar nenhum dado,
+   * identificando novos vínculos e duplicidades já existentes no substituto.
+   */
+  public simularTransferenciaVinculosIndustria(
+    origemPromotorId: string,
+    destinoPromotorId?: string,
+    cnpjsSelecionados?: string[]
+  ): {
+    totalOrigem: number;
+    totalSelecionadas: number;
+    novasNoDestino: number;
+    jaVinculadasNoDestino: number;
+    permanecemNaOrigem: number;
+    cnpjsJaNoDestino: string[];
+  } {
+    const cnpjsOrigem = Array.from(
+      new Set(
+        this._vinculos
+          .filter((v) => v.promotorId === origemPromotorId)
+          .map((v) => normalizarCnpj(v.cnpj))
+          .filter(Boolean)
+      )
+    );
+
+    const filtroSet = Array.isArray(cnpjsSelecionados)
+      ? new Set(cnpjsSelecionados.map((c) => normalizarCnpj(c)).filter(Boolean))
+      : null;
+
+    const selecionadas = filtroSet
+      ? cnpjsOrigem.filter((c) => filtroSet.has(c))
+      : cnpjsOrigem;
+
+    const cnpjsDestinoSet = destinoPromotorId
+      ? new Set(
+          this._vinculos
+            .filter((v) => v.promotorId === destinoPromotorId)
+            .map((v) => normalizarCnpj(v.cnpj))
+            .filter(Boolean)
+        )
+      : new Set<string>();
+
+    const cnpjsJaNoDestino = selecionadas.filter((c) => cnpjsDestinoSet.has(c));
+    const novasNoDestino = selecionadas.length - cnpjsJaNoDestino.length;
+
+    return {
+      totalOrigem: cnpjsOrigem.length,
+      totalSelecionadas: selecionadas.length,
+      novasNoDestino,
+      jaVinculadasNoDestino: cnpjsJaNoDestino.length,
+      permanecemNaOrigem: Math.max(0, cnpjsOrigem.length - selecionadas.length),
+      cnpjsJaNoDestino,
+    };
+  }
+
+  /**
+   * Executa a transferência em massa de vínculos de indústrias de forma ATÔMICA,
+   * evitando duplicidades no substituto e oferecendo rollback completo em caso de erro.
+   * Exige `confirmarTransferencia === true`.
+   */
+  public async transferirVinculosIndustriaEmMassa(
+    origemPromotorId: string,
+    destinoPromotor: Promotor,
+    opcoes: {
+      confirmarTransferencia: boolean;
+      cnpjs?: string[];
+      removerDaOrigem?: boolean;
+      filialId?: string;
+      persistirAtomicamente?: (
+        nextVinculos: VinculoPromotorIndustria[],
+        industriasAlteradas: Industria[]
+      ) => Promise<void>;
+    }
+  ): Promise<ResultadoTransferenciaMassa> {
+    if (opcoes?.confirmarTransferencia !== true) {
+      throw new Error('Confirmação explícita obrigatória para transferir vínculos de indústrias.');
+    }
+    if (!origemPromotorId || !destinoPromotor?.promotorId) {
+      throw new Error('Promotor de origem e promotor substituto são obrigatórios.');
+    }
+    if (origemPromotorId === destinoPromotor.promotorId) {
+      throw new Error('Promotor de origem e promotor substituto devem ser diferentes.');
+    }
+
+    const filialId = opcoes.filialId || destinoPromotor.filialId || '172';
+    const cnpjsFiltro = Array.isArray(opcoes.cnpjs)
+      ? new Set(opcoes.cnpjs.map((c) => normalizarCnpj(c)).filter(Boolean))
+      : null;
+
+    const cnpjsOrigemAntes = Array.from(
+      new Set(
+        this._vinculos
+          .filter((v) => v.promotorId === origemPromotorId)
+          .map((v) => normalizarCnpj(v.cnpj))
+          .filter(Boolean)
+      )
+    );
+
+    const vinculosAlvo = this._vinculos.filter((v) => {
+      if (v.promotorId !== origemPromotorId) return false;
+      if (cnpjsFiltro && !cnpjsFiltro.has(normalizarCnpj(v.cnpj))) return false;
+      return true;
+    });
+
+    if (vinculosAlvo.length === 0) {
+      return {
+        cnpjsTransferidos: [],
+        cnpjsNovosNoDestino: [],
+        cnpjsJaExistentesNoDestino: [],
+        cnpjsOrigemAntes,
+        industriasTransferidasDetalhes: [],
+        rollback: async () => {},
+      };
+    }
+
+    // Snapshot profundo para atomicidade e rollback seguro
+    const snapshotVinculos: VinculoPromotorIndustria[] = this._vinculos.map((v) => ({ ...v }));
+    const snapshotIndustrias: Industria[] = this._industrias.map((i) => ({
+      ...i,
+      promotores_responsaveis: [...(i.promotores_responsaveis || [])],
+    }));
+
+    const removerDaOrigem = opcoes.removerDaOrigem !== false;
+    const agora = new Date().toISOString();
+
+    const destinoCnpjsExistentes = new Set<string>(
+      this._vinculos
+        .filter((v) => v.promotorId === destinoPromotor.promotorId)
+        .map((v) => normalizarCnpj(v.cnpj))
+        .filter(Boolean)
+    );
+
+    const idsParaRemover = new Set<string>();
+    const novosVinculosDestino: VinculoPromotorIndustria[] = [];
+    const cnpjsTransferidos: string[] = [];
+    const cnpjsNovosNoDestino: string[] = [];
+    const cnpjsJaExistentesNoDestino: string[] = [];
+    const industriasTransferidasDetalhes: Array<{
+      cnpj: string;
+      cnpjFormatado: string;
+      nome: string;
+    }> = [];
+
+    for (const v of vinculosAlvo) {
+      const cnpjNorm = normalizarCnpj(v.cnpj);
+      if (!cnpjNorm) continue;
+
+      if (removerDaOrigem) {
+        idsParaRemover.add(v.id);
+      }
+
+      if (!cnpjsTransferidos.includes(cnpjNorm)) {
+        cnpjsTransferidos.push(cnpjNorm);
+        const indInfo = this._industrias.find((i) => i.cnpj === cnpjNorm);
+        industriasTransferidasDetalhes.push({
+          cnpj: cnpjNorm,
+          cnpjFormatado: indInfo?.cnpj_formatado || formatarCnpj(cnpjNorm),
+          nome: indInfo?.nome_exibicao || indInfo?.razao_social || cnpjNorm,
+        });
+      }
+
+      if (destinoCnpjsExistentes.has(cnpjNorm)) {
+        if (!cnpjsJaExistentesNoDestino.includes(cnpjNorm)) {
+          cnpjsJaExistentesNoDestino.push(cnpjNorm);
+        }
+      } else {
+        destinoCnpjsExistentes.add(cnpjNorm);
+        cnpjsNovosNoDestino.push(cnpjNorm);
+        novosVinculosDestino.push({
+          id: `${destinoPromotor.promotorId}_${cnpjNorm}_${filialId}`,
+          promotorId: destinoPromotor.promotorId,
+          promotorNome: destinoPromotor.nome,
+          agenciaNome: destinoPromotor.agenciaNome || '',
+          cnpj: cnpjNorm,
+          filialId,
+          criado_em: agora,
+        });
+      }
+    }
+
+    const nextVinculos = [
+      ...(idsParaRemover.size > 0
+        ? snapshotVinculos.filter((v) => !idsParaRemover.has(v.id))
+        : snapshotVinculos.map((v) => ({ ...v }))),
+      ...novosVinculosDestino,
+    ];
+
+    const cnpjsTransferidosSet = new Set(cnpjsTransferidos);
+    const industriasAlteradas: Industria[] = [];
+    const nextIndustrias: Industria[] = snapshotIndustrias.map((ind) => {
+      if (!cnpjsTransferidosSet.has(ind.cnpj)) return ind;
+      const atualizada: Industria = {
+        ...ind,
+        promotores_responsaveis: Array.from(
+          new Set(
+            nextVinculos
+              .filter((v) => v.cnpj === ind.cnpj)
+              .map((v) => {
+                if (v.promotorId === destinoPromotor.promotorId) return destinoPromotor.nome;
+                const promVivo = promotorService.getPromotorById(v.promotorId);
+                return promVivo ? promVivo.nome : v.promotorNome;
+              })
+          )
+        ),
+        atualizado_em: agora,
+      };
+      industriasAlteradas.push(atualizada);
+      return atualizada;
+    });
+
+    const restaurarSnapshot = async () => {
+      this._vinculos = snapshotVinculos;
+      this._industrias = snapshotIndustrias;
+      this._rebuildIndices();
+      try {
+        const opsRollback: AtomicBatchOp[] = [
+          {
+            storeName: STORES.VINCULOS_PROMOTOR_INDUSTRIA,
+            type: 'putAll',
+            items: snapshotVinculos,
+            clearFirst: true,
+          },
+          ...snapshotIndustrias
+            .filter((i) => cnpjsTransferidosSet.has(i.cnpj))
+            .map((ind) => ({ storeName: STORES.INDUSTRIAS, type: 'put' as const, item: ind })),
+        ];
+        await dbRunAtomicBatch(opsRollback);
+      } catch (rbErr) {
+        console.warn('Aviso no rollback de vínculos:', rbErr);
+      }
+      this._notify();
+    };
+
+    try {
+      if (opcoes.persistirAtomicamente) {
+        await opcoes.persistirAtomicamente(nextVinculos, industriasAlteradas);
+      } else {
+        const ops: AtomicBatchOp[] = [
+          {
+            storeName: STORES.VINCULOS_PROMOTOR_INDUSTRIA,
+            type: 'putAll',
+            items: nextVinculos,
+            clearFirst: true,
+          },
+          ...industriasAlteradas.map((ind) => ({
+            storeName: STORES.INDUSTRIAS,
+            type: 'put' as const,
+            item: ind,
+          })),
+        ];
+        await dbRunAtomicBatch(ops);
+      }
+
+      this._vinculos = nextVinculos;
+      this._industrias = nextIndustrias;
+      this._rebuildIndices();
+      notificarAlteracaoParaPacoteLocal(
+        'VINCULO_COMERCIAL',
+        `Transferência confirmada de ${cnpjsTransferidos.length} indústria(s) para ${destinoPromotor.nome}`
+      );
+      this._notify();
+    } catch (err) {
+      await restaurarSnapshot();
+      throw err;
+    }
+
+    return {
+      cnpjsTransferidos,
+      cnpjsNovosNoDestino,
+      cnpjsJaExistentesNoDestino,
+      cnpjsOrigemAntes,
+      industriasTransferidasDetalhes,
+      rollback: restaurarSnapshot,
+    };
+  }
+
+  /**
+   * Transfere vínculos de indústrias de um promotor para outro SOMENTE mediante
+   * confirmação explícita (`confirmarTransferencia === true`).
+   */
+  public async transferirVinculosIndustriaEntrePromotores(
+    origemPromotorId: string,
+    destinoPromotor: Promotor,
+    opcoes: {
+      confirmarTransferencia: boolean;
+      cnpjs?: string[];
+      removerDaOrigem?: boolean;
+      filialId?: string;
+      persistirAtomicamente?: (
+        nextVinculos: VinculoPromotorIndustria[],
+        industriasAlteradas: Industria[]
+      ) => Promise<void>;
+    }
+  ): Promise<string[]> {
+    const res = await this.transferirVinculosIndustriaEmMassa(
+      origemPromotorId,
+      destinoPromotor,
+      opcoes
+    );
+    return res.cnpjsTransferidos;
   }
 
   // ==========================================
@@ -1184,13 +1593,16 @@ class IsvService {
       const promotoresUnicos: PromotorVinculadoItem[] = [];
       const chavesPromotores = new Set<string>();
       vincs.forEach((v) => {
-        const chave = `${v.promotorNome}__${v.agenciaNome || ''}`;
+        const promVivo = promotorService.getPromotorById(v.promotorId);
+        const promNome = promVivo ? promVivo.nome : v.promotorNome;
+        const agNome = promVivo ? (promVivo.agenciaNome || '') : (v.agenciaNome || '');
+        const chave = `${v.promotorId}__${promNome}__${agNome}`;
         if (!chavesPromotores.has(chave)) {
           chavesPromotores.add(chave);
           promotoresUnicos.push({
             promotorId: v.promotorId,
-            promotorNome: v.promotorNome,
-            agenciaNome: v.agenciaNome,
+            promotorNome: promNome,
+            agenciaNome: agNome || undefined,
           });
         }
       });
@@ -1307,8 +1719,11 @@ class IsvService {
         for (let j = 0; j < cnpjs.length; j++) {
           const vincs = vinculosPorCnpj.get(cnpjs[j]) || [];
           for (let k = 0; k < vincs.length; k++) {
-            promotoresNomesSet.add(vincs[k].promotorNome);
-            if (vincs[k].agenciaNome) agenciasNomesSet.add(vincs[k].agenciaNome);
+            const promVivo = promotorService.getPromotorById(vincs[k].promotorId);
+            const promNome = promVivo ? promVivo.nome : vincs[k].promotorNome;
+            const agNome = promVivo ? (promVivo.agenciaNome || '') : (vincs[k].agenciaNome || '');
+            if (promNome) promotoresNomesSet.add(promNome);
+            if (agNome && agNome !== 'Agência não informada') agenciasNomesSet.add(agNome);
           }
         }
 
@@ -1452,8 +1867,11 @@ class IsvService {
         for (let j = 0; j < cnpjs.length; j++) {
           const vincs = vinculosPorCnpj.get(cnpjs[j]) || [];
           for (let k = 0; k < vincs.length; k++) {
-            promotoresNomesSet.add(vincs[k].promotorNome);
-            if (vincs[k].agenciaNome) agenciasNomesSet.add(vincs[k].agenciaNome);
+            const promVivo = promotorService.getPromotorById(vincs[k].promotorId);
+            const promNome = promVivo ? promVivo.nome : vincs[k].promotorNome;
+            const agNome = promVivo ? (promVivo.agenciaNome || '') : (vincs[k].agenciaNome || '');
+            if (promNome) promotoresNomesSet.add(promNome);
+            if (agNome && agNome !== 'Agência não informada') agenciasNomesSet.add(agNome);
           }
         }
 
@@ -1885,10 +2303,58 @@ class IsvService {
     produtosComValor.sort((a, b) => (b.valor_estoque || 0) - (a.valor_estoque || 0));
     const top10Produtos = produtosComValor.slice(0, 10);
 
-    // Top 10 Indústrias
-    const top10Industrias = Array.from(mapaInd.values())
+    // Ranking completo de Indústrias + Top 10 enriquecido com situação de vínculo
+    let industriasComPromotor = 0;
+    let industriasSemPromotor = 0;
+
+    const montarRankingIndustria = (ind: {
+      cnpj: string;
+      nome: string;
+      razaoSocial?: string;
+      valorTotal: number;
+      skusSet: Set<string>;
+      itens: ItemIsv[];
+    }): DashboardIndustriaRankingItem => {
+      const vincs = this._vinculosPorCnpj.get(ind.cnpj) || [];
+      const mapaProms = new Map<
+        string,
+        { promotorId: string; promotorNome: string; agenciaNome: string; status?: string }
+      >();
+      for (const v of vincs) {
+        const promVivo = promotorService.getPromotorById(v.promotorId);
+        const nome = promVivo ? promVivo.nome : v.promotorNome;
+        const agNome = promVivo ? (promVivo.agenciaNome || '') : (v.agenciaNome || '');
+        if (!mapaProms.has(v.promotorId)) {
+          mapaProms.set(v.promotorId, {
+            promotorId: v.promotorId,
+            promotorNome: nome,
+            agenciaNome: agNome === 'Agência não informada' ? '' : agNome,
+            status: promVivo?.status,
+          });
+        }
+      }
+      const promotoresVinculados = Array.from(mapaProms.values());
+      const temPromotor = promotoresVinculados.length > 0;
+      if (ind.cnpj !== 'SEM_CNPJ') {
+        if (temPromotor) industriasComPromotor++;
+        else industriasSemPromotor++;
+      }
+
+      return {
+        ...ind,
+        cnpjFormatado: ind.cnpj === 'SEM_CNPJ' ? 'Sem CNPJ' : formatarCnpj(ind.cnpj),
+        temPromotor,
+        promotoresVinculados,
+      };
+    };
+
+    const rankingIndustriasTodos = Array.from(mapaInd.values())
+      .filter((ind) => ind.cnpj !== 'SEM_CNPJ')
+      .map(montarRankingIndustria)
+      .sort((a, b) => b.valorTotal - a.valorTotal);
+
+    const top10Industrias = rankingIndustriasTodos
       .filter((ind) => ind.valorTotal > 0)
-      .sort((a, b) => b.valorTotal - a.valorTotal)
       .slice(0, 10);
 
     // Top 10 Agências
@@ -1903,9 +2369,12 @@ class IsvService {
         totalSkus: itens.length,
         totalIndustrias: industriasSet.size,
         totalAgencias: agenciasSet.size,
+        industriasComPromotor,
+        industriasSemPromotor,
       },
       top10Produtos,
       top10Industrias,
+      rankingIndustriasTodos,
       top10Agencias,
     };
   }

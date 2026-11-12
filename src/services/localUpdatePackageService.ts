@@ -27,6 +27,7 @@ import {
   ComparacaoVersaoPacote,
   ConflitoCadastroComercial,
   FornecedorSPCOI007,
+  HistoricoMovimentacaoComercial,
   Industria,
   IsvPacoteContagensSnapshot,
   IsvPacoteManifesto,
@@ -47,6 +48,12 @@ import {
   VinculoPromotorAgencia,
   VinculoPromotorIndustria,
 } from '../types';
+import {
+  gerarAgenciaId,
+  isAgenciaSemVinculoNome,
+  normalizarChaveAgencia,
+  normalizarNomeAgenciaExibicao,
+} from './agenciaNormalizer';
 import { dbClear, dbGetMeta, dbPut, dbSetMeta, STORES } from './db';
 import { EstadoAuthServidor, firebaseAuthService } from './firebaseAuthService';
 import { isvService } from './isvService';
@@ -74,6 +81,8 @@ export interface LocalPackageDependencies {
   getIndustrias?: () => Industria[];
   getSaeou060?: () => RegistroSaeou060[];
   getPromotores?: () => Promotor[];
+  getAgencias?: () => AgenciaComercial[];
+  getHistoricoMovimentacoes?: () => HistoricoMovimentacaoComercial[];
   getVinculosPromotorIndustria?: () => VinculoPromotorIndustria[];
   getVinculosDispositivoPromotor?: () => VinculoPromotor[];
   getHistoricoIsv?: () => ResumoImportacaoIsv[];
@@ -97,6 +106,8 @@ export interface LocalPackageDependencies {
   }) => Promise<void>;
   aplicarPromotores?: (params: {
     promotores: Promotor[];
+    agencias?: AgenciaComercial[];
+    historicoMovimentacoes?: HistoricoMovimentacaoComercial[];
     vinculosDispositivoPromotor?: VinculoPromotor[];
     preservarAlteracoesComerciaisLocais?: boolean;
   }) => Promise<void>;
@@ -138,21 +149,6 @@ const DEFAULT_PERSISTED_META: PersistedPackageMeta = {
   ultimaAlteracaoComercialIso: null,
   ultimasAlteracoesComerciaisResumo: [],
 };
-
-function normalizarNomeAgencia(nome?: string | null): string {
-  const clean = (nome || '').trim().replace(/\s+/g, ' ');
-  return clean || 'Agência não informada';
-}
-
-function slugAgenciaId(nomeNormalizado: string): string {
-  const ascii = nomeNormalizado
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return `ag_${ascii || 'sem_agencia'}`;
-}
 
 function formatDateYyyyMmDdLocal(date: Date): string {
   const y = date.getFullYear();
@@ -205,6 +201,12 @@ export class LocalUpdatePackageService {
       getIndustrias: deps?.getIndustrias ?? (() => isvService.getIndustrias()),
       getSaeou060: deps?.getSaeou060 ?? (() => productRepository.getSaeou060Registros()),
       getPromotores: deps?.getPromotores ?? (() => promotorService.getPromotores()),
+      getAgencias:
+        deps?.getAgencias ??
+        (hasCustomDataGetters ? () => [] : () => promotorService.getAgencias()),
+      getHistoricoMovimentacoes:
+        deps?.getHistoricoMovimentacoes ??
+        (hasCustomDataGetters ? () => [] : () => promotorService.getHistoricoMovimentacoes()),
       getVinculosPromotorIndustria:
         deps?.getVinculosPromotorIndustria ?? (() => isvService.getVinculosPromotorIndustria()),
       getVinculosDispositivoPromotor:
@@ -421,6 +423,7 @@ export class LocalUpdatePackageService {
 
   public construirModeloComercialNormalizado(params: {
     promotores: Promotor[];
+    agenciasCadastradas?: AgenciaComercial[];
     industrias: Industria[];
     vinculosPromotorIndustria: VinculoPromotorIndustria[];
   }): {
@@ -439,25 +442,51 @@ export class LocalUpdatePackageService {
     }
 
     const agenciasMap = new Map<string, AgenciaComercial>();
-    const ensureAgencia = (rawNome?: string | null): AgenciaComercial => {
-      const nomeLimpo = normalizarNomeAgencia(rawNome);
-      const nomeNorm = nomeLimpo.toUpperCase();
-      const agenciaId = slugAgenciaId(nomeNorm);
-      let existing = agenciasMap.get(agenciaId);
+    const ensureAgencia = (
+      rawNome?: string | null,
+      agenciaIdSugerido?: string | null,
+      metaOpcional?: Partial<AgenciaComercial>
+    ): AgenciaComercial | null => {
+      if (isAgenciaSemVinculoNome(rawNome)) {
+        return null;
+      }
+      const nomeLimpo = normalizarNomeAgenciaExibicao(rawNome);
+      const chave = normalizarChaveAgencia(nomeLimpo);
+      if (!chave) return null;
+
+      let existing = agenciasMap.get(chave);
       if (!existing) {
+        const agenciaId =
+          (agenciaIdSugerido && typeof agenciaIdSugerido === 'string' && agenciaIdSugerido.trim()) ||
+          gerarAgenciaId(nomeLimpo);
         existing = {
           agenciaId,
           nome: nomeLimpo,
-          nomeNormalizado: nomeNorm,
-          filialId: '172',
-          ativo: true,
+          nomeNormalizado: chave,
+          filialId: metaOpcional?.filialId || '172',
+          ativo: metaOpcional?.ativo !== undefined ? Boolean(metaOpcional.ativo) : true,
+          cnpj: metaOpcional?.cnpj,
+          telefone: metaOpcional?.telefone,
+          contato: metaOpcional?.contato,
+          observacoes: metaOpcional?.observacoes,
+          criadoEm: metaOpcional?.criadoEm,
+          atualizadoEm: metaOpcional?.atualizadoEm,
           totalPromotores: 0,
+          totalPromotoresAtivos: 0,
           totalIndustrias: 0,
         };
-        agenciasMap.set(agenciaId, existing);
+        agenciasMap.set(chave, existing);
       }
       return existing;
     };
+
+    // 1. Carregar agências independentes (incluindo agências sem promotores e metadados completos)
+    if (Array.isArray(params.agenciasCadastradas)) {
+      for (const ag of params.agenciasCadastradas) {
+        if (!ag || !ag.nome) continue;
+        ensureAgencia(ag.nome, ag.agenciaId, ag);
+      }
+    }
 
     const promotoresMap = new Map<string, Promotor>();
     for (const p of params.promotores) {
@@ -466,11 +495,12 @@ export class LocalUpdatePackageService {
         ? p.setores.filter((s) => s === 'FRIOS' || s === 'LOJA')
         : ['FRIOS'];
       const setoresFinais = setores.length > 0 ? setores : ['FRIOS'];
-      const ag = ensureAgencia(p.agenciaNome);
+      const ag = ensureAgencia(p.agenciaNome, p.agenciaId);
 
       promotoresMap.set(p.promotorId, {
         ...p,
-        agenciaNome: ag.nome,
+        agenciaId: ag ? ag.agenciaId : null,
+        agenciaNome: ag ? ag.nome : '',
         filialId: '172',
         filialNome: p.filialNome || 'Cascavel',
         setores: setoresFinais,
@@ -484,14 +514,24 @@ export class LocalUpdatePackageService {
     const vincAIMap = new Map<string, VinculoAgenciaIndustria>();
 
     const promotoresPorAgencia = new Map<string, Set<string>>();
+    const promotoresAtivosPorAgencia = new Map<string, Set<string>>();
     const industriasPorAgencia = new Map<string, Set<string>>();
 
     for (const prom of promotoresMap.values()) {
-      const ag = ensureAgencia(prom.agenciaNome);
+      const ag = ensureAgencia(prom.agenciaNome, prom.agenciaId);
+      if (!ag) continue;
+
       if (!promotoresPorAgencia.has(ag.agenciaId)) {
         promotoresPorAgencia.set(ag.agenciaId, new Set());
       }
       promotoresPorAgencia.get(ag.agenciaId)!.add(prom.promotorId);
+
+      if (prom.status === 'ATIVO') {
+        if (!promotoresAtivosPorAgencia.has(ag.agenciaId)) {
+          promotoresAtivosPorAgencia.set(ag.agenciaId, new Set());
+        }
+        promotoresAtivosPorAgencia.get(ag.agenciaId)!.add(prom.promotorId);
+      }
 
       const paId = `${prom.promotorId}__${ag.agenciaId}`;
       vincPAMap.set(paId, {
@@ -510,8 +550,9 @@ export class LocalUpdatePackageService {
       if (!cnpjNorm) continue;
 
       const prom = promotoresMap.get(v.promotorId);
-      const agNome = prom?.agenciaNome || v.agenciaNome || 'Agência não informada';
-      const ag = ensureAgencia(agNome);
+      const ag = prom
+        ? ensureAgencia(prom.agenciaNome, prom.agenciaId)
+        : ensureAgencia(v.agenciaNome);
 
       const stableId = v.id || `${v.promotorId}_${cnpjNorm}_172`;
       vincPIMap.set(stableId, {
@@ -519,31 +560,34 @@ export class LocalUpdatePackageService {
         id: stableId,
         cnpj: cnpjNorm,
         promotorNome: prom?.nome || v.promotorNome,
-        agenciaNome: ag.nome,
+        agenciaNome: ag ? ag.nome : '',
         filialId: '172',
       });
 
-      const ind = industriaMap.get(cnpjNorm);
-      const razaoSocial = (ind?.razao_social || cnpjNorm).trim();
-      const aiId = `${ag.agenciaId}__${cnpjNorm}`;
-      vincAIMap.set(aiId, {
-        id: aiId,
-        agenciaId: ag.agenciaId,
-        agenciaNome: ag.nome,
-        cnpj: cnpjNorm,
-        industriaRazaoSocial: razaoSocial,
-        filialId: '172',
-      });
+      if (ag) {
+        const ind = industriaMap.get(cnpjNorm);
+        const razaoSocial = (ind?.razao_social || cnpjNorm).trim();
+        const aiId = `${ag.agenciaId}__${cnpjNorm}`;
+        vincAIMap.set(aiId, {
+          id: aiId,
+          agenciaId: ag.agenciaId,
+          agenciaNome: ag.nome,
+          cnpj: cnpjNorm,
+          industriaRazaoSocial: razaoSocial,
+          filialId: '172',
+        });
 
-      if (!industriasPorAgencia.has(ag.agenciaId)) {
-        industriasPorAgencia.set(ag.agenciaId, new Set());
+        if (!industriasPorAgencia.has(ag.agenciaId)) {
+          industriasPorAgencia.set(ag.agenciaId, new Set());
+        }
+        industriasPorAgencia.get(ag.agenciaId)!.add(cnpjNorm);
       }
-      industriasPorAgencia.get(ag.agenciaId)!.add(cnpjNorm);
     }
 
     const agencias: AgenciaComercial[] = Array.from(agenciasMap.values()).map((ag) => ({
       ...ag,
       totalPromotores: promotoresPorAgencia.get(ag.agenciaId)?.size || 0,
+      totalPromotoresAtivos: promotoresAtivosPorAgencia.get(ag.agenciaId)?.size || 0,
       totalIndustrias: industriasPorAgencia.get(ag.agenciaId)?.size || 0,
     }));
 
@@ -694,10 +738,12 @@ export class LocalUpdatePackageService {
     const industrias = this._deps.getIndustrias();
     const saeou060 = this._deps.getSaeou060();
     const promotores = this._deps.getPromotores();
+    const agenciasCadastradas = this._deps.getAgencias();
     const vincPI = this._deps.getVinculosPromotorIndustria();
 
     const comercial = this.construirModeloComercialNormalizado({
       promotores,
+      agenciasCadastradas,
       industrias,
       vinculosPromotorIndustria: vincPI,
     });
@@ -825,6 +871,8 @@ export class LocalUpdatePackageService {
       const industrias = this._deps.getIndustrias();
       const saeou060 = this._deps.getSaeou060();
       const promotores = this._deps.getPromotores();
+      const agenciasCadastradas = this._deps.getAgencias();
+      const historicoMovimentacoes = this._deps.getHistoricoMovimentacoes();
       const vincPI = this._deps.getVinculosPromotorIndustria();
       const vincDispositivo = this._deps.getVinculosDispositivoPromotor();
       const historicoIsv = this._deps.getHistoricoIsv();
@@ -844,6 +892,7 @@ export class LocalUpdatePackageService {
 
       const comercial = this.construirModeloComercialNormalizado({
         promotores,
+        agenciasCadastradas,
         industrias,
         vinculosPromotorIndustria: vincPI,
       });
@@ -939,6 +988,10 @@ export class LocalUpdatePackageService {
       await adicionarEntradaCompactada(
         'comercial/vinculos_dispositivo.json',
         JSON.stringify(vincDispositivo)
+      );
+      await adicionarEntradaCompactada(
+        'comercial/historico_movimentacoes.json',
+        JSON.stringify(historicoMovimentacoes)
       );
 
       // 5. Metadados e históricos das bases
@@ -1335,6 +1388,16 @@ export class LocalUpdatePackageService {
         'comercial/vinculos_dispositivo.json',
         []
       );
+      let historicoMovimentacoes: HistoricoMovimentacaoComercial[] = [];
+      const histMovBytes = files['comercial/historico_movimentacoes.json'];
+      if (histMovBytes) {
+        try {
+          const parsedMov = JSON.parse(strFromU8(histMovBytes));
+          if (Array.isArray(parsedMov)) historicoMovimentacoes = parsedMov;
+        } catch {
+          errosBloqueantes.push('JSON inválido em comercial/historico_movimentacoes.json');
+        }
+      }
       const metaBases = parseJsonFile<any>('metadados_bases.json', {});
 
       // Conferir contagens e integridade das 3 bases obrigatórias + referências comerciais
@@ -1513,6 +1576,7 @@ export class LocalUpdatePackageService {
               vinculosPromotorAgencia,
               vinculosAgenciaIndustria,
               vinculosDispositivoPromotor,
+              historicoMovimentacoes,
               historicoIsv: Array.isArray(metaBases?.historicoIsv) ? metaBases.historicoIsv : [],
               historicoSpcoi: Array.isArray(metaBases?.historicoSpcoi)
                 ? metaBases.historicoSpcoi
@@ -1606,6 +1670,8 @@ export class LocalUpdatePackageService {
       historicoIsv: this._deps.getHistoricoIsv(),
       historicoSpcoi: this._deps.getHistoricoSpcoi(),
       promotores: this._deps.getPromotores(),
+      agencias: this._deps.getAgencias(),
+      historicoMovimentacoes: this._deps.getHistoricoMovimentacoes(),
       vinculosDispositivoPromotor: this._deps.getVinculosDispositivoPromotor(),
       persistedMeta: { ...this._persistedMeta },
     };
@@ -1693,6 +1759,8 @@ export class LocalUpdatePackageService {
       }
       await this._deps.aplicarPromotores({
         promotores: payload.promotores,
+        agencias: payload.agencias,
+        historicoMovimentacoes: payload.historicoMovimentacoes,
         vinculosDispositivoPromotor: payload.vinculosDispositivoPromotor,
         preservarAlteracoesComerciaisLocais: preservarComerciaisLocais,
       });
@@ -1766,6 +1834,8 @@ export class LocalUpdatePackageService {
         if (promotoresAplicados) {
           await this._deps.aplicarPromotores({
             promotores: rollbackSnapshot.promotores,
+            agencias: rollbackSnapshot.agencias,
+            historicoMovimentacoes: rollbackSnapshot.historicoMovimentacoes,
             vinculosDispositivoPromotor: rollbackSnapshot.vinculosDispositivoPromotor,
             preservarAlteracoesComerciaisLocais: false,
           });

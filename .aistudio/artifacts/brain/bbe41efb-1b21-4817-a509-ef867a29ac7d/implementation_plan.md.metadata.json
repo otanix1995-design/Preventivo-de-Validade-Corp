@@ -1,6 +1,0 @@
-{
-  "summary": "Relatório definitivo de segurança e governança do Firestore para a Filial 172 (Cascavel). Incorpora a decisão soberana de manter todos os 36 campos da BASE RUB públicos (sem login), a revisão estrita da coleção de divergências, a validação de promotores, a imutabilidade profunda dos campos de vencimentos (SKU, autor, datas originais, filial, id), e o resultado de 23 testes automatizados (100% de aprovação).",
-  "updatedAt": "2026-11-06T05:54:12.423515564Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

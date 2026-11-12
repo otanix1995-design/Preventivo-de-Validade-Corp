@@ -14,9 +14,10 @@ import {
   UserCheck,
   Users
 } from 'lucide-react';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { isvService } from '../../services/isvService';
-import { Industria, Promotor, VinculoPromotorIndustria } from '../../types';
+import { promotorService } from '../../services/promotorService';
+import { Industria, Promotor } from '../../types';
 
 interface VincularPromotorIndustriaTabProps {
   promotores: Promotor[];
@@ -31,9 +32,22 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
   const [filtroPromotores, setFiltroPromotores] = useState<'TODOS' | 'COM_VINCULO' | 'SEM_VINCULO'>('TODOS');
   const [filtroIndustrias, setFiltroIndustrias] = useState<'TODAS' | 'COM_PROMOTOR' | 'SEM_PROMOTOR'>('TODAS');
   const [feedback, setFeedback] = useState<{ tipo: 'success' | 'error'; msg: string } | null>(null);
+  const [syncTick, setSyncTick] = useState(0);
 
-  const industrias = isvService.getIndustrias();
-  const vinculos = isvService.getVinculosPromotorIndustria();
+  useEffect(() => {
+    Promise.all([isvService.init(), promotorService.init()]).then(() => {
+      setSyncTick((t) => t + 1);
+    });
+    const u1 = isvService.subscribe(() => setSyncTick((t) => t + 1));
+    const u2 = promotorService.subscribe(() => setSyncTick((t) => t + 1));
+    return () => {
+      u1();
+      u2();
+    };
+  }, []);
+
+  const industrias = useMemo(() => isvService.getIndustrias(), [syncTick]);
+  const vinculos = useMemo(() => isvService.getVinculosPromotorIndustria(), [syncTick]);
 
   const selectedPromotor = useMemo(() => {
     return promotores.find((p) => p.promotorId === selectedPromotorId) || null;
@@ -272,12 +286,23 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
                           </h4>
                           {isSelected && (
                             <span className="text-[9px] font-bold bg-blue-600 text-white px-1.5 py-0.2 rounded uppercase">
-                              Ativo
+                              Selecionado
+                            </span>
+                          )}
+                          {(p.status === 'INATIVO' || p.status === 'BLOQUEADO') && (
+                            <span
+                              className={`text-[9px] font-black px-1.5 py-0.2 rounded uppercase border ${
+                                p.status === 'INATIVO'
+                                  ? 'bg-slate-200 text-slate-700 border-slate-300'
+                                  : 'bg-rose-50 text-rose-800 border-rose-200'
+                              }`}
+                            >
+                              {p.status}
                             </span>
                           )}
                         </div>
                         <p className="text-[11px] text-slate-500 font-medium">
-                          Agência: <strong className="text-slate-700 font-semibold">{p.agenciaNome || 'Não informada'}</strong>
+                          Agência: <strong className="text-slate-700 font-semibold">{p.agenciaNome || 'Sem agência'}</strong>
                         </p>
                       </div>
 
@@ -314,7 +339,7 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
               <p className="text-[11px] text-slate-500 font-medium mt-0.5">
                 {selectedPromotor ? (
                   <>
-                    Vinculando a: <strong className="text-blue-700 font-bold">{selectedPromotor.nome}</strong> ({selectedPromotor.agenciaNome})
+                    Vinculando a: <strong className="text-blue-700 font-bold">{selectedPromotor.nome}</strong> ({selectedPromotor.agenciaNome || 'Sem agência'})
                   </>
                 ) : (
                   'Selecione um promotor ao lado para gerenciar seus vínculos.'

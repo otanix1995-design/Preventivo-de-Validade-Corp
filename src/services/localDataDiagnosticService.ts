@@ -493,7 +493,7 @@ export async function executarDiagnosticoSomenteLeitura(): Promise<DiagnosticoDa
       observacao: 'Carregado no boot via initStorage().',
     },
     {
-      conjunto: 'Promotores (e Agências derivadas)',
+      conjunto: 'Promotores',
       storeIndexedDB: STORES.PROMOTORES,
       quantidadeIndexedDB: countsByStore.get(STORES.PROMOTORES) ?? 0,
       quantidadeMemoria: statusPacoteMemoria.contagensAtuais.promotores,
@@ -501,7 +501,21 @@ export async function executarDiagnosticoSomenteLeitura(): Promise<DiagnosticoDa
       origemProvavel: `Store "${STORES.PROMOTORES}"`,
       observacao: !promotorService.isInitialized()
         ? 'promotorService ainda não inicializado antes de abrir ISV/Promotores.'
-        : `Agências derivadas em memória: ${statusPacoteMemoria.contagensAtuais.agencias}.`,
+        : `${statusPacoteMemoria.contagensAtuais.promotores} promotores carregados.`,
+    },
+    {
+      conjunto: 'Agências Comerciais (Independentes)',
+      storeIndexedDB: STORES.AGENCIAS,
+      quantidadeIndexedDB: countsByStore.get(STORES.AGENCIAS) ?? 0,
+      quantidadeMemoria: promotorService.getAgencias().length || statusPacoteMemoria.contagensAtuais.agencias,
+      servicoInicializado: promotorService.isInitialized(),
+      origemProvavel:
+        (countsByStore.get(STORES.AGENCIAS) ?? 0) > 0
+          ? `Store "${STORES.AGENCIAS}"`
+          : 'Derivado dos cadastros de promotores',
+      observacao: !promotorService.isInitialized()
+        ? 'Aguardando promotorService.init().'
+        : `${promotorService.getAgencias().length} agências cadastradas.`,
     },
     {
       conjunto: 'Vínculos Promotor × Indústria',

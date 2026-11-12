@@ -391,6 +391,7 @@ async function runTests(): Promise<void> {
   unsub();
   service.destroy();
   console.log('✅ Suite de carregamento reativo, estado CARREGANDO e pacote completo (36 colunas) aprovada!');
+  process.exit(0);
 }
 
 runTests().catch((err) => {
