@@ -44,6 +44,8 @@ import {
   SETORES_OPERACIONAIS_CONFIG,
   SetorOperacionalIsv,
 } from '../types';
+import { ComboboxOpcao, ComboboxPesquisavel } from './common/ComboboxPesquisavel';
+import { formatarCnpj } from '../services/spcoi007Parser';
 import { ModalGerenciarVinculoIndustria } from './promotores/ModalGerenciarVinculoIndustria';
 
 interface DashboardViewProps {
@@ -158,6 +160,42 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     });
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [itensIsvBrutos, syncTick]);
+
+  // Opções para os Comboboxes Pesquisáveis
+  const opcoesAgencias: ComboboxOpcao[] = useMemo(() => {
+    return agenciasDisponiveis.map((ag) => ({
+      value: ag,
+      label: ag,
+      searchTerms: ag,
+    }));
+  }, [agenciasDisponiveis]);
+
+  const opcoesIndustrias: ComboboxOpcao[] = useMemo(() => {
+    return industrias.map((ind) => {
+      const razao = (ind.razao_social || '').trim();
+      const fantasia = (ind.nome_exibicao || '').trim();
+      const labelPrincipal = razao || fantasia || ind.cnpj;
+      const sub = fantasia && fantasia !== razao ? fantasia : undefined;
+      const cnpjFormatado = ind.cnpj_formatado || formatarCnpj(ind.cnpj);
+      return {
+        value: ind.cnpj,
+        label: labelPrincipal,
+        sublabel: sub ? `${sub} • CNPJ: ${cnpjFormatado}` : `CNPJ: ${cnpjFormatado}`,
+        badge: ind.total_produtos_loja ? `${ind.total_produtos_loja} SKUs` : undefined,
+        searchTerms: `${razao} ${fantasia} ${ind.cnpj} ${cnpjFormatado}`,
+      };
+    });
+  }, [industrias]);
+
+  const opcoesPromotores: ComboboxOpcao[] = useMemo(() => {
+    return promotores.map((p) => ({
+      value: p.promotorId,
+      label: p.nome,
+      sublabel: `Agência: ${p.agenciaNome || 'Sem agência vinculada'}${p.matricula ? ` • Matrícula: ${p.matricula}` : ''}`,
+      badge: p.status,
+      searchTerms: `${p.nome} ${p.agenciaNome || ''} ${p.matricula || ''} ${p.status}`,
+    }));
+  }, [promotores]);
 
   // 1. DADOS AGREGADOS DO DASHBOARD (O(1) instantâneo para filtros padrão ou Single-Pass O(N) unificado)
   const {
@@ -474,50 +512,44 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           {/* Agência */}
           <div>
-            <select
+            <ComboboxPesquisavel
+              labelPadrao="Agência: Todas"
+              valorPadrao="TODAS"
               value={filtros.agencia}
-              onChange={(e) => setFiltros((prev) => ({ ...prev, agencia: e.target.value }))}
-              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-[#F36B0B] focus:outline-hidden"
-            >
-              <option value="TODAS">Agência: Todas</option>
-              {agenciasDisponiveis.map((ag) => (
-                <option key={ag} value={ag}>
-                  Agência: {ag}
-                </option>
-              ))}
-            </select>
+              onChange={(val) => setFiltros((prev) => ({ ...prev, agencia: val }))}
+              opcoes={opcoesAgencias}
+              placeholderBusca="Pesquisar agência..."
+              tituloLista="Agências Comerciais"
+              mensagemVazio="Nenhuma agência encontrada"
+            />
           </div>
 
-          {/* Indústria */}
+          {/* Fornecedor / Indústria (Razão Social SPCOI007) */}
           <div>
-            <select
+            <ComboboxPesquisavel
+              labelPadrao="Fornecedor: Todos"
+              valorPadrao="TODAS"
               value={filtros.industriaCnpj}
-              onChange={(e) => setFiltros((prev) => ({ ...prev, industriaCnpj: e.target.value }))}
-              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-[#F36B0B] focus:outline-hidden"
-            >
-              <option value="TODAS">Indústria: Todas</option>
-              {industrias.map((ind) => (
-                <option key={ind.cnpj} value={ind.cnpj}>
-                  {ind.nome_exibicao || ind.razao_social}
-                </option>
-              ))}
-            </select>
+              onChange={(val) => setFiltros((prev) => ({ ...prev, industriaCnpj: val }))}
+              opcoes={opcoesIndustrias}
+              placeholderBusca="Pesquisar razão social, nome ou CNPJ..."
+              tituloLista="Fornecedores / Indústrias SPCOI007"
+              mensagemVazio="Nenhum fornecedor encontrado"
+            />
           </div>
 
           {/* Promotor */}
           <div>
-            <select
+            <ComboboxPesquisavel
+              labelPadrao="Promotor: Todos"
+              valorPadrao="TODOS"
               value={filtros.promotorId}
-              onChange={(e) => setFiltros((prev) => ({ ...prev, promotorId: e.target.value }))}
-              className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-bold text-slate-900 focus:bg-white focus:border-[#F36B0B] focus:outline-hidden"
-            >
-              <option value="TODOS">Promotor: Todos</option>
-              {promotores.map((p) => (
-                <option key={p.promotorId} value={p.promotorId}>
-                  {p.nome} ({p.agenciaNome || 'S/ Agência'})
-                </option>
-              ))}
-            </select>
+              onChange={(val) => setFiltros((prev) => ({ ...prev, promotorId: val }))}
+              opcoes={opcoesPromotores}
+              placeholderBusca="Pesquisar promotor ou agência..."
+              tituloLista="Promotores de Vendas"
+              mensagemVazio="Nenhum promotor encontrado"
+            />
           </div>
         </div>
 
