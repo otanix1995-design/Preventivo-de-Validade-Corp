@@ -312,10 +312,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       // Yield para garantir que o navegador pinte o botão "Gerando PDF..."
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      const resumoFiltros = formatarResumoFiltrosIsv(filtros);
+      const resumoFiltros = formatarResumoFiltrosIsv(filtros, undefined, itensFiltrados);
       const resultado = await gerarRelatorioIsvA4Pdf(itensFiltrados, {
-        tituloFiltro: 'Painel Executivo Dashboard',
-        tipoRelatorioTitulo: 'PAINEL EXECUTIVO ISV',
         exibirValorEstoque: true,
         filialNome: 'Filial 172 — Cascavel',
         fonteOficial: 'BASE DO RUB',
@@ -1547,7 +1545,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     try {
                       const res = await gerarRelatorioEntidadeIsvA4Pdf(
                         'INDUSTRIA',
-                        modalIndustria.nome,
+                        modalIndustria.razaoSocial || modalIndustria.nome,
                         modalIndustria.cnpj !== 'SEM_CNPJ' ? `CNPJ: ${modalIndustria.cnpj}` : 'Indústria Vinculada',
                         modalIndustria.itens,
                         { filtros, valorTotalFiltrado: modalIndustria.valorTotal }

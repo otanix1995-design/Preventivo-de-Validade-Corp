@@ -33,7 +33,7 @@ import { formatarMoedaBR } from '../services/deviceId';
 import {
   formatarResumoFiltrosIsv,
   gerarRelatorioAgenciaPdf,
-  gerarRelatorioFornecedorPdf,
+  gerarRelatorioEntidadeIsvA4Pdf,
   gerarRelatorioIsvA4Pdf,
   gerarRelatorioPromotorPdf,
   gerarRelatorioTop30Pdf,
@@ -314,24 +314,41 @@ export const IsvView: React.FC<IsvViewProps> = ({
         });
       } else if (pdfTipoAgrupamento === 'INDUSTRIA') {
         const ind = industrias.find((i) => i.cnpj === pdfEntidadeSelecionada);
-        const nomeEntidade = ind
-          ? ind.razao_social
-          : pdfEntidadeSelecionada || 'GERAL';
-        const subtituloEntidade = ind
-          ? `CNPJ: ${ind.cnpj_formatado || ind.cnpj}`
-          : '';
-        const itensAlvo = ind
-          ? itensFiltrados.filter((it) => it.cnpjs?.includes(ind.cnpj))
-          : itensFiltrados;
+        if (!ind && !pdfEntidadeSelecionada) {
+          resultado = await gerarRelatorioIsvA4Pdf(itensFiltrados, {
+            exibirValorEstoque: pdfExibirValor,
+            filialNome,
+            limiteQuantidade: pdfLimiteExportacao,
+            filtros,
+            filtrosDescricao: getFiltrosAtivosDescricao(),
+            valorTotalFiltrado,
+            totalItensFiltrados: itensFiltrados.length,
+          });
+        } else {
+          const nomeEntidade = ind
+            ? (ind.razao_social || ind.nome_exibicao || ind.cnpj)
+            : pdfEntidadeSelecionada;
+          const subtituloEntidade = ind
+            ? `CNPJ: ${ind.cnpj_formatado || ind.cnpj}`
+            : '';
+          const itensAlvo = ind
+            ? itensFiltrados.filter((it) => it.cnpjs?.includes(ind.cnpj))
+            : itensFiltrados;
 
-        resultado = await gerarRelatorioFornecedorPdf(nomeEntidade, itensAlvo, {
-          filialNome,
-          subtituloEntidade,
-          exibirValorEstoque: pdfExibirValor,
-          limiteQuantidade: pdfLimiteExportacao,
-          filtros,
-          filtrosDescricao: getFiltrosAtivosDescricao(),
-        });
+          resultado = await gerarRelatorioEntidadeIsvA4Pdf(
+            'INDUSTRIA',
+            nomeEntidade,
+            subtituloEntidade,
+            itensAlvo,
+            {
+              filialNome,
+              exibirValorEstoque: pdfExibirValor,
+              limiteQuantidade: pdfLimiteExportacao,
+              filtros,
+              filtrosDescricao: getFiltrosAtivosDescricao(),
+            }
+          );
+        }
       } else if (pdfTipoAgrupamento === 'PROMOTOR') {
         const prom = promotores.find((p) => p.promotorId === pdfEntidadeSelecionada);
         const nomeEntidade = prom ? prom.nome : pdfEntidadeSelecionada || 'GERAL';
@@ -363,14 +380,12 @@ export const IsvView: React.FC<IsvViewProps> = ({
           filtrosDescricao: getFiltrosAtivosDescricao(),
         });
       } else {
-        // Geral (Filtros Ativos) - Relatório A4 Institucional
+        // Relatório A4 Institucional com identificação dinâmica pelos filtros ativos
         const fonteOficial = isvService.temPlanilhaIsv()
           ? 'Planilha Operacional Oficial ISV'
           : 'BASE DO RUB';
 
         resultado = await gerarRelatorioIsvA4Pdf(itensFiltrados, {
-          tituloFiltro: 'Geral da Loja',
-          tipoAgrupamento: 'GERAL',
           exibirValorEstoque: pdfExibirValor,
           filialNome,
           limiteQuantidade: pdfLimiteExportacao,
@@ -1673,8 +1688,8 @@ export const IsvView: React.FC<IsvViewProps> = ({
                   className="w-full bg-slate-50 border border-slate-300 rounded-xl p-2.5 text-xs font-bold text-slate-900 focus:bg-white focus:outline-hidden"
                 >
                   <option value="TOP30">⭐ TOP 30 — Mercadorias (Ranking Oficial dos 30 Maiores Dias s/ Venda)</option>
-                  <option value="GERAL">Geral da Loja (Filtros Ativos)</option>
-                  <option value="INDUSTRIA">Por Fornecedor / Indústria (9 Colunas)</option>
+                  <option value="GERAL">Automático conforme Filtros Ativos (Geral da Loja / Indústria / Promotor / Agência)</option>
+                  <option value="INDUSTRIA">Por Indústria (Razão Social)</option>
                   <option value="PROMOTOR">Por Promotor Específico (9 Colunas)</option>
                   <option value="AGENCIA">Por Agência Específica (9 Colunas)</option>
                 </select>

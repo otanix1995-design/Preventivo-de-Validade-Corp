@@ -40,6 +40,36 @@ import {
   obterTop30Mercadorias,
 } from './isvClassificacaoService';
 
+export interface FiltrosIdentificacaoPdf extends Partial<FiltrosIsv> {
+  fornecedor?: string;
+  fornecedorCnpj?: string;
+  fornecedorNome?: string;
+  industria?: string;
+  industriaNome?: string;
+  promotorNome?: string;
+  agenciaNome?: string;
+}
+
+export interface EntidadeSelecionadaPdf {
+  tipo: 'INDUSTRIA' | 'FORNECEDOR' | 'PROMOTOR' | 'AGENCIA';
+  rotulo: string;
+  nome: string;
+}
+
+export interface IdentificacaoRelatorioPdf {
+  tipoRelatorio:
+    | 'GERAL_LOJA'
+    | 'POR_INDUSTRIA'
+    | 'POR_FORNECEDOR'
+    | 'POR_PROMOTOR'
+    | 'POR_AGENCIA'
+    | 'PERSONALIZADO'
+    | 'TOP30';
+  tituloPrincipal: string;
+  destaqueEntidade?: string;
+  entidades: EntidadeSelecionadaPdf[];
+}
+
 export interface IsvPdfOptions {
   tituloFiltro?: string;
   tipoAgrupamento?: 'GERAL' | 'FORNECEDOR' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA' | 'TOP30';
@@ -54,7 +84,12 @@ export interface IsvPdfOptions {
   valorTotalFiltrado?: number;
   totalItensFiltrados?: number;
   ordenacaoDescricao?: string;
-  filtros?: Partial<FiltrosIsv>;
+  filtros?: FiltrosIdentificacaoPdf;
+  industriaNome?: string;
+  fornecedorNome?: string;
+  promotorNome?: string;
+  agenciaNome?: string;
+  preservarItensRecebidos?: boolean;
 }
 
 export interface ResultadoExportacaoPdf {
@@ -64,6 +99,273 @@ export interface ResultadoExportacaoPdf {
   tamanhoBytes: number;
   nomeArquivo: string;
   mensagem?: string;
+  identificacao?: IdentificacaoRelatorioPdf;
+}
+
+// ============================================================================
+// HELPERS: IDENTIFICAÇÃO DINÂMICA E RESOLUÇÃO DE ENTIDADES DO RELATÓRIO PDF
+// ============================================================================
+
+function normalizarCnpjSomenteDigitos(valor?: string | null): string {
+  return (valor || '').replace(/\D/g, '');
+}
+
+function resolverNomeIndustriaOuFornecedor(
+  valor: string,
+  nomeExplicito?: string,
+  itens?: ItemIsv[]
+): string {
+  if (nomeExplicito && nomeExplicito.trim()) {
+    return nomeExplicito.trim();
+  }
+
+  const bruto = (valor || '').trim();
+  if (!bruto) return '';
+
+  const apenasDigitos = normalizarCnpjSomenteDigitos(bruto);
+  if (apenasDigitos.length === 14) {
+    const ind = isvService.getIndustriaByCnpj(apenasDigitos);
+    if (ind?.razao_social && ind.razao_social.trim()) {
+      return ind.razao_social.trim();
+    }
+    if (ind?.nome_exibicao && ind.nome_exibicao.trim()) {
+      return ind.nome_exibicao.trim();
+    }
+
+    // Fallback nos itens filtrados já carregados (útil em testes ou inicialização parcial)
+    if (itens && itens.length > 0) {
+      for (const it of itens) {
+        const vinc = it.vinculos_detalhados?.find(
+          (v) => normalizarCnpjSomenteDigitos(v.cnpj) === apenasDigitos
+        );
+        if (vinc?.nome_industria && vinc.nome_industria.trim()) {
+          return vinc.nome_industria.trim();
+        }
+        if (it.cnpjs?.some((c) => normalizarCnpjSomenteDigitos(c) === apenasDigitos)) {
+          if (it.fornecedor_razao_social && it.fornecedor_razao_social.trim() && it.fornecedor_razao_social !== 'NÃO IDENTIFICADO') {
+            return it.fornecedor_razao_social.trim();
+          }
+          if (it.industrias_nomes && it.industrias_nomes.length > 0 && it.industrias_nomes[0].trim()) {
+            return it.industrias_nomes[0].trim();
+          }
+        }
+      }
+    }
+
+    if (ind?.cnpj_formatado) {
+      return ind.cnpj_formatado;
+    }
+  } else {
+    const upper = bruto.toUpperCase();
+    const ind = isvService.getIndustrias().find(
+      (i) =>
+        i.cnpj === bruto ||
+        (i.razao_social && i.razao_social.trim().toUpperCase() === upper) ||
+        (i.nome_exibicao && i.nome_exibicao.trim().toUpperCase() === upper)
+    );
+    if (ind?.razao_social && ind.razao_social.trim()) {
+      return ind.razao_social.trim();
+    }
+    if (ind?.nome_exibicao && ind.nome_exibicao.trim()) {
+      return ind.nome_exibicao.trim();
+    }
+  }
+
+  return bruto;
+}
+
+function resolverNomePromotor(
+  valor: string,
+  nomeExplicito?: string
+): string {
+  if (nomeExplicito && nomeExplicito.trim()) {
+    return nomeExplicito.trim();
+  }
+  const bruto = (valor || '').trim();
+  if (!bruto) return '';
+
+  const upper = bruto.toUpperCase();
+  const prom = promotorService.getPromotores().find(
+    (p) => p.promotorId === bruto || (p.nome && p.nome.trim().toUpperCase() === upper)
+  );
+  if (prom?.nome && prom.nome.trim()) {
+    return prom.nome.trim();
+  }
+  return bruto;
+}
+
+function isValorEntidadeAtivo(val?: string | null): val is string {
+  if (!val) return false;
+  const clean = val.trim().toUpperCase();
+  return clean.length > 0 && clean !== 'TODOS' && clean !== 'TODAS' && clean !== 'GERAL';
+}
+
+/**
+ * Função centralizada e reutilizável para identificar o tipo de relatório PDF
+ * e os nomes completos das entidades selecionadas com base nos filtros aplicados.
+ * Garante comportamento idêntico entre Dashboard, módulo ISV, Promotores,
+ * Fornecedores e Agências.
+ */
+export function resolverIdentificacaoRelatorioPdf(
+  options?: Partial<IsvPdfOptions>,
+  itens?: ItemIsv[]
+): IdentificacaoRelatorioPdf {
+  const filtros = options?.filtros;
+  const entidades: EntidadeSelecionadaPdf[] = [];
+
+  const isFornecedorExplicit = options?.tipoAgrupamento === 'FORNECEDOR';
+  const isIndustriaExplicit = options?.tipoAgrupamento === 'INDUSTRIA';
+  const isPromotorExplicit = options?.tipoAgrupamento === 'PROMOTOR';
+  const isAgenciaExplicit = options?.tipoAgrupamento === 'AGENCIA';
+
+  // 1. Fornecedor (quando explicitado por filtro de fornecedor ou agrupamento FORNECEDOR)
+  const rawFornecedorFiltro =
+    filtros?.fornecedorNome ||
+    filtros?.fornecedor ||
+    filtros?.fornecedorCnpj ||
+    options?.fornecedorNome;
+  const rawFornecedor = isFornecedorExplicit && isValorEntidadeAtivo(options?.nomeEntidade)
+    ? options!.nomeEntidade!
+    : isValorEntidadeAtivo(rawFornecedorFiltro)
+    ? rawFornecedorFiltro
+    : undefined;
+
+  let fornecedorResolvidoUpper = '';
+  let fornecedorDigitos = '';
+  if (rawFornecedor) {
+    const nomeForn = resolverNomeIndustriaOuFornecedor(
+      rawFornecedor,
+      options?.fornecedorNome || filtros?.fornecedorNome,
+      itens
+    );
+    fornecedorResolvidoUpper = nomeForn.toUpperCase();
+    fornecedorDigitos = normalizarCnpjSomenteDigitos(rawFornecedor);
+    entidades.push({
+      tipo: 'FORNECEDOR',
+      rotulo: 'Fornecedor',
+      nome: fornecedorResolvidoUpper,
+    });
+  }
+
+  // 2. Indústria (filtros.industriaCnpj / filtros.industria ou agrupamento INDUSTRIA)
+  const rawIndustriaFiltro = isValorEntidadeAtivo(filtros?.industriaCnpj)
+    ? filtros!.industriaCnpj!
+    : isValorEntidadeAtivo(filtros?.industria)
+    ? filtros!.industria!
+    : undefined;
+  const rawIndustria = isIndustriaExplicit && isValorEntidadeAtivo(options?.nomeEntidade)
+    ? options!.nomeEntidade!
+    : rawIndustriaFiltro || (!isFornecedorExplicit && isValorEntidadeAtivo(options?.industriaNome) ? options!.industriaNome! : undefined);
+
+  if (rawIndustria) {
+    const nomeInd = resolverNomeIndustriaOuFornecedor(
+      rawIndustria,
+      options?.industriaNome || filtros?.industriaNome,
+      itens
+    );
+    const nomeIndUpper = nomeInd.toUpperCase();
+    const indDigitos = normalizarCnpjSomenteDigitos(rawIndustria);
+
+    // Evita duplicar quando um relatório explícito de Fornecedor recebe também o mesmo CNPJ no estado de filtros
+    const mesmoQueFornecedor =
+      isFornecedorExplicit &&
+      entidades.some(
+        (e) =>
+          e.tipo === 'FORNECEDOR' &&
+          (e.nome === nomeIndUpper || (fornecedorDigitos.length === 14 && indDigitos === fornecedorDigitos))
+      );
+
+    if (!mesmoQueFornecedor) {
+      entidades.push({
+        tipo: 'INDUSTRIA',
+        rotulo: 'Indústria',
+        nome: nomeIndUpper,
+      });
+    }
+  }
+
+  // 3. Agência
+  const rawAgenciaFiltro = isValorEntidadeAtivo(filtros?.agencia) ? filtros!.agencia! : undefined;
+  const rawAgencia = isAgenciaExplicit && isValorEntidadeAtivo(options?.nomeEntidade)
+    ? options!.nomeEntidade!
+    : rawAgenciaFiltro || (isValorEntidadeAtivo(options?.agenciaNome) ? options!.agenciaNome! : undefined) || (isValorEntidadeAtivo(filtros?.agenciaNome) ? filtros!.agenciaNome! : undefined);
+
+  if (rawAgencia) {
+    entidades.push({
+      tipo: 'AGENCIA',
+      rotulo: 'Agência',
+      nome: rawAgencia.trim().toUpperCase(),
+    });
+  }
+
+  // 4. Promotor
+  const rawPromotorFiltro = isValorEntidadeAtivo(filtros?.promotorId) ? filtros!.promotorId! : undefined;
+  const rawPromotor = isPromotorExplicit && isValorEntidadeAtivo(options?.nomeEntidade)
+    ? options!.nomeEntidade!
+    : rawPromotorFiltro || (isValorEntidadeAtivo(options?.promotorNome) ? options!.promotorNome! : undefined) || (isValorEntidadeAtivo(filtros?.promotorNome) ? filtros!.promotorNome! : undefined);
+
+  if (rawPromotor) {
+    const nomeProm = resolverNomePromotor(
+      rawPromotor,
+      options?.promotorNome || filtros?.promotorNome
+    );
+    entidades.push({
+      tipo: 'PROMOTOR',
+      rotulo: 'Promotor',
+      nome: nomeProm.toUpperCase(),
+    });
+  }
+
+  // Regras oficiais de título principal e destaque
+  if (entidades.length >= 2) {
+    return {
+      tipoRelatorio: 'PERSONALIZADO',
+      tituloPrincipal: 'RELATÓRIO PERSONALIZADO',
+      destaqueEntidade: entidades.map((e) => `${e.rotulo}: ${e.nome}`).join('  |  '),
+      entidades,
+    };
+  }
+
+  if (entidades.length === 1) {
+    const unica = entidades[0];
+    switch (unica.tipo) {
+      case 'INDUSTRIA':
+        return {
+          tipoRelatorio: 'POR_INDUSTRIA',
+          tituloPrincipal: 'RELATÓRIO POR INDÚSTRIA',
+          destaqueEntidade: unica.nome,
+          entidades,
+        };
+      case 'FORNECEDOR':
+        return {
+          tipoRelatorio: 'POR_FORNECEDOR',
+          tituloPrincipal: 'RELATÓRIO POR FORNECEDOR',
+          destaqueEntidade: unica.nome,
+          entidades,
+        };
+      case 'PROMOTOR':
+        return {
+          tipoRelatorio: 'POR_PROMOTOR',
+          tituloPrincipal: 'RELATÓRIO POR PROMOTOR',
+          destaqueEntidade: unica.nome,
+          entidades,
+        };
+      case 'AGENCIA':
+        return {
+          tipoRelatorio: 'POR_AGENCIA',
+          tituloPrincipal: 'RELATÓRIO POR AGÊNCIA',
+          destaqueEntidade: unica.nome,
+          entidades,
+        };
+    }
+  }
+
+  return {
+    tipoRelatorio: 'GERAL_LOJA',
+    tituloPrincipal: 'GERAL DA LOJA',
+    destaqueEntidade: undefined,
+    entidades: [],
+  };
 }
 
 // ============================================================================
@@ -74,8 +376,10 @@ export interface ResultadoExportacaoPdf {
  * Constrói uma descrição legível e oficial de todos os filtros ativos aplicados.
  */
 export function formatarResumoFiltrosIsv(
-  filtros?: Partial<FiltrosIsv>,
-  fallback?: string
+  filtros?: FiltrosIdentificacaoPdf,
+  fallback?: string,
+  itens?: ItemIsv[],
+  options?: Partial<IsvPdfOptions>
 ): string {
   if (!filtros) {
     return fallback || 'Todos os produtos (sem filtros restritivos) | Ordenação: Maior Valor de Estoque';
@@ -93,23 +397,53 @@ export function formatarResumoFiltrosIsv(
       ACOUGUE: 'Açougue (AC.)',
       HORTIFRUTI: 'Hortifruti (HF.)',
       LOJA: 'Loja (CR. / Mercearia)',
+      CAFETERIA: 'Cafeteria',
     };
     parts.push(`Setor: ${mapSetor[filtros.setorOperacional] || filtros.setorOperacional}`);
   }
 
-  if (filtros.agencia && filtros.agencia !== 'TODAS') {
+  if (filtros.setorFisico && filtros.setorFisico !== 'TODOS') {
+    parts.push(`Setor Físico: ${filtros.setorFisico}`);
+  }
+
+  if (filtros.setorBalanco && filtros.setorBalanco !== 'TODOS') {
+    parts.push(`Setor Balanço: ${filtros.setorBalanco}`);
+  }
+
+  if (isValorEntidadeAtivo(filtros.agencia)) {
     parts.push(`Agência: ${filtros.agencia}`);
   }
 
-  if (filtros.industriaCnpj && filtros.industriaCnpj !== 'TODAS') {
-    const ind = isvService.getIndustriaByCnpj(filtros.industriaCnpj);
-    const nomeInd = ind?.razao_social || ind?.nome_exibicao || filtros.industriaCnpj;
-    parts.push(`Fornecedor: ${nomeInd}`);
+  const indVal = isValorEntidadeAtivo(filtros.industriaCnpj)
+    ? filtros.industriaCnpj
+    : isValorEntidadeAtivo(filtros.industria)
+    ? filtros.industria
+    : undefined;
+  if (indVal) {
+    const nomeInd = resolverNomeIndustriaOuFornecedor(
+      indVal,
+      filtros.industriaNome || options?.industriaNome,
+      itens
+    );
+    parts.push(`Indústria: ${nomeInd}`);
   }
 
-  if (filtros.promotorId && filtros.promotorId !== 'TODOS') {
-    const prom = promotorService.getPromotores().find((p) => p.promotorId === filtros.promotorId);
-    parts.push(`Promotor: ${prom?.nome || filtros.promotorId}`);
+  const fornVal = filtros.fornecedorNome || filtros.fornecedor || filtros.fornecedorCnpj;
+  if (isValorEntidadeAtivo(fornVal)) {
+    const nomeForn = resolverNomeIndustriaOuFornecedor(
+      fornVal,
+      filtros.fornecedorNome || options?.fornecedorNome,
+      itens
+    );
+    parts.push(`Fornecedor: ${nomeForn}`);
+  }
+
+  if (isValorEntidadeAtivo(filtros.promotorId)) {
+    const nomeProm = resolverNomePromotor(
+      filtros.promotorId,
+      filtros.promotorNome || options?.promotorNome
+    );
+    parts.push(`Promotor: ${nomeProm}`);
   }
 
   if (filtros.situacaoVinculo && filtros.situacaoVinculo !== 'TODOS') {
@@ -134,7 +468,13 @@ export function formatarResumoFiltrosIsv(
   }
 
   if (filtros.filtroValor && filtros.filtroValor !== 'TODOS') {
-    parts.push(filtros.filtroValor === 'ATE_250' ? 'Valor até R$ 250' : 'Valor acima de R$ 250');
+    if (filtros.filtroValor === 'CUSTOM') {
+      const min = filtros.valorMin !== undefined ? formatarMoedaBR(filtros.valorMin) : 'R$ 0,00';
+      const max = filtros.valorMax !== undefined ? formatarMoedaBR(filtros.valorMax) : 'sem teto';
+      parts.push(`Valor: ${min} até ${max}`);
+    } else {
+      parts.push(filtros.filtroValor === 'ATE_250' ? 'Valor até R$ 250' : 'Valor acima de R$ 250');
+    }
   }
 
   if (filtros.ordenacao) {
@@ -211,6 +551,7 @@ interface DadosCabecalhoIsv {
   pageWidth: number;
   marginX: number;
   tituloFaixaLaranja: string;
+  destaqueEntidade?: string;
   subtituloFaixaLaranja?: string;
   dataHoraEmissao: string;
   filialNome: string;
@@ -225,6 +566,7 @@ function desenharCabecalhoInstitucionalIsv(dados: DadosCabecalhoIsv): number {
     pageWidth,
     marginX,
     tituloFaixaLaranja,
+    destaqueEntidade,
     subtituloFaixaLaranja,
     dataHoraEmissao,
     filialNome,
@@ -284,24 +626,45 @@ function desenharCabecalhoInstitucionalIsv(dados: DadosCabecalhoIsv): number {
   doc.setFontSize(7.5);
   doc.text('Estoque Consolidado EMB1 + EMB9', pageWidth - marginX, 19.5, { align: 'right' });
 
-  // 2. Faixa Laranja Institucional (#EA580C) com Resumo dos Filtros
+  // 2. Faixa Laranja Institucional (#EA580C) com Identificação Dinâmica + Destaque da Entidade + Resumo dos Filtros
   const yFaixaLaranja = alturaTopoAzul + 3.5;
   const larguraUtil = pageWidth - marginX * 2;
-  const larguraTextoFiltros = larguraUtil - 8;
+  const larguraTexto = larguraUtil - 8;
 
-  const textoSubtituloOuFiltros = resumoFiltros
-    ? `Filtros: ${resumoFiltros}`
-    : subtituloFaixaLaranja || '';
+  // Preparar linhas de Título Principal
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  const linhasTitulo = doc.splitTextToSize(tituloFaixaLaranja.toUpperCase(), larguraTexto);
 
-  doc.setFontSize(7.2);
-  doc.setFont('helvetica', 'normal');
-  const linhasTextoFiltro = textoSubtituloOuFiltros
-    ? doc.splitTextToSize(textoSubtituloOuFiltros, larguraTextoFiltros)
+  // Preparar linhas de Destaque da(s) Entidade(s) com quebra automática sem cortar nome completo
+  const textoDestaqueLimpo = (destaqueEntidade || '').trim();
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9);
+  const linhasDestaque = textoDestaqueLimpo
+    ? doc.splitTextToSize(textoDestaqueLimpo, larguraTexto)
     : [];
 
-  const alturaFaixaLaranja = linhasTextoFiltro.length > 0
-    ? Math.max(10, 6.5 + (linhasTextoFiltro.length * 3.5))
-    : 8.5;
+  // Preparar linhas opcionais de Subtítulo (ex: CNPJ) e Resumo dos Filtros
+  const textoSubtitulo = (subtituloFaixaLaranja || '').trim();
+  const textoFiltros = resumoFiltros ? `Filtros: ${resumoFiltros}` : '';
+  const textoSecundario = [textoSubtitulo, textoFiltros].filter(Boolean).join('  •  ');
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.2);
+  const linhasTextoFiltro = textoSecundario
+    ? doc.splitTextToSize(textoSecundario, larguraTexto)
+    : [];
+
+  // Cálculo dinâmico da altura exata da faixa laranja
+  let alturaFaixaLaranja = 3.2; // Padding superior
+  alturaFaixaLaranja += linhasTitulo.length * 4.2;
+  if (linhasDestaque.length > 0) {
+    alturaFaixaLaranja += 1.0 + linhasDestaque.length * 4.2;
+  }
+  if (linhasTextoFiltro.length > 0) {
+    alturaFaixaLaranja += 1.0 + linhasTextoFiltro.length * 3.5;
+  }
+  alturaFaixaLaranja = Math.max(10, alturaFaixaLaranja + 2.2);
 
   doc.setFillColor(234, 88, 12); // orange-600 vibrante
   doc.rect(marginX, yFaixaLaranja, larguraUtil, alturaFaixaLaranja, 'F');
@@ -311,18 +674,35 @@ function desenharCabecalhoInstitucionalIsv(dados: DadosCabecalhoIsv): number {
   doc.setLineWidth(0.2);
   doc.rect(marginX, yFaixaLaranja, larguraUtil, alturaFaixaLaranja, 'S');
 
-  // Título da faixa laranja em branco puro
+  let currY = yFaixaLaranja + 4.8;
+
+  // Linha 1: Tipo Principal do Relatório em branco puro
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
-  doc.text(tituloFaixaLaranja.toUpperCase(), marginX + 3.5, yFaixaLaranja + 4.8);
+  doc.setFontSize(9.5);
+  for (let i = 0; i < linhasTitulo.length; i++) {
+    doc.text(linhasTitulo[i], marginX + 3.5, currY);
+    currY += 4.2;
+  }
 
-  // Linhas do resumo legível dos filtros ativos
+  // Linha 2: Destaque com Nome Completo da Entidade (ou entidades combinadas), com quebra automática
+  if (linhasDestaque.length > 0) {
+    currY += 0.4;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9);
+    doc.setTextColor(254, 240, 138); // yellow-200 para máximo contraste e destaque
+    for (let i = 0; i < linhasDestaque.length; i++) {
+      doc.text(linhasDestaque[i], marginX + 3.5, currY);
+      currY += 4.2;
+    }
+  }
+
+  // Linha 3: Subtítulo + Resumo legível dos filtros adicionais
   if (linhasTextoFiltro.length > 0) {
+    currY += 0.4;
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7.2);
     doc.setTextColor(255, 247, 237); // orange-50
-    let currY = yFaixaLaranja + 8.5;
     for (let i = 0; i < linhasTextoFiltro.length; i++) {
       doc.text(linhasTextoFiltro[i], marginX + 3.5, currY);
       currY += 3.5;
@@ -576,39 +956,64 @@ export async function gerarRelatorioFornecedorPdf(
   const filialNome = options?.filialNome || 'FILIAL 172 — CASCAVEL';
 
   let razaoSocialFornecedor = (fornecedorNome || 'FORNECEDOR SELECIONADO').trim().toUpperCase();
+  const apenasDigitosForn = normalizarCnpjSomenteDigitos(fornecedorNome);
   if (fornecedorNome) {
-    const apenasDigitos = fornecedorNome.replace(/\D/g, '');
-    if (apenasDigitos.length === 14) {
-      const ind = isvService.getIndustriaByCnpj(apenasDigitos);
-      if (ind?.razao_social) {
-        razaoSocialFornecedor = ind.razao_social.trim().toUpperCase();
-      }
-    }
+    razaoSocialFornecedor = resolverNomeIndustriaOuFornecedor(
+      fornecedorNome,
+      options?.tipoAgrupamento === 'INDUSTRIA' ? options?.industriaNome : options?.fornecedorNome,
+      itens
+    ).toUpperCase();
   }
 
-  const itensDoFornecedor = itens.filter((it) => {
-    if (!fornecedorNome || fornecedorNome === 'TODOS' || fornecedorNome === 'TODAS') return true;
-    const fn = (extrairFornecedorProduto(it) || '').toUpperCase();
-    const indNomes = (it.industrias_nomes || []).map((n) => n.toUpperCase());
-    return fn.includes(razaoSocialFornecedor) || indNomes.some((n) => n.includes(razaoSocialFornecedor));
-  });
+  const itensDoFornecedor = options?.preservarItensRecebidos
+    ? itens
+    : itens.filter((it) => {
+        if (!fornecedorNome || fornecedorNome === 'TODOS' || fornecedorNome === 'TODAS') return true;
+        if (apenasDigitosForn.length === 14 && it.cnpjs?.some((c) => normalizarCnpjSomenteDigitos(c) === apenasDigitosForn)) {
+          return true;
+        }
+        const fn = (extrairFornecedorProduto(it) || '').toUpperCase();
+        const indNomes = (it.industrias_nomes || []).map((n) => n.toUpperCase());
+        return fn.includes(razaoSocialFornecedor) || indNomes.some((n) => n.includes(razaoSocialFornecedor));
+      });
 
   const itensProcessados = options?.limiteQuantidade && options.limiteQuantidade !== 'TODOS'
     ? itensDoFornecedor.slice(0, Number(options.limiteQuantidade))
     : itensDoFornecedor;
 
-  let valorTotal = 0;
-  for (const it of itensProcessados) {
-    if (it.valor_estoque) valorTotal += it.valor_estoque;
+  let valorTotal = options?.valorTotalFiltrado;
+  if (valorTotal === undefined) {
+    valorTotal = 0;
+    for (const it of itensProcessados) {
+      if (it.valor_estoque) valorTotal += it.valor_estoque;
+    }
   }
 
-  const resumoFiltros = options?.filtrosDescricao || formatarResumoFiltrosIsv(options?.filtros, `Fornecedor: ${razaoSocialFornecedor}`);
+  const tipoEntidadeAlvo = options?.tipoAgrupamento === 'INDUSTRIA' ? 'INDUSTRIA' : 'FORNECEDOR';
+  const identificacao = resolverIdentificacaoRelatorioPdf(
+    {
+      ...options,
+      tipoAgrupamento: tipoEntidadeAlvo,
+      nomeEntidade: razaoSocialFornecedor,
+    },
+    itensProcessados
+  );
+
+  const resumoFiltros =
+    options?.filtrosDescricao ||
+    formatarResumoFiltrosIsv(
+      options?.filtros,
+      `${tipoEntidadeAlvo === 'INDUSTRIA' ? 'Indústria' : 'Fornecedor'}: ${razaoSocialFornecedor}`,
+      itensProcessados,
+      options
+    );
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
     marginX,
-    tituloFaixaLaranja: `FORNECEDOR: ${razaoSocialFornecedor}`,
+    tituloFaixaLaranja: identificacao.tituloPrincipal,
+    destaqueEntidade: identificacao.destaqueEntidade || razaoSocialFornecedor,
     subtituloFaixaLaranja: options?.subtituloEntidade,
     dataHoraEmissao,
     filialNome,
@@ -692,12 +1097,13 @@ export async function gerarRelatorioFornecedorPdf(
   });
 
   const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
-  const infoEsquerda = `ISV • Fornecedor: ${razaoSocialFornecedor} — ${filialNome}`;
+  const infoEsquerda = `ISV • ${identificacao.tituloPrincipal}: ${identificacao.destaqueEntidade || razaoSocialFornecedor} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
   const timestamp = agora.toISOString().slice(0, 10);
   const nomeArq = razaoSocialFornecedor.replace(/[^A-Z0-9]/g, '_').substring(0, 28);
-  const nomeArquivo = `ISV_FORNECEDOR_${nomeArq}_${timestamp}.pdf`;
+  const prefixoArq = tipoEntidadeAlvo === 'INDUSTRIA' ? 'ISV_INDUSTRIA' : 'ISV_FORNECEDOR';
+  const nomeArquivo = `${prefixoArq}_${nomeArq}_${timestamp}.pdf`;
   const dl = dispararDownloadPdf(doc, nomeArquivo);
 
   return {
@@ -706,6 +1112,7 @@ export async function gerarRelatorioFornecedorPdf(
     totalPaginas: doc.getNumberOfPages(),
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
+    identificacao,
   };
 }
 
@@ -737,30 +1144,50 @@ export async function gerarRelatorioPromotorPdf(
   const dataHoraEmissao = agora.toLocaleString('pt-BR');
   const filialNome = options?.filialNome || 'FILIAL 172 — CASCAVEL';
 
-  const nomePromLimpo = (promotorNome || 'PROMOTOR SELECIONADO').trim().toUpperCase();
+  const nomePromLimpo = resolverNomePromotor(
+    promotorNome || 'PROMOTOR SELECIONADO',
+    options?.promotorNome
+  ).toUpperCase();
 
-  const itensDoPromotor = itens.filter((it) => {
-    if (!promotorNome || promotorNome === 'TODOS') return true;
-    const pNomes = (it.promotores_nomes || []).map((n) => n.toUpperCase());
-    return pNomes.some((n) => n.includes(nomePromLimpo));
-  });
+  const itensDoPromotor = options?.preservarItensRecebidos
+    ? itens
+    : itens.filter((it) => {
+        if (!promotorNome || promotorNome === 'TODOS') return true;
+        const pNomes = (it.promotores_nomes || []).map((n) => n.toUpperCase());
+        return pNomes.some((n) => n.includes(nomePromLimpo));
+      });
 
   const itensProcessados = options?.limiteQuantidade && options.limiteQuantidade !== 'TODOS'
     ? itensDoPromotor.slice(0, Number(options.limiteQuantidade))
     : itensDoPromotor;
 
-  let valorTotal = 0;
-  for (const it of itensProcessados) {
-    if (it.valor_estoque) valorTotal += it.valor_estoque;
+  let valorTotal = options?.valorTotalFiltrado;
+  if (valorTotal === undefined) {
+    valorTotal = 0;
+    for (const it of itensProcessados) {
+      if (it.valor_estoque) valorTotal += it.valor_estoque;
+    }
   }
 
-  const resumoFiltros = options?.filtrosDescricao || formatarResumoFiltrosIsv(options?.filtros, `Promotor: ${nomePromLimpo}`);
+  const identificacao = resolverIdentificacaoRelatorioPdf(
+    {
+      ...options,
+      tipoAgrupamento: 'PROMOTOR',
+      nomeEntidade: nomePromLimpo,
+    },
+    itensProcessados
+  );
+
+  const resumoFiltros =
+    options?.filtrosDescricao ||
+    formatarResumoFiltrosIsv(options?.filtros, `Promotor: ${nomePromLimpo}`, itensProcessados, options);
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
     marginX,
-    tituloFaixaLaranja: `PROMOTOR: ${nomePromLimpo}`,
+    tituloFaixaLaranja: identificacao.tituloPrincipal,
+    destaqueEntidade: identificacao.destaqueEntidade || nomePromLimpo,
     subtituloFaixaLaranja: options?.subtituloEntidade,
     dataHoraEmissao,
     filialNome,
@@ -844,7 +1271,7 @@ export async function gerarRelatorioPromotorPdf(
   });
 
   const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
-  const infoEsquerda = `ISV • Promotor: ${nomePromLimpo} — ${filialNome}`;
+  const infoEsquerda = `ISV • ${identificacao.tituloPrincipal}: ${identificacao.destaqueEntidade || nomePromLimpo} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
   const timestamp = agora.toISOString().slice(0, 10);
@@ -858,6 +1285,7 @@ export async function gerarRelatorioPromotorPdf(
     totalPaginas: doc.getNumberOfPages(),
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
+    identificacao,
   };
 }
 
@@ -891,28 +1319,45 @@ export async function gerarRelatorioAgenciaPdf(
 
   const nomeAgLimpo = (agenciaNome || 'AGÊNCIA SELECIONADA').trim().toUpperCase();
 
-  const itensDaAgencia = itens.filter((it) => {
-    if (!agenciaNome || agenciaNome === 'TODAS') return true;
-    const agNomes = (it.agencias_nomes || []).map((n) => n.toUpperCase());
-    return agNomes.some((n) => n.includes(nomeAgLimpo));
-  });
+  const itensDaAgencia = options?.preservarItensRecebidos
+    ? itens
+    : itens.filter((it) => {
+        if (!agenciaNome || agenciaNome === 'TODAS') return true;
+        const agNomes = (it.agencias_nomes || []).map((n) => n.toUpperCase());
+        return agNomes.some((n) => n.includes(nomeAgLimpo));
+      });
 
   const itensProcessados = options?.limiteQuantidade && options.limiteQuantidade !== 'TODOS'
     ? itensDaAgencia.slice(0, Number(options.limiteQuantidade))
     : itensDaAgencia;
 
-  let valorTotal = 0;
-  for (const it of itensProcessados) {
-    if (it.valor_estoque) valorTotal += it.valor_estoque;
+  let valorTotal = options?.valorTotalFiltrado;
+  if (valorTotal === undefined) {
+    valorTotal = 0;
+    for (const it of itensProcessados) {
+      if (it.valor_estoque) valorTotal += it.valor_estoque;
+    }
   }
 
-  const resumoFiltros = options?.filtrosDescricao || formatarResumoFiltrosIsv(options?.filtros, `Agência: ${nomeAgLimpo}`);
+  const identificacao = resolverIdentificacaoRelatorioPdf(
+    {
+      ...options,
+      tipoAgrupamento: 'AGENCIA',
+      nomeEntidade: nomeAgLimpo,
+    },
+    itensProcessados
+  );
+
+  const resumoFiltros =
+    options?.filtrosDescricao ||
+    formatarResumoFiltrosIsv(options?.filtros, `Agência: ${nomeAgLimpo}`, itensProcessados, options);
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
     marginX,
-    tituloFaixaLaranja: `AGÊNCIA: ${nomeAgLimpo}`,
+    tituloFaixaLaranja: identificacao.tituloPrincipal,
+    destaqueEntidade: identificacao.destaqueEntidade || nomeAgLimpo,
     subtituloFaixaLaranja: options?.subtituloEntidade,
     dataHoraEmissao,
     filialNome,
@@ -996,7 +1441,7 @@ export async function gerarRelatorioAgenciaPdf(
   });
 
   const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
-  const infoEsquerda = `ISV • Agência: ${nomeAgLimpo} — ${filialNome}`;
+  const infoEsquerda = `ISV • ${identificacao.tituloPrincipal}: ${identificacao.destaqueEntidade || nomeAgLimpo} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
   const timestamp = agora.toISOString().slice(0, 10);
@@ -1010,6 +1455,7 @@ export async function gerarRelatorioAgenciaPdf(
     totalPaginas: doc.getNumberOfPages(),
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
+    identificacao,
   };
 }
 
@@ -1030,12 +1476,16 @@ export async function gerarRelatorioIsvA4Pdf(
   itens: ItemIsv[],
   options: IsvPdfOptions
 ): Promise<ResultadoExportacaoPdf> {
-  // Roteamento inteligente baseado no tipo de agrupamento solicitado
+  // Roteamento inteligente baseado no tipo de agrupamento explícito
   if (options.tipoAgrupamento === 'TOP30' || options.limiteQuantidade === 30) {
     return gerarRelatorioTop30Pdf(itens, options);
   }
 
   if (options.tipoAgrupamento === 'FORNECEDOR' && options.nomeEntidade) {
+    return gerarRelatorioFornecedorPdf(options.nomeEntidade, itens, options);
+  }
+
+  if (options.tipoAgrupamento === 'INDUSTRIA' && options.nomeEntidade) {
     return gerarRelatorioFornecedorPdf(options.nomeEntidade, itens, options);
   }
 
@@ -1086,19 +1536,20 @@ export async function gerarRelatorioIsvA4Pdf(
     estoqueTotalGeral += (itensProcessados[i].estoque_total ?? itensProcessados[i].produto?.estoque_total ?? 0);
   }
 
-  let tituloFaixaLaranja = options.tipoRelatorioTitulo || options.tituloFiltro || 'PAINEL ISV — PRODUTOS FILTRADOS';
-  if (options.nomeEntidade) {
-    tituloFaixaLaranja = `${options.tipoAgrupamento || 'ENTIDADE'}: ${options.nomeEntidade}`;
-  }
+  // Identificação dinâmica centralizada com base nos filtros efetivamente aplicados
+  const identificacao = resolverIdentificacaoRelatorioPdf(options, itensProcessados);
 
-  // Resumo legível dos filtros ativos aplicados
-  const resumoFiltros = options.filtrosDescricao || formatarResumoFiltrosIsv(options.filtros);
+  // Resumo legível dos filtros ativos aplicados (incluindo estoque, valor, setor, dias s/ venda, idade, ordenação)
+  const resumoFiltros =
+    options.filtrosDescricao ||
+    formatarResumoFiltrosIsv(options.filtros, undefined, itensProcessados, options);
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
     marginX,
-    tituloFaixaLaranja,
+    tituloFaixaLaranja: identificacao.tituloPrincipal,
+    destaqueEntidade: identificacao.destaqueEntidade,
     subtituloFaixaLaranja: options.subtituloEntidade,
     dataHoraEmissao,
     filialNome,
@@ -1233,11 +1684,13 @@ export async function gerarRelatorioIsvA4Pdf(
     : estoqueTotalGeral.toLocaleString('pt-BR', { minimumFractionDigits: 3 });
 
   const infoCentro = `Exibindo ${itensProcessados.length.toLocaleString('pt-BR')} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotalFiltrado)} | Estoque Consolidado: ${estoqueFormatado}`;
-  const infoEsquerda = `ISV • Inteligência de Estoque — ${filialNome}`;
+  const infoEsquerda = identificacao.destaqueEntidade
+    ? `ISV • ${identificacao.tituloPrincipal}: ${identificacao.destaqueEntidade} — ${filialNome}`
+    : `ISV • ${identificacao.tituloPrincipal} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
   const timestamp = agora.toISOString().slice(0, 10);
-  const nomeArquivo = `ISV_RELATORIO_FILTRADOS_${timestamp}.pdf`;
+  const nomeArquivo = `ISV_${identificacao.tipoRelatorio}_${timestamp}.pdf`;
   const dl = dispararDownloadPdf(doc, nomeArquivo);
 
   return {
@@ -1246,6 +1699,7 @@ export async function gerarRelatorioIsvA4Pdf(
     totalPaginas: doc.getNumberOfPages(),
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
+    identificacao,
   };
 }
 
@@ -1260,10 +1714,38 @@ export async function gerarRelatorioEntidadeIsvA4Pdf(
   options?: Partial<IsvPdfOptions>
 ): Promise<ResultadoExportacaoPdf> {
   if (tipo === 'AGENCIA') {
-    return gerarRelatorioAgenciaPdf(entidadeNome, itens, { ...options, subtituloEntidade: subtitulo });
+    return gerarRelatorioAgenciaPdf(entidadeNome, itens, {
+      ...options,
+      tipoAgrupamento: 'AGENCIA',
+      nomeEntidade: entidadeNome,
+      subtituloEntidade: subtitulo,
+      preservarItensRecebidos: true,
+    });
   } else if (tipo === 'PROMOTOR') {
-    return gerarRelatorioPromotorPdf(entidadeNome, itens, { ...options, subtituloEntidade: subtitulo });
+    return gerarRelatorioPromotorPdf(entidadeNome, itens, {
+      ...options,
+      tipoAgrupamento: 'PROMOTOR',
+      nomeEntidade: entidadeNome,
+      subtituloEntidade: subtitulo,
+      preservarItensRecebidos: true,
+    });
+  } else if (tipo === 'INDUSTRIA') {
+    return gerarRelatorioFornecedorPdf(entidadeNome, itens, {
+      ...options,
+      tipoAgrupamento: 'INDUSTRIA',
+      nomeEntidade: entidadeNome,
+      industriaNome: entidadeNome,
+      subtituloEntidade: subtitulo,
+      preservarItensRecebidos: true,
+    });
   } else {
-    return gerarRelatorioFornecedorPdf(entidadeNome, itens, { ...options, subtituloEntidade: subtitulo });
+    return gerarRelatorioFornecedorPdf(entidadeNome, itens, {
+      ...options,
+      tipoAgrupamento: 'FORNECEDOR',
+      nomeEntidade: entidadeNome,
+      fornecedorNome: entidadeNome,
+      subtituloEntidade: subtitulo,
+      preservarItensRecebidos: true,
+    });
   }
 }

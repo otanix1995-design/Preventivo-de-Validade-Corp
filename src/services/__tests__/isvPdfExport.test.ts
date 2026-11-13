@@ -22,6 +22,8 @@ import {
   gerarRelatorioFornecedorPdf,
   gerarRelatorioPromotorPdf,
   gerarRelatorioAgenciaPdf,
+  gerarRelatorioEntidadeIsvA4Pdf,
+  resolverIdentificacaoRelatorioPdf,
 } from '../isvPdfService';
 import { formatarEstoqueColunaUnica } from '../isvClassificacaoService';
 
@@ -248,6 +250,206 @@ async function runTests() {
   const resAg = await gerarRelatorioAgenciaPdf('AGÊNCIA 1', itens100);
   assert(resAg.sucesso === true, 'Relatório por agência deve concluir');
   console.log('   ✅ Todos os 4 relatórios especializados validados com sucesso');
+
+  // ==========================================================================
+  // Teste 9: Identificação Dinâmica dos Relatórios PDF (Filial 172)
+  // ==========================================================================
+  console.log('9️⃣ Testando identificação dinâmica de títulos e entidades em todos os fluxos...');
+
+  // 9A. Indústria INDUSTRIAS ANHEMBI LTDA (Exemplo Real: 12 produtos, R$ 43.657,67)
+  const cnpjAnhembi = '61414116000180';
+  const itensAnhembi = Array.from({ length: 12 }, (_, i) =>
+    criarItemMock(i + 1, {
+      cnpjs: [cnpjAnhembi],
+      industrias_nomes: ['INDUSTRIAS ANHEMBI LTDA'],
+      fornecedor_razao_social: 'INDUSTRIAS ANHEMBI LTDA',
+      valor_estoque: 3638.1391667,
+      vinculos_detalhados: [
+        {
+          cnpj: cnpjAnhembi,
+          cnpj_formatado: '61.414.116/0001-80',
+          nome_industria: 'INDUSTRIAS ANHEMBI LTDA',
+          promotores: [],
+        },
+      ],
+    })
+  );
+  const resAnhembi = await gerarRelatorioIsvA4Pdf(itensAnhembi, {
+    filialNome: 'Filial 172 — Cascavel',
+    tituloFiltro: 'Geral da Loja', // Mesmo se legado tentar passar fixo, deve prevalecer identificação dinâmica
+    valorTotalFiltrado: 43657.67,
+    filtros: {
+      agencia: 'TODAS',
+      industriaCnpj: cnpjAnhembi,
+      promotorId: 'TODOS',
+      setorOperacional: 'LOJA',
+      filtroEstoque: 'COM_ESTOQUE',
+      ordenacao: 'MAIOR_VALOR',
+    },
+  });
+  assert(resAnhembi.sucesso === true, 'PDF Anhembi deve concluir');
+  assert(resAnhembi.totalItens === 12, 'PDF Anhembi deve conter exatamente 12 produtos');
+  assert(
+    resAnhembi.identificacao?.tituloPrincipal === 'RELATÓRIO POR INDÚSTRIA',
+    `Título Anhembi esperado: RELATÓRIO POR INDÚSTRIA, obtido: ${resAnhembi.identificacao?.tituloPrincipal}`
+  );
+  assert(
+    resAnhembi.identificacao?.destaqueEntidade === 'INDUSTRIAS ANHEMBI LTDA',
+    `Destaque esperado: INDUSTRIAS ANHEMBI LTDA, obtido: ${resAnhembi.identificacao?.destaqueEntidade}`
+  );
+
+  // Via gerarRelatorioEntidadeIsvA4Pdf('INDUSTRIA', ...) (Dashboard modal / ISV)
+  const resAnhembiModal = await gerarRelatorioEntidadeIsvA4Pdf(
+    'INDUSTRIA',
+    'INDUSTRIAS ANHEMBI LTDA',
+    'CNPJ: 61.414.116/0001-80',
+    itensAnhembi,
+    { valorTotalFiltrado: 43657.67 }
+  );
+  assert(
+    resAnhembiModal.identificacao?.tituloPrincipal === 'RELATÓRIO POR INDÚSTRIA' &&
+      resAnhembiModal.identificacao?.destaqueEntidade === 'INDUSTRIAS ANHEMBI LTDA',
+    'Modal de indústria deve gerar RELATÓRIO POR INDÚSTRIA com INDUSTRIAS ANHEMBI LTDA'
+  );
+
+  // 9B. Um promotor selecionado
+  const resPromFiltro = await gerarRelatorioIsvA4Pdf(itens10, {
+    filtros: {
+      agencia: 'TODAS',
+      industriaCnpj: 'TODAS',
+      promotorId: 'CARLOS EDUARDO SILVA',
+      promotorNome: 'CARLOS EDUARDO SILVA',
+    },
+  });
+  assert(
+    resPromFiltro.identificacao?.tituloPrincipal === 'RELATÓRIO POR PROMOTOR' &&
+      resPromFiltro.identificacao?.destaqueEntidade === 'CARLOS EDUARDO SILVA',
+    `Promotor esperado RELATÓRIO POR PROMOTOR, obtido: ${resPromFiltro.identificacao?.tituloPrincipal}`
+  );
+  assert(
+    resProm.identificacao?.tituloPrincipal === 'RELATÓRIO POR PROMOTOR' &&
+      resProm.identificacao?.destaqueEntidade === 'PROMOTOR 1',
+    'gerarRelatorioPromotorPdf também deve usar RELATÓRIO POR PROMOTOR'
+  );
+
+  // 9C. Uma agência selecionada
+  const resAgFiltro = await gerarRelatorioIsvA4Pdf(itens10, {
+    filtros: {
+      agencia: 'AGÊNCIA PARANÁ TRADE',
+      industriaCnpj: 'TODAS',
+      promotorId: 'TODOS',
+    },
+  });
+  assert(
+    resAgFiltro.identificacao?.tituloPrincipal === 'RELATÓRIO POR AGÊNCIA' &&
+      resAgFiltro.identificacao?.destaqueEntidade === 'AGÊNCIA PARANÁ TRADE',
+    `Agência esperada RELATÓRIO POR AGÊNCIA, obtido: ${resAgFiltro.identificacao?.tituloPrincipal}`
+  );
+  assert(
+    resAg.identificacao?.tituloPrincipal === 'RELATÓRIO POR AGÊNCIA' &&
+      resAg.identificacao?.destaqueEntidade === 'AGÊNCIA 1',
+    'gerarRelatorioAgenciaPdf também deve usar RELATÓRIO POR AGÊNCIA'
+  );
+
+  // 9D. Um fornecedor selecionado
+  const resFornEnt = await gerarRelatorioEntidadeIsvA4Pdf(
+    'FORNECEDOR',
+    'DISTRIBUIDORA DE ALIMENTOS CASCAVEL COMERCIAL S/A',
+    'CNPJ: 12.345.678/0001-99',
+    itens10
+  );
+  assert(
+    resFornEnt.identificacao?.tituloPrincipal === 'RELATÓRIO POR FORNECEDOR' &&
+      resFornEnt.identificacao?.destaqueEntidade === 'DISTRIBUIDORA DE ALIMENTOS CASCAVEL COMERCIAL S/A',
+    'Fornecedor deve exibir RELATÓRIO POR FORNECEDOR e razão social completa'
+  );
+  assert(
+    resForn.identificacao?.tituloPrincipal === 'RELATÓRIO POR FORNECEDOR',
+    'gerarRelatorioFornecedorPdf deve exibir RELATÓRIO POR FORNECEDOR'
+  );
+
+  // 9E. Indústria + Promotor -> RELATÓRIO PERSONALIZADO
+  const resIndProm = await gerarRelatorioIsvA4Pdf(itensAnhembi, {
+    filtros: {
+      agencia: 'TODAS',
+      industriaCnpj: cnpjAnhembi,
+      promotorId: 'MARIA FERNANDA',
+      promotorNome: 'MARIA FERNANDA',
+    },
+  });
+  assert(
+    resIndProm.identificacao?.tituloPrincipal === 'RELATÓRIO PERSONALIZADO',
+    `Indústria + Promotor esperado RELATÓRIO PERSONALIZADO, obtido: ${resIndProm.identificacao?.tituloPrincipal}`
+  );
+  assert(
+    Boolean(
+      resIndProm.identificacao?.destaqueEntidade?.includes('Indústria: INDUSTRIAS ANHEMBI LTDA') &&
+        resIndProm.identificacao?.destaqueEntidade?.includes('Promotor: MARIA FERNANDA')
+    ),
+    `Destaque combinado incorreto: ${resIndProm.identificacao?.destaqueEntidade}`
+  );
+
+  // 9F. Agência + Indústria -> RELATÓRIO PERSONALIZADO
+  const resAgInd = await gerarRelatorioIsvA4Pdf(itensAnhembi, {
+    filtros: {
+      agencia: 'AGÊNCIA SUL BRASIL',
+      industriaCnpj: cnpjAnhembi,
+      promotorId: 'TODOS',
+    },
+  });
+  assert(
+    resAgInd.identificacao?.tituloPrincipal === 'RELATÓRIO PERSONALIZADO',
+    `Agência + Indústria esperado RELATÓRIO PERSONALIZADO, obtido: ${resAgInd.identificacao?.tituloPrincipal}`
+  );
+  assert(
+    Boolean(
+      resAgInd.identificacao?.destaqueEntidade?.includes('Agência: AGÊNCIA SUL BRASIL') &&
+        resAgInd.identificacao?.destaqueEntidade?.includes('Indústria: INDUSTRIAS ANHEMBI LTDA')
+    ),
+    `Destaque Agência + Indústria incorreto: ${resAgInd.identificacao?.destaqueEntidade}`
+  );
+
+  // 9G. Nenhuma entidade selecionada (mesmo com filtros adicionais de estoque, valor, setor, dias s/v, idade e ordenação)
+  const resGeralComFiltrosAdicionais = await gerarRelatorioIsvA4Pdf(itens10, {
+    filtros: {
+      agencia: 'TODAS',
+      industriaCnpj: 'TODAS',
+      promotorId: 'TODOS',
+      setorOperacional: 'FRIOS',
+      diasSemVenda: 15,
+      modoDiasSemVenda: 'MINIMO',
+      idade: 30,
+      modoIdade: 'MINIMO',
+      filtroEstoque: 'COM_ESTOQUE',
+      filtroValor: 'ACIMA_250',
+      ordenacao: 'MAIOR_VALOR',
+    },
+  });
+  assert(
+    resGeralComFiltrosAdicionais.identificacao?.tituloPrincipal === 'GERAL DA LOJA',
+    `Sem entidades deve ser GERAL DA LOJA, obtido: ${resGeralComFiltrosAdicionais.identificacao?.tituloPrincipal}`
+  );
+  assert(
+    resGeralComFiltrosAdicionais.identificacao?.destaqueEntidade === undefined,
+    'Sem entidades não deve exibir destaque de entidade'
+  );
+
+  // 9H. Nome longo de indústria/fornecedor com quebra de linha automática sem corte
+  const nomeLongoIndustria =
+    'COMPANHIA BRASILEIRA DE PRODUTOS ALIMENTICIOS INDUSTRIALIZADOS E DISTRIBUICAO NACIONAL S.A. - FILIAL PARANA';
+  const idLongo = resolverIdentificacaoRelatorioPdf({
+    filtros: { industriaCnpj: '99887766000155', industriaNome: nomeLongoIndustria },
+  });
+  assert(
+    idLongo.tituloPrincipal === 'RELATÓRIO POR INDÚSTRIA' && idLongo.destaqueEntidade === nomeLongoIndustria,
+    'Nome completo longo deve ser preservado integralmente sem truncamento'
+  );
+  const resLongo = await gerarRelatorioIsvA4Pdf(itens10, {
+    filtros: { industriaCnpj: '99887766000155', industriaNome: nomeLongoIndustria },
+  });
+  assert(resLongo.sucesso === true && resLongo.tamanhoBytes > 1000, 'PDF com nome longo deve renderizar e expandir cabeçalho sem erros');
+
+  console.log('   ✅ Todos os cenários de identificação dinâmica validados com sucesso!');
 
   console.log('\n🎉 TODOS OS TESTES DE EXPORTAÇÃO PDF ISV PASSARAM COM 100% DE SUCESSO!');
   process.exit(0);
