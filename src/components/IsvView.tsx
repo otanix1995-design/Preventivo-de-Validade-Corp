@@ -93,7 +93,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
 
   // Modal de geração de PDF
   const [isModalPdfOpen, setIsModalPdfOpen] = useState(false);
-  const [pdfExibirValor, setPdfExibirValor] = useState(true);
+  const [pdfExibirValor, setPdfExibirValor] = useState(false);
   const [pdfTipoAgrupamento, setPdfTipoAgrupamento] = useState<'GERAL' | 'TOP30' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA'>('GERAL');
   const [pdfEntidadeSelecionada, setPdfEntidadeSelecionada] = useState<string>('');
   const [pdfLimiteExportacao, setPdfLimiteExportacao] = useState<number | 'TODOS'>('TODOS');
@@ -310,18 +310,20 @@ export const IsvView: React.FC<IsvViewProps> = ({
       if (pdfTipoAgrupamento === 'TOP30') {
         resultado = await gerarRelatorioTop30Pdf(itensFiltrados, {
           filialNome,
+          incluirValoresFinanceiros: pdfExibirValor,
           exibirValorEstoque: pdfExibirValor,
         });
       } else if (pdfTipoAgrupamento === 'INDUSTRIA') {
         const ind = industrias.find((i) => i.cnpj === pdfEntidadeSelecionada);
         if (!ind && !pdfEntidadeSelecionada) {
           resultado = await gerarRelatorioIsvA4Pdf(itensFiltrados, {
+            incluirValoresFinanceiros: pdfExibirValor,
             exibirValorEstoque: pdfExibirValor,
             filialNome,
             limiteQuantidade: pdfLimiteExportacao,
             filtros,
             filtrosDescricao: getFiltrosAtivosDescricao(),
-            valorTotalFiltrado,
+            valorTotalFiltrado: pdfExibirValor ? valorTotalFiltrado : undefined,
             totalItensFiltrados: itensFiltrados.length,
           });
         } else {
@@ -342,6 +344,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
             itensAlvo,
             {
               filialNome,
+              incluirValoresFinanceiros: pdfExibirValor,
               exibirValorEstoque: pdfExibirValor,
               limiteQuantidade: pdfLimiteExportacao,
               filtros,
@@ -360,6 +363,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
         resultado = await gerarRelatorioPromotorPdf(nomeEntidade, itensAlvo, {
           filialNome,
           subtituloEntidade,
+          incluirValoresFinanceiros: pdfExibirValor,
           exibirValorEstoque: pdfExibirValor,
           limiteQuantidade: pdfLimiteExportacao,
           filtros,
@@ -374,6 +378,7 @@ export const IsvView: React.FC<IsvViewProps> = ({
         resultado = await gerarRelatorioAgenciaPdf(nomeEntidade, itensAlvo, {
           filialNome,
           subtituloEntidade: `Agência: ${nomeEntidade}`,
+          incluirValoresFinanceiros: pdfExibirValor,
           exibirValorEstoque: pdfExibirValor,
           limiteQuantidade: pdfLimiteExportacao,
           filtros,
@@ -386,13 +391,14 @@ export const IsvView: React.FC<IsvViewProps> = ({
           : 'BASE DO RUB';
 
         resultado = await gerarRelatorioIsvA4Pdf(itensFiltrados, {
+          incluirValoresFinanceiros: pdfExibirValor,
           exibirValorEstoque: pdfExibirValor,
           filialNome,
           limiteQuantidade: pdfLimiteExportacao,
           fonteOficial,
           filtros,
           filtrosDescricao: getFiltrosAtivosDescricao(),
-          valorTotalFiltrado,
+          valorTotalFiltrado: pdfExibirValor ? valorTotalFiltrado : undefined,
           totalItensFiltrados: itensFiltrados.length,
         });
       }
@@ -416,7 +422,9 @@ export const IsvView: React.FC<IsvViewProps> = ({
   };
 
   const getFiltrosAtivosDescricao = (): string => {
-    return formatarResumoFiltrosIsv(filtros);
+    return formatarResumoFiltrosIsv(filtros, undefined, undefined, {
+      incluirValoresFinanceiros: pdfExibirValor,
+    });
   };
 
   const handleQuickPrintTop30 = async () => {
@@ -428,7 +436,8 @@ export const IsvView: React.FC<IsvViewProps> = ({
       await new Promise((resolve) => setTimeout(resolve, 50));
       const resultado = await gerarRelatorioTop30Pdf(itensFiltrados, {
         filialNome: 'FILIAL 172 — CASCAVEL',
-        exibirValorEstoque: true,
+        incluirValoresFinanceiros: pdfExibirValor,
+        exibirValorEstoque: pdfExibirValor,
       });
 
       const tamKb = (resultado.tamanhoBytes / 1024).toFixed(0);
@@ -493,6 +502,21 @@ export const IsvView: React.FC<IsvViewProps> = ({
 
           {/* Botões de Ação: Imprimir Top 30 e Gerar Relatório A4 */}
           <div className="flex items-center gap-2 flex-wrap">
+            <label
+              htmlFor="isv-chk-valores-pdf"
+              className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-white text-[11px] font-bold flex items-center gap-2 cursor-pointer select-none transition-colors"
+              title="Desmarcado por padrão: protege e oculta valores financeiros do estoque nos relatórios PDF"
+            >
+              <input
+                id="isv-chk-valores-pdf"
+                type="checkbox"
+                checked={pdfExibirValor}
+                onChange={(e) => setPdfExibirValor(e.target.checked)}
+                className="w-3.5 h-3.5 rounded border-white/40 cursor-pointer accent-[#F36B0B]"
+              />
+              <span>Incluir valores financeiros do estoque</span>
+            </label>
+
             <button
               id="btn-quick-print-top30"
               type="button"
@@ -1591,22 +1615,22 @@ export const IsvView: React.FC<IsvViewProps> = ({
             </div>
 
             <div className="p-5 space-y-4 text-xs text-slate-700">
-              {/* Opção Obrigatória: Exibir Valor do Estoque */}
+              {/* Opção Obrigatória: Incluir valores financeiros do estoque (desmarcada por padrão) */}
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
                 <label className="flex items-start gap-3 cursor-pointer">
                   <input
+                    id="isv-modal-chk-valores-pdf"
                     type="checkbox"
                     checked={pdfExibirValor}
                     onChange={(e) => setPdfExibirValor(e.target.checked)}
-                    className="w-4 h-4 text-blue-600 rounded border-slate-300 mt-0.5"
+                    className="w-4 h-4 text-blue-600 rounded border-slate-300 mt-0.5 cursor-pointer"
                   />
                   <div>
                     <span className="font-black text-slate-900 uppercase block">
-                      [✓] EXIBIR VALOR DO ESTOQUE
+                      Incluir valores financeiros do estoque
                     </span>
                     <p className="text-[11px] text-slate-500 font-medium leading-relaxed mt-0.5">
-                      Quando marcado, inclui o somatório financeiro em R$ e a coluna quando aplicável.
-                      Utiliza sempre uma única coluna de <strong>ESTOQUE</strong> em conformidade institucional.
+                      Desmarcado por padrão. Quando desmarcado, oculta a coluna VALOR ESTOQUE, valor total do cabeçalho e totais monetários em todo o PDF, preservando a coluna única de <strong>ESTOQUE</strong> consolidado (EMB1 + EMB9).
                     </p>
                   </div>
                 </label>

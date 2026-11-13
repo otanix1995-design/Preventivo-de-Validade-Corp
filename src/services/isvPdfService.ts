@@ -75,6 +75,13 @@ export interface IsvPdfOptions {
   tipoAgrupamento?: 'GERAL' | 'FORNECEDOR' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA' | 'TOP30';
   nomeEntidade?: string;
   subtituloEntidade?: string;
+  /**
+   * Controla se valores financeiros do estoque (coluna VALOR ESTOQUE,
+   * VALOR TOTAL no cabeçalho, subtotais e rodapés monetários) devem ser inseridos no PDF.
+   * Por segurança, o padrão oficial é FALSE (desmarcado).
+   */
+  incluirValoresFinanceiros?: boolean;
+  /** Alias retrocompatível para incluirValoresFinanceiros */
   exibirValorEstoque?: boolean;
   filialNome?: string;
   limiteQuantidade?: number | 'TODOS';
@@ -90,6 +97,8 @@ export interface IsvPdfOptions {
   promotorNome?: string;
   agenciaNome?: string;
   preservarItensRecebidos?: boolean;
+  /** Callback opcional (usado em validação/testes) após montagem completa do documento jsPDF */
+  onDocBuilt?: (doc: jsPDF) => void;
 }
 
 export interface ResultadoExportacaoPdf {
@@ -100,6 +109,23 @@ export interface ResultadoExportacaoPdf {
   nomeArquivo: string;
   mensagem?: string;
   identificacao?: IdentificacaoRelatorioPdf;
+  incluiuValoresFinanceiros?: boolean;
+  colunasExportadas?: string[];
+}
+
+/**
+ * Regra centralizada de segurança para valores financeiros em PDFs.
+ * Permanece FALSE por padrão caso não seja explicitamente habilitada pelo usuário.
+ */
+export function deveIncluirValoresFinanceirosPdf(options?: Partial<IsvPdfOptions>): boolean {
+  if (!options) return false;
+  if (options.incluirValoresFinanceiros !== undefined) {
+    return options.incluirValoresFinanceiros === true;
+  }
+  if (options.exibirValorEstoque !== undefined) {
+    return options.exibirValorEstoque === true;
+  }
+  return false;
 }
 
 // ============================================================================
@@ -468,7 +494,10 @@ export function formatarResumoFiltrosIsv(
   }
 
   if (filtros.filtroValor && filtros.filtroValor !== 'TODOS') {
-    if (filtros.filtroValor === 'CUSTOM') {
+    const ocultarMonetario = options !== undefined && !deveIncluirValoresFinanceirosPdf(options);
+    if (ocultarMonetario) {
+      parts.push('Faixa de filtro aplicada');
+    } else if (filtros.filtroValor === 'CUSTOM') {
       const min = filtros.valorMin !== undefined ? formatarMoedaBR(filtros.valorMin) : 'R$ 0,00';
       const max = filtros.valorMax !== undefined ? formatarMoedaBR(filtros.valorMax) : 'sem teto';
       parts.push(`Valor: ${min} até ${max}`);
@@ -493,6 +522,32 @@ export function formatarResumoFiltrosIsv(
   }
 
   return parts.join(' | ');
+}
+
+function resolverResumoFiltrosSeguro(
+  options: Partial<IsvPdfOptions> | undefined,
+  incluirValores: boolean,
+  fallback?: string,
+  itens?: ItemIsv[]
+): string {
+  const optsComSeguranca: Partial<IsvPdfOptions> = {
+    ...(options || {}),
+    incluirValoresFinanceiros: incluirValores,
+    exibirValorEstoque: incluirValores,
+  };
+
+  if (options?.filtrosDescricao && options.filtrosDescricao.trim()) {
+    const raw = options.filtrosDescricao.trim();
+    if (incluirValores) return raw;
+    // Remove qualquer valor monetário explícito caso um chamador legado tenha pré-formatado filtrosDescricao
+    return raw
+      .replace(/Valor\s+at[ée]\s+R\$\s*[\d.,]+/gi, 'Faixa de filtro aplicada')
+      .replace(/Valor\s+acima\s+de\s+R\$\s*[\d.,]+/gi, 'Faixa de filtro aplicada')
+      .replace(/Valor:\s*R\$\s*[\d.,]+(\s+at[ée]\s+(R\$\s*[\d.,]+|sem teto))?/gi, 'Faixa de filtro aplicada')
+      .replace(/R\$\s*[\d.,]+/g, '[oculto]');
+  }
+
+  return formatarResumoFiltrosIsv(options?.filtros, fallback, itens, optsComSeguranca);
 }
 
 // ============================================================================
@@ -557,6 +612,7 @@ interface DadosCabecalhoIsv {
   filialNome: string;
   totalProdutosFiltrados?: number;
   valorTotalFiltrado?: number;
+  incluirValoresFinanceiros: boolean;
   resumoFiltros?: string;
 }
 
@@ -572,6 +628,7 @@ function desenharCabecalhoInstitucionalIsv(dados: DadosCabecalhoIsv): number {
     filialNome,
     totalProdutosFiltrados,
     valorTotalFiltrado,
+    incluirValoresFinanceiros,
     resumoFiltros,
   } = dados;
 
@@ -596,13 +653,14 @@ function desenharCabecalhoInstitucionalIsv(dados: DadosCabecalhoIsv): number {
   doc.setTextColor(191, 219, 254); // blue-200
   doc.text(`${filialNome.toUpperCase()} • RELATÓRIO EXECUTIVO OFICIAL`, marginX, 14);
 
-  // Linha 3 Topo Esquerda: Total Filtrado e Valor Total Filtrado (Exigência do usuário)
+  // Linha 3 Topo Esquerda: Total Filtrado (e Valor Total Filtrado SOMENTE quando incluirValoresFinanceiros = true)
   const totalTexto = totalProdutosFiltrados !== undefined
     ? `${totalProdutosFiltrados.toLocaleString('pt-BR')} PRODUTOS FILTRADOS`
     : 'PRODUTOS FILTRADOS';
-  const valorTexto = valorTotalFiltrado !== undefined
-    ? `VALOR TOTAL: ${formatarMoedaBR(valorTotalFiltrado)}`
-    : '';
+  const valorTexto =
+    incluirValoresFinanceiros && valorTotalFiltrado !== undefined
+      ? `VALOR TOTAL: ${formatarMoedaBR(valorTotalFiltrado)}`
+      : '';
   const infoFiltroTopo = valorTexto ? `${totalTexto}  •  ${valorTexto}` : totalTexto;
 
   doc.setFontSize(8.5);
@@ -786,6 +844,8 @@ export async function gerarRelatorioTop30Pdf(
   const dataHoraEmissao = agora.toLocaleString('pt-BR');
   const filialNome = options?.filialNome || 'FILIAL 172 — CASCAVEL';
 
+  const incluirValores = deveIncluirValoresFinanceirosPdf(options);
+
   // Obter exatamente os 30 produtos ordenados com as regras oficiais
   const top30 = obterTop30Mercadorias(itens);
 
@@ -793,7 +853,9 @@ export async function gerarRelatorioTop30Pdf(
   let valorTotal = 0;
   for (const it of top30) {
     estoqueTotal += it.estoque;
-    if (it.valorEstoque) valorTotal += it.valorEstoque;
+    if (incluirValores && it.valorEstoque) {
+      valorTotal += it.valorEstoque;
+    }
   }
 
   const startY = desenharCabecalhoInstitucionalIsv({
@@ -805,52 +867,99 @@ export async function gerarRelatorioTop30Pdf(
     dataHoraEmissao,
     filialNome,
     totalProdutosFiltrados: top30.length,
-    valorTotalFiltrado: valorTotal > 0 ? valorTotal : undefined,
+    valorTotalFiltrado: incluirValores ? valorTotal : undefined,
+    incluirValoresFinanceiros: incluirValores,
     resumoFiltros: 'Critério: 30 maiores dias sem venda com estoque positivo | Regra EMB1 + EMB9 Consolidado',
   });
 
-  const cabecalhos = [
-    'POS.',
-    'CÓDIGO',
-    'DESCRIÇÃO',
-    'EMB.',
-    'ESTOQUE',
-    'IDADE (d)',
-    'DIAS S/V',
-    'GRUPO',
-    'FORNECEDOR',
-    'AGÊNCIA',
-    'PROMOTOR',
-  ];
+  const cabecalhos = incluirValores
+    ? [
+        'POS.',
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'FORNECEDOR',
+        'AGÊNCIA',
+        'PROMOTOR',
+        'VALOR ESTOQUE',
+      ]
+    : [
+        'POS.',
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'FORNECEDOR',
+        'AGÊNCIA',
+        'PROMOTOR',
+      ];
 
-  const linhasDados = top30.map((p) => [
-    p.posicaoFormatada,
-    p.codigoInterno,
-    p.descricao,
-    p.embalagem,
-    p.estoqueFormatado,
-    String(p.idade),
-    String(p.diasSemVenda),
-    p.grupo,
-    p.fornecedor,
-    p.agencia,
-    p.promotor,
-  ]);
+  const linhasDados = top30.length > 0
+    ? top30.map((p) => {
+        const baseRow = [
+          p.posicaoFormatada,
+          p.codigoInterno,
+          p.descricao,
+          p.embalagem,
+          p.estoqueFormatado,
+          String(p.idade),
+          String(p.diasSemVenda),
+          p.grupo,
+          p.fornecedor,
+          p.agencia,
+          p.promotor,
+        ];
+        if (incluirValores) {
+          baseRow.push(formatarMoedaBR(p.valorEstoque));
+        }
+        return baseRow;
+      })
+    : [
+        [
+          {
+            content: 'Nenhum produto elegível para o TOP 30.',
+            colSpan: cabecalhos.length,
+            styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] },
+          } as any,
+        ],
+      ];
 
-  // Largura útil total: 277 mm
-  const columnStylesConfig: Record<number, any> = {
-    0: { cellWidth: 12, halign: 'center', fontStyle: 'bold' }, // POS.
-    1: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-    2: { cellWidth: 64, halign: 'left' }, // DESCRIÇÃO
-    3: { cellWidth: 18, halign: 'center' }, // EMB.
-    4: { cellWidth: 20, halign: 'right', fontStyle: 'bold' }, // ESTOQUE (ÚNICA)
-    5: { cellWidth: 16, halign: 'center' }, // IDADE (d)
-    6: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // DIAS S/V
-    7: { cellWidth: 27, halign: 'left' }, // GRUPO
-    8: { cellWidth: 32, halign: 'left' }, // FORNECEDOR
-    9: { cellWidth: 24, halign: 'left' }, // AGÊNCIA
-    10: { cellWidth: 26, halign: 'left' }, // PROMOTOR
-  };
+  // Largura útil total: 277 mm (usando 275mm para margem de segurança)
+  const columnStylesConfig: Record<number, any> = incluirValores
+    ? {
+        0: { cellWidth: 11, halign: 'center', fontStyle: 'bold' }, // POS.
+        1: { cellWidth: 16, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
+        2: { cellWidth: 54, halign: 'left' }, // DESCRIÇÃO
+        3: { cellWidth: 14, halign: 'center' }, // EMB.
+        4: { cellWidth: 19, halign: 'right', fontStyle: 'bold' }, // ESTOQUE (ÚNICA)
+        5: { cellWidth: 14, halign: 'center' }, // IDADE (d)
+        6: { cellWidth: 16, halign: 'center', fontStyle: 'bold' }, // DIAS S/V
+        7: { cellWidth: 24, halign: 'left' }, // GRUPO
+        8: { cellWidth: 31, halign: 'left' }, // FORNECEDOR
+        9: { cellWidth: 24, halign: 'left' }, // AGÊNCIA
+        10: { cellWidth: 24, halign: 'left' }, // PROMOTOR
+        11: { cellWidth: 28, halign: 'right', fontStyle: 'bold' }, // VALOR ESTOQUE
+      }
+    : {
+        0: { cellWidth: 12, halign: 'center', fontStyle: 'bold' }, // POS.
+        1: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
+        2: { cellWidth: 64, halign: 'left' }, // DESCRIÇÃO
+        3: { cellWidth: 18, halign: 'center' }, // EMB.
+        4: { cellWidth: 20, halign: 'right', fontStyle: 'bold' }, // ESTOQUE (ÚNICA)
+        5: { cellWidth: 16, halign: 'center' }, // IDADE (d)
+        6: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // DIAS S/V
+        7: { cellWidth: 27, halign: 'left' }, // GRUPO
+        8: { cellWidth: 32, halign: 'left' }, // FORNECEDOR
+        9: { cellWidth: 24, halign: 'left' }, // AGÊNCIA
+        10: { cellWidth: 26, halign: 'left' }, // PROMOTOR
+      };
 
   autoTable(doc, {
     head: [cabecalhos],
@@ -910,9 +1019,17 @@ export async function gerarRelatorioTop30Pdf(
     },
   });
 
-  const infoCentro = `Total de Itens: ${top30.length} classificados | Estoque Consolidado EMB1+EMB9: ${Number.isInteger(estoqueTotal) ? estoqueTotal.toLocaleString('pt-BR') : estoqueTotal.toLocaleString('pt-BR', { minimumFractionDigits: 3 })}`;
+  const estoqueTotalStr = Number.isInteger(estoqueTotal)
+    ? estoqueTotal.toLocaleString('pt-BR')
+    : estoqueTotal.toLocaleString('pt-BR', { minimumFractionDigits: 3 });
+
+  const infoCentro = incluirValores
+    ? `Total de Itens: ${top30.length} classificados | Valor Total: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9: ${estoqueTotalStr}`
+    : `Total de Itens: ${top30.length} classificados | Estoque Consolidado EMB1+EMB9: ${estoqueTotalStr}`;
   const infoEsquerda = `ISV • Inteligência de Estoque — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
+
+  options?.onDocBuilt?.(doc);
 
   const timestamp = agora.toISOString().slice(0, 10);
   const nomeArquivo = `ISV_TOP30_MERCADORIAS_FILIAL172_${timestamp}.pdf`;
@@ -924,6 +1041,8 @@ export async function gerarRelatorioTop30Pdf(
     totalPaginas: doc.getNumberOfPages(),
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
+    incluiuValoresFinanceiros: incluirValores,
+    colunasExportadas: cabecalhos,
   };
 }
 
@@ -981,8 +1100,10 @@ export async function gerarRelatorioFornecedorPdf(
     ? itensDoFornecedor.slice(0, Number(options.limiteQuantidade))
     : itensDoFornecedor;
 
-  let valorTotal = options?.valorTotalFiltrado;
-  if (valorTotal === undefined) {
+  const incluirValores = deveIncluirValoresFinanceirosPdf(options);
+
+  let valorTotal = incluirValores ? options?.valorTotalFiltrado : undefined;
+  if (incluirValores && valorTotal === undefined) {
     valorTotal = 0;
     for (const it of itensProcessados) {
       if (it.valor_estoque) valorTotal += it.valor_estoque;
@@ -999,14 +1120,12 @@ export async function gerarRelatorioFornecedorPdf(
     itensProcessados
   );
 
-  const resumoFiltros =
-    options?.filtrosDescricao ||
-    formatarResumoFiltrosIsv(
-      options?.filtros,
-      `${tipoEntidadeAlvo === 'INDUSTRIA' ? 'Indústria' : 'Fornecedor'}: ${razaoSocialFornecedor}`,
-      itensProcessados,
-      options
-    );
+  const resumoFiltros = resolverResumoFiltrosSeguro(
+    options,
+    incluirValores,
+    `${tipoEntidadeAlvo === 'INDUSTRIA' ? 'Indústria' : 'Fornecedor'}: ${razaoSocialFornecedor}`,
+    itensProcessados
+  );
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
@@ -1018,50 +1137,80 @@ export async function gerarRelatorioFornecedorPdf(
     dataHoraEmissao,
     filialNome,
     totalProdutosFiltrados: itensProcessados.length,
-    valorTotalFiltrado: valorTotal > 0 ? valorTotal : undefined,
+    valorTotalFiltrado: incluirValores ? valorTotal : undefined,
+    incluirValoresFinanceiros: incluirValores,
     resumoFiltros,
   });
 
-  const cabecalhos = [
-    'CÓDIGO',
-    'DESCRIÇÃO',
-    'EMB.',
-    'ESTOQUE',
-    'IDADE (d)',
-    'DIAS S/V',
-    'GRUPO',
-    'AGÊNCIA',
-    'PROMOTOR',
-    'VALOR ESTOQUE',
-  ];
+  const cabecalhos = incluirValores
+    ? [
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'AGÊNCIA',
+        'PROMOTOR',
+        'VALOR ESTOQUE',
+      ]
+    : [
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'AGÊNCIA',
+        'PROMOTOR',
+      ];
 
   const linhasDados = itensProcessados.length > 0
-    ? itensProcessados.map((item) => [
-        item.codigo_interno || item.produto?.codigo_interno || '-',
-        item.descricao || item.produto?.descricao || '-',
-        item.embalagem || item.produto?.embalagem || 'UN',
-        formatarEstoqueColunaUnica(item),
-        String(item.idade ?? item.produto?.idade ?? 0),
-        String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
-        extrairGrupoProduto(item),
-        extrairAgenciaProduto(item),
-        extrairPromotorProduto(item),
-        formatarMoedaBR(item.valor_estoque),
-      ])
-    : [[{ content: 'Nenhum produto encontrado para este fornecedor.', colSpan: 10, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
+    ? itensProcessados.map((item) => {
+        const base = [
+          item.codigo_interno || item.produto?.codigo_interno || '-',
+          item.descricao || item.produto?.descricao || '-',
+          item.embalagem || item.produto?.embalagem || 'UN',
+          formatarEstoqueColunaUnica(item),
+          String(item.idade ?? item.produto?.idade ?? 0),
+          String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
+          extrairGrupoProduto(item),
+          extrairAgenciaProduto(item),
+          extrairPromotorProduto(item),
+        ];
+        if (incluirValores) {
+          base.push(formatarMoedaBR(item.valor_estoque));
+        }
+        return base;
+      })
+    : [[{ content: 'Nenhum produto encontrado para este fornecedor.', colSpan: cabecalhos.length, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
 
-  const columnStylesConfig: Record<number, any> = {
-    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
-    1: { cellWidth: 68, halign: 'left' },
-    2: { cellWidth: 18, halign: 'center' },
-    3: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
-    4: { cellWidth: 18, halign: 'center' },
-    5: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
-    6: { cellWidth: 25, halign: 'left' },
-    7: { cellWidth: 26, halign: 'left' },
-    8: { cellWidth: 26, halign: 'left' },
-    9: { cellWidth: 30, halign: 'right', fontStyle: 'bold' },
-  };
+  const columnStylesConfig: Record<number, any> = incluirValores
+    ? {
+        0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        1: { cellWidth: 68, halign: 'left' },
+        2: { cellWidth: 18, halign: 'center' },
+        3: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+        4: { cellWidth: 18, halign: 'center' },
+        5: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        6: { cellWidth: 25, halign: 'left' },
+        7: { cellWidth: 26, halign: 'left' },
+        8: { cellWidth: 26, halign: 'left' },
+        9: { cellWidth: 30, halign: 'right', fontStyle: 'bold' },
+      }
+    : {
+        0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        1: { cellWidth: 80, halign: 'left' },
+        2: { cellWidth: 18, halign: 'center' },
+        3: { cellWidth: 26, halign: 'right', fontStyle: 'bold' },
+        4: { cellWidth: 18, halign: 'center' },
+        5: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        6: { cellWidth: 30, halign: 'left' },
+        7: { cellWidth: 31, halign: 'left' },
+        8: { cellWidth: 32, halign: 'left' },
+      };
 
   autoTable(doc, {
     head: [cabecalhos],
@@ -1096,9 +1245,13 @@ export async function gerarRelatorioFornecedorPdf(
     columnStyles: columnStylesConfig,
   });
 
-  const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
+  const infoCentro = incluirValores && valorTotal !== undefined
+    ? `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`
+    : `Total: ${itensProcessados.length} produtos | Estoque Consolidado EMB1+EMB9`;
   const infoEsquerda = `ISV • ${identificacao.tituloPrincipal}: ${identificacao.destaqueEntidade || razaoSocialFornecedor} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
+
+  options?.onDocBuilt?.(doc);
 
   const timestamp = agora.toISOString().slice(0, 10);
   const nomeArq = razaoSocialFornecedor.replace(/[^A-Z0-9]/g, '_').substring(0, 28);
@@ -1113,6 +1266,8 @@ export async function gerarRelatorioFornecedorPdf(
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
     identificacao,
+    incluiuValoresFinanceiros: incluirValores,
+    colunasExportadas: cabecalhos,
   };
 }
 
@@ -1161,8 +1316,10 @@ export async function gerarRelatorioPromotorPdf(
     ? itensDoPromotor.slice(0, Number(options.limiteQuantidade))
     : itensDoPromotor;
 
-  let valorTotal = options?.valorTotalFiltrado;
-  if (valorTotal === undefined) {
+  const incluirValores = deveIncluirValoresFinanceirosPdf(options);
+
+  let valorTotal = incluirValores ? options?.valorTotalFiltrado : undefined;
+  if (incluirValores && valorTotal === undefined) {
     valorTotal = 0;
     for (const it of itensProcessados) {
       if (it.valor_estoque) valorTotal += it.valor_estoque;
@@ -1178,9 +1335,12 @@ export async function gerarRelatorioPromotorPdf(
     itensProcessados
   );
 
-  const resumoFiltros =
-    options?.filtrosDescricao ||
-    formatarResumoFiltrosIsv(options?.filtros, `Promotor: ${nomePromLimpo}`, itensProcessados, options);
+  const resumoFiltros = resolverResumoFiltrosSeguro(
+    options,
+    incluirValores,
+    `Promotor: ${nomePromLimpo}`,
+    itensProcessados
+  );
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
@@ -1192,50 +1352,80 @@ export async function gerarRelatorioPromotorPdf(
     dataHoraEmissao,
     filialNome,
     totalProdutosFiltrados: itensProcessados.length,
-    valorTotalFiltrado: valorTotal > 0 ? valorTotal : undefined,
+    valorTotalFiltrado: incluirValores ? valorTotal : undefined,
+    incluirValoresFinanceiros: incluirValores,
     resumoFiltros,
   });
 
-  const cabecalhos = [
-    'CÓDIGO',
-    'DESCRIÇÃO',
-    'EMB.',
-    'FORNECEDOR',
-    'ESTOQUE',
-    'IDADE (d)',
-    'DIAS S/V',
-    'GRUPO',
-    'AGÊNCIA',
-    'VALOR ESTOQUE',
-  ];
+  const cabecalhos = incluirValores
+    ? [
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'FORNECEDOR',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'AGÊNCIA',
+        'VALOR ESTOQUE',
+      ]
+    : [
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'FORNECEDOR',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'AGÊNCIA',
+      ];
 
   const linhasDados = itensProcessados.length > 0
-    ? itensProcessados.map((item) => [
-        item.codigo_interno || item.produto?.codigo_interno || '-',
-        item.descricao || item.produto?.descricao || '-',
-        item.embalagem || item.produto?.embalagem || 'UN',
-        extrairFornecedorProduto(item),
-        formatarEstoqueColunaUnica(item),
-        String(item.idade ?? item.produto?.idade ?? 0),
-        String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
-        extrairGrupoProduto(item),
-        extrairAgenciaProduto(item),
-        formatarMoedaBR(item.valor_estoque),
-      ])
-    : [[{ content: 'Nenhum produto encontrado para este promotor.', colSpan: 10, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
+    ? itensProcessados.map((item) => {
+        const base = [
+          item.codigo_interno || item.produto?.codigo_interno || '-',
+          item.descricao || item.produto?.descricao || '-',
+          item.embalagem || item.produto?.embalagem || 'UN',
+          extrairFornecedorProduto(item),
+          formatarEstoqueColunaUnica(item),
+          String(item.idade ?? item.produto?.idade ?? 0),
+          String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
+          extrairGrupoProduto(item),
+          extrairAgenciaProduto(item),
+        ];
+        if (incluirValores) {
+          base.push(formatarMoedaBR(item.valor_estoque));
+        }
+        return base;
+      })
+    : [[{ content: 'Nenhum produto encontrado para este promotor.', colSpan: cabecalhos.length, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
 
-  const columnStylesConfig: Record<number, any> = {
-    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
-    1: { cellWidth: 66, halign: 'left' },
-    2: { cellWidth: 16, halign: 'center' },
-    3: { cellWidth: 34, halign: 'left' },
-    4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
-    5: { cellWidth: 18, halign: 'center' },
-    6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
-    7: { cellWidth: 24, halign: 'left' },
-    8: { cellWidth: 25, halign: 'left' },
-    9: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
-  };
+  const columnStylesConfig: Record<number, any> = incluirValores
+    ? {
+        0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        1: { cellWidth: 66, halign: 'left' },
+        2: { cellWidth: 16, halign: 'center' },
+        3: { cellWidth: 34, halign: 'left' },
+        4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+        5: { cellWidth: 18, halign: 'center' },
+        6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        7: { cellWidth: 24, halign: 'left' },
+        8: { cellWidth: 25, halign: 'left' },
+        9: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
+      }
+    : {
+        0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        1: { cellWidth: 77, halign: 'left' },
+        2: { cellWidth: 16, halign: 'center' },
+        3: { cellWidth: 40, halign: 'left' },
+        4: { cellWidth: 26, halign: 'right', fontStyle: 'bold' },
+        5: { cellWidth: 18, halign: 'center' },
+        6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        7: { cellWidth: 28, halign: 'left' },
+        8: { cellWidth: 30, halign: 'left' },
+      };
 
   autoTable(doc, {
     head: [cabecalhos],
@@ -1270,9 +1460,13 @@ export async function gerarRelatorioPromotorPdf(
     columnStyles: columnStylesConfig,
   });
 
-  const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
+  const infoCentro = incluirValores && valorTotal !== undefined
+    ? `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`
+    : `Total: ${itensProcessados.length} produtos | Estoque Consolidado EMB1+EMB9`;
   const infoEsquerda = `ISV • ${identificacao.tituloPrincipal}: ${identificacao.destaqueEntidade || nomePromLimpo} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
+
+  options?.onDocBuilt?.(doc);
 
   const timestamp = agora.toISOString().slice(0, 10);
   const nomeArq = nomePromLimpo.replace(/[^A-Z0-9]/g, '_').substring(0, 28);
@@ -1286,6 +1480,8 @@ export async function gerarRelatorioPromotorPdf(
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
     identificacao,
+    incluiuValoresFinanceiros: incluirValores,
+    colunasExportadas: cabecalhos,
   };
 }
 
@@ -1331,8 +1527,10 @@ export async function gerarRelatorioAgenciaPdf(
     ? itensDaAgencia.slice(0, Number(options.limiteQuantidade))
     : itensDaAgencia;
 
-  let valorTotal = options?.valorTotalFiltrado;
-  if (valorTotal === undefined) {
+  const incluirValores = deveIncluirValoresFinanceirosPdf(options);
+
+  let valorTotal = incluirValores ? options?.valorTotalFiltrado : undefined;
+  if (incluirValores && valorTotal === undefined) {
     valorTotal = 0;
     for (const it of itensProcessados) {
       if (it.valor_estoque) valorTotal += it.valor_estoque;
@@ -1348,9 +1546,12 @@ export async function gerarRelatorioAgenciaPdf(
     itensProcessados
   );
 
-  const resumoFiltros =
-    options?.filtrosDescricao ||
-    formatarResumoFiltrosIsv(options?.filtros, `Agência: ${nomeAgLimpo}`, itensProcessados, options);
+  const resumoFiltros = resolverResumoFiltrosSeguro(
+    options,
+    incluirValores,
+    `Agência: ${nomeAgLimpo}`,
+    itensProcessados
+  );
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
@@ -1362,50 +1563,80 @@ export async function gerarRelatorioAgenciaPdf(
     dataHoraEmissao,
     filialNome,
     totalProdutosFiltrados: itensProcessados.length,
-    valorTotalFiltrado: valorTotal > 0 ? valorTotal : undefined,
+    valorTotalFiltrado: incluirValores ? valorTotal : undefined,
+    incluirValoresFinanceiros: incluirValores,
     resumoFiltros,
   });
 
-  const cabecalhos = [
-    'CÓDIGO',
-    'DESCRIÇÃO',
-    'EMB.',
-    'FORNECEDOR',
-    'ESTOQUE',
-    'IDADE (d)',
-    'DIAS S/V',
-    'GRUPO',
-    'PROMOTOR',
-    'VALOR ESTOQUE',
-  ];
+  const cabecalhos = incluirValores
+    ? [
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'FORNECEDOR',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'PROMOTOR',
+        'VALOR ESTOQUE',
+      ]
+    : [
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'FORNECEDOR',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'PROMOTOR',
+      ];
 
   const linhasDados = itensProcessados.length > 0
-    ? itensProcessados.map((item) => [
-        item.codigo_interno || item.produto?.codigo_interno || '-',
-        item.descricao || item.produto?.descricao || '-',
-        item.embalagem || item.produto?.embalagem || 'UN',
-        extrairFornecedorProduto(item),
-        formatarEstoqueColunaUnica(item),
-        String(item.idade ?? item.produto?.idade ?? 0),
-        String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
-        extrairGrupoProduto(item),
-        extrairPromotorProduto(item),
-        formatarMoedaBR(item.valor_estoque),
-      ])
-    : [[{ content: 'Nenhum produto encontrado para esta agência.', colSpan: 10, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
+    ? itensProcessados.map((item) => {
+        const base = [
+          item.codigo_interno || item.produto?.codigo_interno || '-',
+          item.descricao || item.produto?.descricao || '-',
+          item.embalagem || item.produto?.embalagem || 'UN',
+          extrairFornecedorProduto(item),
+          formatarEstoqueColunaUnica(item),
+          String(item.idade ?? item.produto?.idade ?? 0),
+          String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
+          extrairGrupoProduto(item),
+          extrairPromotorProduto(item),
+        ];
+        if (incluirValores) {
+          base.push(formatarMoedaBR(item.valor_estoque));
+        }
+        return base;
+      })
+    : [[{ content: 'Nenhum produto encontrado para esta agência.', colSpan: cabecalhos.length, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
 
-  const columnStylesConfig: Record<number, any> = {
-    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
-    1: { cellWidth: 66, halign: 'left' },
-    2: { cellWidth: 16, halign: 'center' },
-    3: { cellWidth: 34, halign: 'left' },
-    4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
-    5: { cellWidth: 18, halign: 'center' },
-    6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
-    7: { cellWidth: 24, halign: 'left' },
-    8: { cellWidth: 25, halign: 'left' },
-    9: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
-  };
+  const columnStylesConfig: Record<number, any> = incluirValores
+    ? {
+        0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        1: { cellWidth: 66, halign: 'left' },
+        2: { cellWidth: 16, halign: 'center' },
+        3: { cellWidth: 34, halign: 'left' },
+        4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+        5: { cellWidth: 18, halign: 'center' },
+        6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        7: { cellWidth: 24, halign: 'left' },
+        8: { cellWidth: 25, halign: 'left' },
+        9: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
+      }
+    : {
+        0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        1: { cellWidth: 77, halign: 'left' },
+        2: { cellWidth: 16, halign: 'center' },
+        3: { cellWidth: 40, halign: 'left' },
+        4: { cellWidth: 26, halign: 'right', fontStyle: 'bold' },
+        5: { cellWidth: 18, halign: 'center' },
+        6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        7: { cellWidth: 28, halign: 'left' },
+        8: { cellWidth: 30, halign: 'left' },
+      };
 
   autoTable(doc, {
     head: [cabecalhos],
@@ -1440,9 +1671,13 @@ export async function gerarRelatorioAgenciaPdf(
     columnStyles: columnStylesConfig,
   });
 
-  const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
+  const infoCentro = incluirValores && valorTotal !== undefined
+    ? `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`
+    : `Total: ${itensProcessados.length} produtos | Estoque Consolidado EMB1+EMB9`;
   const infoEsquerda = `ISV • ${identificacao.tituloPrincipal}: ${identificacao.destaqueEntidade || nomeAgLimpo} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
+
+  options?.onDocBuilt?.(doc);
 
   const timestamp = agora.toISOString().slice(0, 10);
   const nomeArq = nomeAgLimpo.replace(/[^A-Z0-9]/g, '_').substring(0, 28);
@@ -1456,6 +1691,8 @@ export async function gerarRelatorioAgenciaPdf(
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
     identificacao,
+    incluiuValoresFinanceiros: incluirValores,
+    colunasExportadas: cabecalhos,
   };
 }
 
@@ -1520,9 +1757,11 @@ export async function gerarRelatorioIsvA4Pdf(
       ? itens.slice(0, Number(options.limiteQuantidade))
       : itens;
 
-  // Cálculo financeiro e estoque consolidado
-  let valorTotalFiltrado = options.valorTotalFiltrado;
-  if (valorTotalFiltrado === undefined) {
+  const incluirValores = deveIncluirValoresFinanceirosPdf(options);
+
+  // Cálculo financeiro (somente quando autorizado) e estoque consolidado
+  let valorTotalFiltrado = incluirValores ? options.valorTotalFiltrado : undefined;
+  if (incluirValores && valorTotalFiltrado === undefined) {
     valorTotalFiltrado = 0;
     for (let i = 0; i < itensProcessados.length; i++) {
       if (itensProcessados[i].valor_estoque) {
@@ -1539,10 +1778,13 @@ export async function gerarRelatorioIsvA4Pdf(
   // Identificação dinâmica centralizada com base nos filtros efetivamente aplicados
   const identificacao = resolverIdentificacaoRelatorioPdf(options, itensProcessados);
 
-  // Resumo legível dos filtros ativos aplicados (incluindo estoque, valor, setor, dias s/ venda, idade, ordenação)
-  const resumoFiltros =
-    options.filtrosDescricao ||
-    formatarResumoFiltrosIsv(options.filtros, undefined, itensProcessados, options);
+  // Resumo legível dos filtros ativos aplicados (sem dados monetários quando ocultos)
+  const resumoFiltros = resolverResumoFiltrosSeguro(
+    options,
+    incluirValores,
+    undefined,
+    itensProcessados
+  );
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
@@ -1554,14 +1796,13 @@ export async function gerarRelatorioIsvA4Pdf(
     dataHoraEmissao,
     filialNome,
     totalProdutosFiltrados: itensProcessados.length,
-    valorTotalFiltrado,
+    valorTotalFiltrado: incluirValores ? valorTotalFiltrado : undefined,
+    incluirValoresFinanceiros: incluirValores,
     resumoFiltros,
   });
 
-  const exibirValor = options.exibirValorEstoque !== false;
-
-  // 11 Colunas Oficiais quando exibirValor = true, ou 10 quando false
-  const cabecalhos = exibirValor
+  // 11 Colunas Oficiais quando incluirValores = true, ou 10 redistribuídas quando false
+  const cabecalhos = incluirValores
     ? [
         'CÓDIGO',
         'DESCRIÇÃO',
@@ -1600,9 +1841,9 @@ export async function gerarRelatorioIsvA4Pdf(
         const grupo = extrairGrupoProduto(item);
         const ag = extrairAgenciaProduto(item);
         const prom = extrairPromotorProduto(item);
-        const valor = formatarMoedaBR(item.valor_estoque);
 
-        if (exibirValor) {
+        if (incluirValores) {
+          const valor = formatarMoedaBR(item.valor_estoque);
           return [cod, desc, emb, forn, est, idade, dias, grupo, ag, prom, valor];
         } else {
           return [cod, desc, emb, forn, est, idade, dias, grupo, ag, prom];
@@ -1619,7 +1860,7 @@ export async function gerarRelatorioIsvA4Pdf(
       ];
 
   // Largura útil total: 277 mm (297mm - 2*10mm margens), usando 275mm para margem de segurança
-  const columnStylesConfig: Record<number, any> = exibirValor
+  const columnStylesConfig: Record<number, any> = incluirValores
     ? {
         0: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
         1: { cellWidth: 52, halign: 'left' }, // DESCRIÇÃO
@@ -1683,11 +1924,15 @@ export async function gerarRelatorioIsvA4Pdf(
     ? estoqueTotalGeral.toLocaleString('pt-BR')
     : estoqueTotalGeral.toLocaleString('pt-BR', { minimumFractionDigits: 3 });
 
-  const infoCentro = `Exibindo ${itensProcessados.length.toLocaleString('pt-BR')} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotalFiltrado)} | Estoque Consolidado: ${estoqueFormatado}`;
+  const infoCentro = incluirValores && valorTotalFiltrado !== undefined
+    ? `Exibindo ${itensProcessados.length.toLocaleString('pt-BR')} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotalFiltrado)} | Estoque Consolidado: ${estoqueFormatado}`
+    : `Exibindo ${itensProcessados.length.toLocaleString('pt-BR')} produtos | Estoque Consolidado EMB1+EMB9: ${estoqueFormatado}`;
   const infoEsquerda = identificacao.destaqueEntidade
     ? `ISV • ${identificacao.tituloPrincipal}: ${identificacao.destaqueEntidade} — ${filialNome}`
     : `ISV • ${identificacao.tituloPrincipal} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
+
+  options.onDocBuilt?.(doc);
 
   const timestamp = agora.toISOString().slice(0, 10);
   const nomeArquivo = `ISV_${identificacao.tipoRelatorio}_${timestamp}.pdf`;
@@ -1700,6 +1945,8 @@ export async function gerarRelatorioIsvA4Pdf(
     tamanhoBytes: dl.tamanhoBytes,
     nomeArquivo,
     identificacao,
+    incluiuValoresFinanceiros: incluirValores,
+    colunasExportadas: cabecalhos,
   };
 }
 

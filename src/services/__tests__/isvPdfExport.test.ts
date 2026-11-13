@@ -16,6 +16,7 @@
 
 import { ItemIsv, FiltrosIsv } from '../../types';
 import {
+  deveIncluirValoresFinanceirosPdf,
   formatarResumoFiltrosIsv,
   gerarRelatorioIsvA4Pdf,
   gerarRelatorioTop30Pdf,
@@ -450,6 +451,286 @@ async function runTests() {
   assert(resLongo.sucesso === true && resLongo.tamanhoBytes > 1000, 'PDF com nome longo deve renderizar e expandir cabeçalho sem erros');
 
   console.log('   ✅ Todos os cenários de identificação dinâmica validados com sucesso!');
+
+  // ==========================================================================
+  // Teste 10: Proteção dos Valores Financeiros em Todos os 7 Relatórios PDF
+  // ==========================================================================
+  console.log('🔟 Testando proteção dos valores financeiros em todos os 7 tipos de relatório PDF...');
+
+  // 10A. Padrão oficial deve ser DESMARCADO (false)
+  assert(
+    deveIncluirValoresFinanceirosPdf(undefined) === false,
+    'Sem opções, incluirValoresFinanceiros deve ser FALSE por padrão'
+  );
+  assert(
+    deveIncluirValoresFinanceirosPdf({}) === false,
+    'Com opções vazias, incluirValoresFinanceiros deve ser FALSE por padrão'
+  );
+  assert(
+    deveIncluirValoresFinanceirosPdf({ incluirValoresFinanceiros: false, exibirValorEstoque: true }) === false,
+    'incluirValoresFinanceiros=false explícito deve prevalecer sobre alias'
+  );
+  assert(
+    deveIncluirValoresFinanceirosPdf({ incluirValoresFinanceiros: true }) === true,
+    'incluirValoresFinanceiros=true explícito deve habilitar valores financeiros'
+  );
+
+  // Helpers para inspecionar o PDF bruto realmente gerado (conteúdo de todas as páginas)
+  const extrairTextoPdfBruto = (doc: any): string => {
+    const raw: string = doc.output('datauristring') ? doc.output() : doc.output();
+    return String(raw || '');
+  };
+
+  const verificarPdfSemValoresFinanceiros = (
+    rotulo: string,
+    res: Awaited<ReturnType<typeof gerarRelatorioIsvA4Pdf>>,
+    rawPdf: string
+  ) => {
+    assert(res.sucesso === true, `[${rotulo}] Deve gerar PDF com sucesso`);
+    assert(
+      res.incluiuValoresFinanceiros === false,
+      `[${rotulo}] Resultado deve indicar incluiuValoresFinanceiros=false`
+    );
+    assert(
+      !(res.colunasExportadas || []).includes('VALOR ESTOQUE'),
+      `[${rotulo}] Colunas exportadas não devem conter VALOR ESTOQUE`
+    );
+    assert(
+      (res.colunasExportadas || []).includes('ESTOQUE'),
+      `[${rotulo}] Coluna física ESTOQUE deve ser preservada`
+    );
+    assert(
+      !rawPdf.includes('VALOR ESTOQUE'),
+      `[${rotulo}] PDF bruto não deve conter texto "VALOR ESTOQUE"`
+    );
+    assert(
+      !rawPdf.includes('VALOR TOTAL'),
+      `[${rotulo}] PDF bruto não deve conter "VALOR TOTAL" no cabeçalho`
+    );
+    assert(
+      !rawPdf.includes('Valor Filtrado'),
+      `[${rotulo}] PDF bruto não deve conter "Valor Filtrado" no rodapé`
+    );
+    assert(
+      !rawPdf.includes('Valor Total:'),
+      `[${rotulo}] PDF bruto não deve conter "Valor Total:" no rodapé`
+    );
+    assert(
+      !/R\$/.test(rawPdf),
+      `[${rotulo}] PDF bruto não deve conter nenhum símbolo monetário "R$" em cabeçalho, tabela, filtros ou rodapé`
+    );
+    assert(
+      rawPdf.includes('ESTOQUE'),
+      `[${rotulo}] PDF bruto deve preservar a coluna ESTOQUE`
+    );
+  };
+
+  const verificarPdfComValoresFinanceiros = (
+    rotulo: string,
+    res: Awaited<ReturnType<typeof gerarRelatorioIsvA4Pdf>>,
+    rawPdf: string
+  ) => {
+    assert(res.sucesso === true, `[${rotulo}] Deve gerar PDF com sucesso`);
+    assert(
+      res.incluiuValoresFinanceiros === true,
+      `[${rotulo}] Resultado deve indicar incluiuValoresFinanceiros=true`
+    );
+    assert(
+      (res.colunasExportadas || []).includes('VALOR ESTOQUE'),
+      `[${rotulo}] Colunas exportadas devem incluir VALOR ESTOQUE`
+    );
+    assert(
+      (res.colunasExportadas || []).includes('ESTOQUE'),
+      `[${rotulo}] Coluna física ESTOQUE deve ser preservada`
+    );
+    assert(
+      rawPdf.includes('VALOR ESTOQUE'),
+      `[${rotulo}] PDF bruto deve conter coluna "VALOR ESTOQUE"`
+    );
+    assert(
+      rawPdf.includes('VALOR TOTAL'),
+      `[${rotulo}] PDF bruto deve conter "VALOR TOTAL" no cabeçalho`
+    );
+    assert(
+      rawPdf.includes('R$'),
+      `[${rotulo}] PDF bruto deve conter valores monetários "R$"`
+    );
+  };
+
+  // Cenário multi-página (100 itens -> múltiplas páginas) para validar todas as páginas
+  const filtrosComMonetario = {
+    agencia: 'TODAS',
+    industriaCnpj: 'TODAS',
+    promotorId: 'TODOS',
+    setorOperacional: 'LOJA' as const,
+    filtroEstoque: 'COM_ESTOQUE' as const,
+    filtroValor: 'ACIMA_250' as const,
+    ordenacao: 'MAIOR_VALOR' as const,
+  };
+
+  // 1) GERAL DA LOJA (sem passar flag = padrão desmarcado + com filtros/valor legado tentado)
+  let rawCaptura = '';
+  const resGeralSemValor = await gerarRelatorioIsvA4Pdf(itens100, {
+    filialNome: 'Filial 172 — Cascavel',
+    filtros: filtrosComMonetario,
+    filtrosDescricao: 'Setor: Loja | Valor acima de R$ 250,00 | Ordenação: Maior Valor de Estoque',
+    valorTotalFiltrado: 999999.99,
+    totalItensFiltrados: 100,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  assert(resGeralSemValor.totalPaginas >= 3, 'Geral da Loja (100 itens) deve abranger múltiplas páginas');
+  verificarPdfSemValoresFinanceiros('1. GERAL DA LOJA (Padrão/Oculto)', resGeralSemValor, rawCaptura);
+
+  const resGeralComValor = await gerarRelatorioIsvA4Pdf(itens100, {
+    incluirValoresFinanceiros: true,
+    filialNome: 'Filial 172 — Cascavel',
+    filtros: filtrosComMonetario,
+    valorTotalFiltrado: 1645516.05,
+    totalItensFiltrados: 100,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfComValoresFinanceiros('1. GERAL DA LOJA (Com Valores)', resGeralComValor, rawCaptura);
+
+  // 2) POR INDÚSTRIA
+  const resIndSemValor = await gerarRelatorioEntidadeIsvA4Pdf(
+    'INDUSTRIA',
+    'INDUSTRIAS ANHEMBI LTDA',
+    'CNPJ: 61.414.116/0001-80',
+    itensAnhembi,
+    {
+      incluirValoresFinanceiros: false,
+      valorTotalFiltrado: 43657.67,
+      onDocBuilt: (doc) => {
+        rawCaptura = extrairTextoPdfBruto(doc);
+      },
+    }
+  );
+  verificarPdfSemValoresFinanceiros('2. POR INDÚSTRIA (Oculto)', resIndSemValor, rawCaptura);
+
+  const resIndComValor = await gerarRelatorioEntidadeIsvA4Pdf(
+    'INDUSTRIA',
+    'INDUSTRIAS ANHEMBI LTDA',
+    'CNPJ: 61.414.116/0001-80',
+    itensAnhembi,
+    {
+      incluirValoresFinanceiros: true,
+      valorTotalFiltrado: 43657.67,
+      onDocBuilt: (doc) => {
+        rawCaptura = extrairTextoPdfBruto(doc);
+      },
+    }
+  );
+  verificarPdfComValoresFinanceiros('2. POR INDÚSTRIA (Com Valores)', resIndComValor, rawCaptura);
+
+  // 3) POR FORNECEDOR
+  const resFornSemValor = await gerarRelatorioFornecedorPdf('INDUSTRIA EXEMPLO 1 LTDA', itens100, {
+    incluirValoresFinanceiros: false,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfSemValoresFinanceiros('3. POR FORNECEDOR (Oculto)', resFornSemValor, rawCaptura);
+
+  const resFornComValor = await gerarRelatorioFornecedorPdf('INDUSTRIA EXEMPLO 1 LTDA', itens100, {
+    incluirValoresFinanceiros: true,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfComValoresFinanceiros('3. POR FORNECEDOR (Com Valores)', resFornComValor, rawCaptura);
+
+  // 4) POR PROMOTOR
+  const resPromSemValor = await gerarRelatorioPromotorPdf('PROMOTOR 1', itens100, {
+    incluirValoresFinanceiros: false,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfSemValoresFinanceiros('4. POR PROMOTOR (Oculto)', resPromSemValor, rawCaptura);
+
+  const resPromComValor = await gerarRelatorioPromotorPdf('PROMOTOR 1', itens100, {
+    incluirValoresFinanceiros: true,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfComValoresFinanceiros('4. POR PROMOTOR (Com Valores)', resPromComValor, rawCaptura);
+
+  // 5) POR AGÊNCIA
+  const resAgSemValor = await gerarRelatorioAgenciaPdf('AGÊNCIA 1', itens100, {
+    incluirValoresFinanceiros: false,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfSemValoresFinanceiros('5. POR AGÊNCIA (Oculto)', resAgSemValor, rawCaptura);
+
+  const resAgComValor = await gerarRelatorioAgenciaPdf('AGÊNCIA 1', itens100, {
+    incluirValoresFinanceiros: true,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfComValoresFinanceiros('5. POR AGÊNCIA (Com Valores)', resAgComValor, rawCaptura);
+
+  // 6) RELATÓRIO PERSONALIZADO (múltiplas entidades combinadas)
+  const resPersSemValor = await gerarRelatorioIsvA4Pdf(itensAnhembi, {
+    incluirValoresFinanceiros: false,
+    valorTotalFiltrado: 43657.67,
+    filtros: {
+      agencia: 'AGÊNCIA SUL BRASIL',
+      industriaCnpj: cnpjAnhembi,
+      promotorId: 'MARIA FERNANDA',
+      promotorNome: 'MARIA FERNANDA',
+      filtroValor: 'ACIMA_250',
+    },
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  assert(
+    resPersSemValor.identificacao?.tituloPrincipal === 'RELATÓRIO PERSONALIZADO',
+    'Relatório personalizado deve manter título RELATÓRIO PERSONALIZADO sem valores'
+  );
+  verificarPdfSemValoresFinanceiros('6. RELATÓRIO PERSONALIZADO (Oculto)', resPersSemValor, rawCaptura);
+
+  const resPersComValor = await gerarRelatorioIsvA4Pdf(itensAnhembi, {
+    incluirValoresFinanceiros: true,
+    valorTotalFiltrado: 43657.67,
+    filtros: {
+      agencia: 'AGÊNCIA SUL BRASIL',
+      industriaCnpj: cnpjAnhembi,
+      promotorId: 'MARIA FERNANDA',
+      promotorNome: 'MARIA FERNANDA',
+      filtroValor: 'ACIMA_250',
+    },
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfComValoresFinanceiros('6. RELATÓRIO PERSONALIZADO (Com Valores)', resPersComValor, rawCaptura);
+
+  // 7) TOP 30 ISV
+  const resTop30SemValor = await gerarRelatorioTop30Pdf(itens100, {
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfSemValoresFinanceiros('7. TOP 30 ISV (Padrão/Oculto)', resTop30SemValor, rawCaptura);
+
+  const resTop30ComValor = await gerarRelatorioTop30Pdf(itens100, {
+    incluirValoresFinanceiros: true,
+    onDocBuilt: (doc) => {
+      rawCaptura = extrairTextoPdfBruto(doc);
+    },
+  });
+  verificarPdfComValoresFinanceiros('7. TOP 30 ISV (Com Valores)', resTop30ComValor, rawCaptura);
+
+  console.log('   ✅ Proteção financeira validada com sucesso em TODOS os 7 relatórios (oculto e exibido)!');
 
   console.log('\n🎉 TODOS OS TESTES DE EXPORTAÇÃO PDF ISV PASSARAM COM 100% DE SUCESSO!');
   process.exit(0);

@@ -78,6 +78,7 @@ export const TabelaTop30Mercadorias: React.FC<TabelaTop30MercadoriasProps> = ({
     };
   }, [top30Itens]);
 
+  const [incluirValoresFinanceirosPdf, setIncluirValoresFinanceirosPdf] = useState(false);
   const [isGerandoPdf, setIsGerandoPdf] = useState(false);
   const [erroPdf, setErroPdf] = useState<string | null>(null);
 
@@ -86,7 +87,11 @@ export const TabelaTop30Mercadorias: React.FC<TabelaTop30MercadoriasProps> = ({
     setIsGerandoPdf(true);
     setErroPdf(null);
     try {
-      await gerarRelatorioTop30Pdf(itens, { filialNome });
+      await gerarRelatorioTop30Pdf(itens, {
+        filialNome,
+        incluirValoresFinanceiros: incluirValoresFinanceirosPdf,
+        exibirValorEstoque: incluirValoresFinanceirosPdf,
+      });
     } catch (err: any) {
       setErroPdf(err?.message || 'Erro ao gerar relatório TOP 30.');
     } finally {
@@ -129,7 +134,22 @@ export const TabelaTop30Mercadorias: React.FC<TabelaTop30MercadoriasProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 self-start md:self-auto">
+          <div className="flex items-center gap-2.5 flex-wrap self-start md:self-auto">
+            <label
+              htmlFor="top30-chk-valores-pdf"
+              className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700/80 border border-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2 cursor-pointer select-none transition-colors"
+              title="Desmarcado por padrão: oculta valores financeiros do estoque no relatório PDF"
+            >
+              <input
+                id="top30-chk-valores-pdf"
+                type="checkbox"
+                checked={incluirValoresFinanceirosPdf}
+                onChange={(e) => setIncluirValoresFinanceirosPdf(e.target.checked)}
+                className="w-3.5 h-3.5 rounded border-slate-500 cursor-pointer accent-orange-500"
+              />
+              <span>Incluir valores financeiros do estoque</span>
+            </label>
+
             <button
               type="button"
               disabled={isGerandoPdf}

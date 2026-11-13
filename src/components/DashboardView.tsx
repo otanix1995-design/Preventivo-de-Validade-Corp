@@ -128,6 +128,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const ITENS_POR_PAGINA_MODAL = 10;
 
   // Estados de geração e download do Relatório PDF A4
+  const [incluirValoresFinanceirosPdf, setIncluirValoresFinanceirosPdf] = useState(false);
   const [isGerandoPdf, setIsGerandoPdf] = useState(false);
   const [feedbackPdf, setFeedbackPdf] = useState<{ tipo: 'sucesso' | 'erro'; texto: string } | null>(null);
 
@@ -312,14 +313,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       // Yield para garantir que o navegador pinte o botão "Gerando PDF..."
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      const resumoFiltros = formatarResumoFiltrosIsv(filtros, undefined, itensFiltrados);
+      const resumoFiltros = formatarResumoFiltrosIsv(filtros, undefined, itensFiltrados, {
+        incluirValoresFinanceiros: incluirValoresFinanceirosPdf,
+      });
       const resultado = await gerarRelatorioIsvA4Pdf(itensFiltrados, {
-        exibirValorEstoque: true,
+        incluirValoresFinanceiros: incluirValoresFinanceirosPdf,
+        exibirValorEstoque: incluirValoresFinanceirosPdf,
         filialNome: 'Filial 172 — Cascavel',
         fonteOficial: 'BASE DO RUB',
         filtros,
         filtrosDescricao: resumoFiltros,
-        valorTotalFiltrado: indicadores.valorTotal,
+        valorTotalFiltrado: incluirValoresFinanceirosPdf ? indicadores.valorTotal : undefined,
         totalItensFiltrados: itensFiltrados.length,
       });
 
@@ -392,6 +396,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
           {/* Botões de Ação do Topo */}
           <div className="flex items-center gap-2 flex-wrap self-end sm:self-center">
+            <label
+              htmlFor="dashboard-chk-valores-pdf"
+              className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-white text-[11px] font-bold flex items-center gap-2 cursor-pointer select-none transition-colors"
+              title="Desmarcado por padrão: oculta valores financeiros do estoque nos relatórios PDF gerados"
+            >
+              <input
+                id="dashboard-chk-valores-pdf"
+                type="checkbox"
+                checked={incluirValoresFinanceirosPdf}
+                onChange={(e) => setIncluirValoresFinanceirosPdf(e.target.checked)}
+                className="w-3.5 h-3.5 rounded border-white/40 cursor-pointer accent-[#F36B0B]"
+              />
+              <span>Incluir valores financeiros do estoque</span>
+            </label>
+
             <button
               id="dashboard-btn-pdf-a4"
               type="button"
@@ -1534,6 +1553,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   </button>
                 )}
 
+                <label
+                  htmlFor="dashboard-modal-ind-chk-valores-pdf"
+                  className="px-2.5 py-1.5 rounded-xl bg-white border border-purple-200 text-slate-700 text-[11px] font-bold flex items-center gap-1.5 cursor-pointer select-none"
+                >
+                  <input
+                    id="dashboard-modal-ind-chk-valores-pdf"
+                    type="checkbox"
+                    checked={incluirValoresFinanceirosPdf}
+                    onChange={(e) => setIncluirValoresFinanceirosPdf(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-slate-300 cursor-pointer accent-purple-700"
+                  />
+                  <span>Incluir valores financeiros do estoque</span>
+                </label>
+
                 {/* Botão Imprimir PDF A4 da Indústria */}
                 <button
                   type="button"
@@ -1548,7 +1581,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         modalIndustria.razaoSocial || modalIndustria.nome,
                         modalIndustria.cnpj !== 'SEM_CNPJ' ? `CNPJ: ${modalIndustria.cnpj}` : 'Indústria Vinculada',
                         modalIndustria.itens,
-                        { filtros, valorTotalFiltrado: modalIndustria.valorTotal }
+                        {
+                          filtros,
+                          incluirValoresFinanceiros: incluirValoresFinanceirosPdf,
+                          exibirValorEstoque: incluirValoresFinanceirosPdf,
+                          valorTotalFiltrado: incluirValoresFinanceirosPdf ? modalIndustria.valorTotal : undefined,
+                        }
                       );
                       const tamKb = (res.tamanhoBytes / 1024).toFixed(0);
                       setFeedbackPdf({
@@ -1719,50 +1757,71 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 </div>
               </div>
 
-              {/* Botão Imprimir PDF A4 da Agência */}
-              <button
-                type="button"
-                disabled={isGerandoPdf}
-                onClick={async () => {
-                  if (isGerandoPdf) return;
-                  setIsGerandoPdf(true);
-                  setFeedbackPdf(null);
-                  try {
-                    const res = await gerarRelatorioEntidadeIsvA4Pdf(
-                      'AGENCIA',
-                      modalAgencia.nome,
-                      `Agência com ${modalAgencia.promotoresRelacionados.length} promotores vinculados`,
-                      modalAgencia.itens,
-                      { filtros, valorTotalFiltrado: modalAgencia.valorTotal }
-                    );
-                    const tamKb = (res.tamanhoBytes / 1024).toFixed(0);
-                    setFeedbackPdf({
-                      tipo: 'sucesso',
-                      texto: `PDF da agência gerado: ${res.totalItens.toLocaleString('pt-BR')} itens em ${res.totalPaginas} páginas (${tamKb} KB).`,
-                    });
-                  } catch (err: any) {
-                    setFeedbackPdf({
-                      tipo: 'erro',
-                      texto: `Falha ao gerar PDF da agência: ${err?.message || 'Erro desconhecido.'}`,
-                    });
-                  } finally {
-                    setIsGerandoPdf(false);
-                  }
-                }}
-                className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-500 disabled:cursor-wait text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
-              >
-                {isGerandoPdf ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Gerando PDF...</span>
-                  </>
-                ) : (
-                  <>
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Imprimir PDF (A4)</span>
-                  </>
-                )}
-              </button>
+              <div className="flex items-center gap-2 flex-wrap">
+                <label
+                  htmlFor="dashboard-modal-ag-chk-valores-pdf"
+                  className="px-2.5 py-1.5 rounded-xl bg-white border border-emerald-200 text-slate-700 text-[11px] font-bold flex items-center gap-1.5 cursor-pointer select-none"
+                >
+                  <input
+                    id="dashboard-modal-ag-chk-valores-pdf"
+                    type="checkbox"
+                    checked={incluirValoresFinanceirosPdf}
+                    onChange={(e) => setIncluirValoresFinanceirosPdf(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-slate-300 cursor-pointer accent-emerald-700"
+                  />
+                  <span>Incluir valores financeiros do estoque</span>
+                </label>
+
+                {/* Botão Imprimir PDF A4 da Agência */}
+                <button
+                  type="button"
+                  disabled={isGerandoPdf}
+                  onClick={async () => {
+                    if (isGerandoPdf) return;
+                    setIsGerandoPdf(true);
+                    setFeedbackPdf(null);
+                    try {
+                      const res = await gerarRelatorioEntidadeIsvA4Pdf(
+                        'AGENCIA',
+                        modalAgencia.nome,
+                        `Agência com ${modalAgencia.promotoresRelacionados.length} promotores vinculados`,
+                        modalAgencia.itens,
+                        {
+                          filtros,
+                          incluirValoresFinanceiros: incluirValoresFinanceirosPdf,
+                          exibirValorEstoque: incluirValoresFinanceirosPdf,
+                          valorTotalFiltrado: incluirValoresFinanceirosPdf ? modalAgencia.valorTotal : undefined,
+                        }
+                      );
+                      const tamKb = (res.tamanhoBytes / 1024).toFixed(0);
+                      setFeedbackPdf({
+                        tipo: 'sucesso',
+                        texto: `PDF da agência gerado: ${res.totalItens.toLocaleString('pt-BR')} itens em ${res.totalPaginas} páginas (${tamKb} KB).`,
+                      });
+                    } catch (err: any) {
+                      setFeedbackPdf({
+                        tipo: 'erro',
+                        texto: `Falha ao gerar PDF da agência: ${err?.message || 'Erro desconhecido.'}`,
+                      });
+                    } finally {
+                      setIsGerandoPdf(false);
+                    }
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-500 disabled:cursor-wait text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+                >
+                  {isGerandoPdf ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Gerando PDF...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Imprimir PDF (A4)</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
 
             {/* Indústrias & Promotores da Agência */}
