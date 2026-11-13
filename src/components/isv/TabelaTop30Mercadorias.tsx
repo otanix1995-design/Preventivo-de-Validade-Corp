@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ItemIsv } from '../../types';
 import {
   obterTop30Mercadorias,
@@ -16,6 +16,7 @@ import {
   Layers,
   Building2,
   UserCheck,
+  RefreshCw,
 } from 'lucide-react';
 
 interface TabelaTop30MercadoriasProps {
@@ -77,8 +78,20 @@ export const TabelaTop30Mercadorias: React.FC<TabelaTop30MercadoriasProps> = ({
     };
   }, [top30Itens]);
 
-  const handleExportarPdf = () => {
-    gerarRelatorioTop30Pdf(itens, { filialNome });
+  const [isGerandoPdf, setIsGerandoPdf] = useState(false);
+  const [erroPdf, setErroPdf] = useState<string | null>(null);
+
+  const handleExportarPdf = async () => {
+    if (isGerandoPdf) return;
+    setIsGerandoPdf(true);
+    setErroPdf(null);
+    try {
+      await gerarRelatorioTop30Pdf(itens, { filialNome });
+    } catch (err: any) {
+      setErroPdf(err?.message || 'Erro ao gerar relatório TOP 30.');
+    } finally {
+      setIsGerandoPdf(false);
+    }
   };
 
   const formatarMoeda = (val: number) => {
@@ -118,14 +131,38 @@ export const TabelaTop30Mercadorias: React.FC<TabelaTop30MercadoriasProps> = ({
 
           <div className="flex items-center gap-2 self-start md:self-auto">
             <button
+              type="button"
+              disabled={isGerandoPdf}
               onClick={handleExportarPdf}
-              className="px-4 py-2 bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white font-bold text-xs rounded-lg flex items-center gap-2 shadow-sm transition-all hover:shadow-md cursor-pointer"
+              className="px-4 py-2 bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 disabled:opacity-70 disabled:cursor-wait text-white font-bold text-xs rounded-lg flex items-center gap-2 shadow-sm transition-all hover:shadow-md cursor-pointer"
             >
-              <FileText className="w-4 h-4 text-white" />
-              Exportar PDF Oficial (A4 Paisagem)
+              {isGerandoPdf ? (
+                <>
+                  <RefreshCw className="w-4 h-4 text-white animate-spin" />
+                  <span>Gerando PDF...</span>
+                </>
+              ) : (
+                <>
+                  <FileText className="w-4 h-4 text-white" />
+                  <span>Exportar PDF Oficial (A4 Paisagem)</span>
+                </>
+              )}
             </button>
           </div>
         </div>
+
+        {erroPdf && (
+          <div className="mt-3 p-2.5 rounded-lg bg-red-950/80 border border-red-500/50 text-red-100 text-xs font-bold flex items-center justify-between gap-2">
+            <span>{erroPdf}</span>
+            <button
+              type="button"
+              onClick={() => setErroPdf(null)}
+              className="text-[10px] uppercase font-black px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 cursor-pointer"
+            >
+              Fechar
+            </button>
+          </div>
+        )}
 
         {/* Resumo Consolidado dos 30 Itens */}
         <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5 mt-4 pt-3 border-t border-slate-800/80 text-xs">

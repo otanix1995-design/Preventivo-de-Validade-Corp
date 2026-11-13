@@ -30,7 +30,11 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { formatarMoedaBR } from '../services/deviceId';
-import { gerarRelatorioEntidadeIsvA4Pdf, gerarRelatorioIsvA4Pdf } from '../services/isvPdfService';
+import {
+  formatarResumoFiltrosIsv,
+  gerarRelatorioEntidadeIsvA4Pdf,
+  gerarRelatorioIsvA4Pdf,
+} from '../services/isvPdfService';
 import { isvService } from '../services/isvService';
 import { promotorService } from '../services/promotorService';
 import {
@@ -122,6 +126,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [buscaModal, setBuscaModal] = useState('');
   const [paginaModal, setPaginaModal] = useState(1);
   const ITENS_POR_PAGINA_MODAL = 10;
+
+  // Estados de geração e download do Relatório PDF A4
+  const [isGerandoPdf, setIsGerandoPdf] = useState(false);
+  const [feedbackPdf, setFeedbackPdf] = useState<{ tipo: 'sucesso' | 'erro'; texto: string } | null>(null);
 
   useEffect(() => {
     Promise.all([isvService.init(), promotorService.init()]).then(() => {
@@ -294,15 +302,44 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     setPaginaModal(1);
   };
 
-  // Exportar Dashboard em PDF A4
-  const handleExportarDashboardPdf = () => {
-    gerarRelatorioIsvA4Pdf(itensFiltrados, {
-      tituloFiltro: 'Painel Executivo Dashboard',
-      tipoRelatorioTitulo: 'PAINEL EXECUTIVO ISV',
-      exibirValorEstoque: true,
-      filialNome: 'Filial 172 — Cascavel',
-      fonteOficial: 'BASE DO RUB',
-    });
+  // Exportar Dashboard em PDF A4 com todos os filtros aplicados e indicador visual
+  const handleExportarDashboardPdf = async () => {
+    if (isGerandoPdf) return;
+    setIsGerandoPdf(true);
+    setFeedbackPdf(null);
+
+    try {
+      // Yield para garantir que o navegador pinte o botão "Gerando PDF..."
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const resumoFiltros = formatarResumoFiltrosIsv(filtros);
+      const resultado = await gerarRelatorioIsvA4Pdf(itensFiltrados, {
+        tituloFiltro: 'Painel Executivo Dashboard',
+        tipoRelatorioTitulo: 'PAINEL EXECUTIVO ISV',
+        exibirValorEstoque: true,
+        filialNome: 'Filial 172 — Cascavel',
+        fonteOficial: 'BASE DO RUB',
+        filtros,
+        filtrosDescricao: resumoFiltros,
+        valorTotalFiltrado: indicadores.valorTotal,
+        totalItensFiltrados: itensFiltrados.length,
+      });
+
+      const tamMb = (resultado.tamanhoBytes / (1024 * 1024)).toFixed(1);
+      setFeedbackPdf({
+        tipo: 'sucesso',
+        texto: `Download concluído com sucesso: ${resultado.totalItens.toLocaleString('pt-BR')} produtos em ${resultado.totalPaginas} páginas (${tamMb} MB).`,
+      });
+      setTimeout(() => setFeedbackPdf(null), 8000);
+    } catch (err: any) {
+      console.error('Erro ao exportar PDF do Dashboard:', err);
+      setFeedbackPdf({
+        tipo: 'erro',
+        texto: `Falha ao gerar o PDF: ${err?.message || 'Erro durante o processamento do relatório.'}`,
+      });
+    } finally {
+      setIsGerandoPdf(false);
+    }
   };
 
   // Itens filtrados para modal de drilldown
@@ -360,12 +397,22 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <button
               id="dashboard-btn-pdf-a4"
               type="button"
+              disabled={isGerandoPdf}
               onClick={handleExportarDashboardPdf}
-              className="px-3.5 py-2 rounded-xl bg-[#F36B0B] hover:bg-[#C94F00] text-white font-black text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
-              title="Exporta o relatório consolidado em PDF A4 Horizontal"
+              className="px-3.5 py-2 rounded-xl bg-[#F36B0B] hover:bg-[#C94F00] disabled:bg-orange-600/70 disabled:cursor-wait text-white font-black text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+              title="Exporta o relatório consolidado em PDF A4 Horizontal com todos os filtros aplicados"
             >
-              <Download className="w-4 h-4 stroke-[2.5]" />
-              <span>Relatório A4</span>
+              {isGerandoPdf ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin stroke-[2.5]" />
+                  <span>Gerando PDF ({itensFiltrados.length.toLocaleString('pt-BR')})...</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4 stroke-[2.5]" />
+                  <span>Relatório A4 ({itensFiltrados.length.toLocaleString('pt-BR')})</span>
+                </>
+              )}
             </button>
 
             <button
@@ -380,6 +427,33 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Banner de Feedback de Geração de Relatório PDF */}
+      {feedbackPdf && (
+        <div
+          className={`rounded-2xl p-3.5 sm:p-4 flex items-center justify-between gap-3 text-xs font-bold transition-all animate-fadeIn shadow-sm border ${
+            feedbackPdf.tipo === 'sucesso'
+              ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-100'
+              : 'bg-red-950/90 border-red-500/50 text-red-100'
+          }`}
+        >
+          <div className="flex items-center gap-2.5">
+            {feedbackPdf.tipo === 'sucesso' ? (
+              <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-5 h-5 text-red-400 shrink-0" />
+            )}
+            <span className="leading-relaxed">{feedbackPdf.texto}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedbackPdf(null)}
+            className="text-[10px] uppercase font-black px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/20 transition-colors shrink-0 cursor-pointer"
+          >
+            Fechar
+          </button>
+        </div>
+      )}
 
       {/* 2. OS 4 INDICADORES PRINCIPAIS DO DASHBOARD (ETAPA 2) */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -778,6 +852,82 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 Exato
               </button>
             </div>
+          </div>
+        </div>
+
+        {/* Linha 5: Estoque, Valor Financeiro e Ordenação Oficial */}
+        <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-3 flex-wrap text-xs">
+          {/* Estoque */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
+              Estoque:
+            </span>
+            {[
+              { id: 'TODOS' as const, label: 'Todos' },
+              { id: 'COM_ESTOQUE' as const, label: 'Com Estoque' },
+              { id: 'SEM_ESTOQUE' as const, label: 'Estoque Zerado' },
+            ].map((opt) => (
+              <button
+                key={`est-${opt.id}`}
+                type="button"
+                onClick={() => setFiltros((prev) => ({ ...prev, filtroEstoque: opt.id }))}
+                className={`px-2 py-0.5 rounded text-[10px] font-black uppercase transition-colors cursor-pointer ${
+                  filtros.filtroEstoque === opt.id
+                    ? 'bg-slate-900 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Valor */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
+              Valor:
+            </span>
+            {[
+              { id: 'TODOS' as const, label: 'Todos' },
+              { id: 'ATE_250' as const, label: 'Até R$ 250' },
+              { id: 'ACIMA_250' as const, label: 'Acima R$ 250' },
+            ].map((opt) => (
+              <button
+                key={`val-${opt.id}`}
+                type="button"
+                onClick={() => setFiltros((prev) => ({ ...prev, filtroValor: opt.id }))}
+                className={`px-2 py-0.5 rounded text-[10px] font-black uppercase transition-colors cursor-pointer ${
+                  filtros.filtroValor === opt.id
+                    ? 'bg-emerald-700 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Ordenação */}
+          <div className="flex items-center gap-1.5 ml-auto">
+            <span className="text-[10px] font-black uppercase text-slate-400 shrink-0">
+              Ordenar:
+            </span>
+            <select
+              value={filtros.ordenacao}
+              onChange={(e) =>
+                setFiltros((prev) => ({
+                  ...prev,
+                  ordenacao: e.target.value as any,
+                }))
+              }
+              className="bg-amber-50 border border-amber-300 rounded px-2 py-0.5 text-[10px] font-black text-amber-950 focus:bg-white focus:outline-hidden cursor-pointer"
+            >
+              <option value="MAIOR_VALOR">Maior Valor de Estoque</option>
+              <option value="MENOR_VALOR">Menor Valor de Estoque</option>
+              <option value="MAIS_DIAS_SEM_VENDA">Mais Dias Sem Venda</option>
+              <option value="MAIOR_IDADE">Maior Idade</option>
+              <option value="CODIGO">Código do Produto</option>
+            </select>
           </div>
         </div>
       </div>
@@ -1389,18 +1539,46 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 {/* Botão Imprimir PDF A4 da Indústria */}
                 <button
                   type="button"
-                  onClick={() =>
-                    gerarRelatorioEntidadeIsvA4Pdf(
-                      'INDUSTRIA',
-                      modalIndustria.nome,
-                      modalIndustria.cnpj !== 'SEM_CNPJ' ? `CNPJ: ${modalIndustria.cnpj}` : 'Indústria Vinculada',
-                      modalIndustria.itens
-                    )
-                  }
-                  className="px-3.5 py-2 rounded-xl bg-purple-700 hover:bg-purple-800 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+                  disabled={isGerandoPdf}
+                  onClick={async () => {
+                    if (isGerandoPdf) return;
+                    setIsGerandoPdf(true);
+                    setFeedbackPdf(null);
+                    try {
+                      const res = await gerarRelatorioEntidadeIsvA4Pdf(
+                        'INDUSTRIA',
+                        modalIndustria.nome,
+                        modalIndustria.cnpj !== 'SEM_CNPJ' ? `CNPJ: ${modalIndustria.cnpj}` : 'Indústria Vinculada',
+                        modalIndustria.itens,
+                        { filtros, valorTotalFiltrado: modalIndustria.valorTotal }
+                      );
+                      const tamKb = (res.tamanhoBytes / 1024).toFixed(0);
+                      setFeedbackPdf({
+                        tipo: 'sucesso',
+                        texto: `PDF da indústria gerado: ${res.totalItens.toLocaleString('pt-BR')} itens em ${res.totalPaginas} páginas (${tamKb} KB).`,
+                      });
+                    } catch (err: any) {
+                      setFeedbackPdf({
+                        tipo: 'erro',
+                        texto: `Falha ao gerar PDF da indústria: ${err?.message || 'Erro desconhecido.'}`,
+                      });
+                    } finally {
+                      setIsGerandoPdf(false);
+                    }
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-purple-700 hover:bg-purple-800 disabled:bg-purple-500 disabled:cursor-wait text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
                 >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>Imprimir PDF (A4)</span>
+                  {isGerandoPdf ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Gerando PDF...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Imprimir PDF (A4)</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
@@ -1546,18 +1724,46 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               {/* Botão Imprimir PDF A4 da Agência */}
               <button
                 type="button"
-                onClick={() =>
-                  gerarRelatorioEntidadeIsvA4Pdf(
-                    'AGENCIA',
-                    modalAgencia.nome,
-                    `Agência com ${modalAgencia.promotoresRelacionados.length} promotores vinculados`,
-                    modalAgencia.itens
-                  )
-                }
-                className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
+                disabled={isGerandoPdf}
+                onClick={async () => {
+                  if (isGerandoPdf) return;
+                  setIsGerandoPdf(true);
+                  setFeedbackPdf(null);
+                  try {
+                    const res = await gerarRelatorioEntidadeIsvA4Pdf(
+                      'AGENCIA',
+                      modalAgencia.nome,
+                      `Agência com ${modalAgencia.promotoresRelacionados.length} promotores vinculados`,
+                      modalAgencia.itens,
+                      { filtros, valorTotalFiltrado: modalAgencia.valorTotal }
+                    );
+                    const tamKb = (res.tamanhoBytes / 1024).toFixed(0);
+                    setFeedbackPdf({
+                      tipo: 'sucesso',
+                      texto: `PDF da agência gerado: ${res.totalItens.toLocaleString('pt-BR')} itens em ${res.totalPaginas} páginas (${tamKb} KB).`,
+                    });
+                  } catch (err: any) {
+                    setFeedbackPdf({
+                      tipo: 'erro',
+                      texto: `Falha ao gerar PDF da agência: ${err?.message || 'Erro desconhecido.'}`,
+                    });
+                  } finally {
+                    setIsGerandoPdf(false);
+                  }
+                }}
+                className="px-3.5 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-500 disabled:cursor-wait text-white font-black text-xs uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
               >
-                <Download className="w-3.5 h-3.5" />
-                <span>Imprimir PDF (A4)</span>
+                {isGerandoPdf ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Gerando PDF...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Imprimir PDF (A4)</span>
+                  </>
+                )}
               </button>
             </div>
 

@@ -31,6 +31,7 @@ import {
 import React, { useEffect, useMemo, useState } from 'react';
 import { formatarMoedaBR } from '../services/deviceId';
 import {
+  formatarResumoFiltrosIsv,
   gerarRelatorioAgenciaPdf,
   gerarRelatorioFornecedorPdf,
   gerarRelatorioIsvA4Pdf,
@@ -93,9 +94,11 @@ export const IsvView: React.FC<IsvViewProps> = ({
   // Modal de geração de PDF
   const [isModalPdfOpen, setIsModalPdfOpen] = useState(false);
   const [pdfExibirValor, setPdfExibirValor] = useState(true);
-  const [pdfTipoAgrupamento, setPdfTipoAgrupamento] = useState<'GERAL' | 'TOP30' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA'>('TOP30');
+  const [pdfTipoAgrupamento, setPdfTipoAgrupamento] = useState<'GERAL' | 'TOP30' | 'INDUSTRIA' | 'PROMOTOR' | 'AGENCIA'>('GERAL');
   const [pdfEntidadeSelecionada, setPdfEntidadeSelecionada] = useState<string>('');
-  const [pdfLimiteExportacao, setPdfLimiteExportacao] = useState<number | 'TODOS'>(30);
+  const [pdfLimiteExportacao, setPdfLimiteExportacao] = useState<number | 'TODOS'>('TODOS');
+  const [isGerandoPdf, setIsGerandoPdf] = useState(false);
+  const [feedbackPdf, setFeedbackPdf] = useState<{ tipo: 'sucesso' | 'erro'; texto: string } | null>(null);
 
   // Modal de Auditoria do Catálogo / Custo Médio
   const [isModalAuditoriaOpen, setIsModalAuditoriaOpen] = useState(false);
@@ -294,130 +297,140 @@ export const IsvView: React.FC<IsvViewProps> = ({
     setIsModalAjusteOpen(true);
   };
 
-  const handleDispararPdf = () => {
+  const handleDispararPdf = async () => {
+    if (isGerandoPdf) return;
+    setIsGerandoPdf(true);
+    setFeedbackPdf(null);
     const filialNome = 'FILIAL 172 — CASCAVEL';
 
-    if (pdfTipoAgrupamento === 'TOP30') {
-      gerarRelatorioTop30Pdf(itensFiltrados, {
-        filialNome,
-        exibirValorEstoque: pdfExibirValor,
-      });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      let resultado;
+
+      if (pdfTipoAgrupamento === 'TOP30') {
+        resultado = await gerarRelatorioTop30Pdf(itensFiltrados, {
+          filialNome,
+          exibirValorEstoque: pdfExibirValor,
+        });
+      } else if (pdfTipoAgrupamento === 'INDUSTRIA') {
+        const ind = industrias.find((i) => i.cnpj === pdfEntidadeSelecionada);
+        const nomeEntidade = ind
+          ? ind.razao_social
+          : pdfEntidadeSelecionada || 'GERAL';
+        const subtituloEntidade = ind
+          ? `CNPJ: ${ind.cnpj_formatado || ind.cnpj}`
+          : '';
+        const itensAlvo = ind
+          ? itensFiltrados.filter((it) => it.cnpjs?.includes(ind.cnpj))
+          : itensFiltrados;
+
+        resultado = await gerarRelatorioFornecedorPdf(nomeEntidade, itensAlvo, {
+          filialNome,
+          subtituloEntidade,
+          exibirValorEstoque: pdfExibirValor,
+          limiteQuantidade: pdfLimiteExportacao,
+          filtros,
+          filtrosDescricao: getFiltrosAtivosDescricao(),
+        });
+      } else if (pdfTipoAgrupamento === 'PROMOTOR') {
+        const prom = promotores.find((p) => p.promotorId === pdfEntidadeSelecionada);
+        const nomeEntidade = prom ? prom.nome : pdfEntidadeSelecionada || 'GERAL';
+        const subtituloEntidade = prom ? `Agência: ${prom.agenciaNome || 'Não informada'}` : '';
+        const itensAlvo = prom
+          ? itensFiltrados.filter((it) => it.promotores_nomes?.includes(prom.nome))
+          : itensFiltrados;
+
+        resultado = await gerarRelatorioPromotorPdf(nomeEntidade, itensAlvo, {
+          filialNome,
+          subtituloEntidade,
+          exibirValorEstoque: pdfExibirValor,
+          limiteQuantidade: pdfLimiteExportacao,
+          filtros,
+          filtrosDescricao: getFiltrosAtivosDescricao(),
+        });
+      } else if (pdfTipoAgrupamento === 'AGENCIA') {
+        const nomeEntidade = pdfEntidadeSelecionada || 'GERAL';
+        const itensAlvo = pdfEntidadeSelecionada
+          ? itensFiltrados.filter((it) => it.agencias_nomes?.includes(nomeEntidade))
+          : itensFiltrados;
+
+        resultado = await gerarRelatorioAgenciaPdf(nomeEntidade, itensAlvo, {
+          filialNome,
+          subtituloEntidade: `Agência: ${nomeEntidade}`,
+          exibirValorEstoque: pdfExibirValor,
+          limiteQuantidade: pdfLimiteExportacao,
+          filtros,
+          filtrosDescricao: getFiltrosAtivosDescricao(),
+        });
+      } else {
+        // Geral (Filtros Ativos) - Relatório A4 Institucional
+        const fonteOficial = isvService.temPlanilhaIsv()
+          ? 'Planilha Operacional Oficial ISV'
+          : 'BASE DO RUB';
+
+        resultado = await gerarRelatorioIsvA4Pdf(itensFiltrados, {
+          tituloFiltro: 'Geral da Loja',
+          tipoAgrupamento: 'GERAL',
+          exibirValorEstoque: pdfExibirValor,
+          filialNome,
+          limiteQuantidade: pdfLimiteExportacao,
+          fonteOficial,
+          filtros,
+          filtrosDescricao: getFiltrosAtivosDescricao(),
+          valorTotalFiltrado,
+          totalItensFiltrados: itensFiltrados.length,
+        });
+      }
+
       setIsModalPdfOpen(false);
-      return;
-    }
-
-    if (pdfTipoAgrupamento === 'INDUSTRIA') {
-      const ind = industrias.find((i) => i.cnpj === pdfEntidadeSelecionada);
-      const nomeEntidade = ind
-        ? ind.razao_social
-        : pdfEntidadeSelecionada || 'GERAL';
-      const subtituloEntidade = ind
-        ? `CNPJ: ${ind.cnpj_formatado || ind.cnpj}`
-        : '';
-      const itensAlvo = ind
-        ? itensFiltrados.filter((it) => it.cnpjs?.includes(ind.cnpj))
-        : itensFiltrados;
-
-      gerarRelatorioFornecedorPdf(nomeEntidade, itensAlvo, {
-        filialNome,
-        subtituloEntidade,
-        exibirValorEstoque: pdfExibirValor,
-        limiteQuantidade: pdfLimiteExportacao,
-        filtrosDescricao: getFiltrosAtivosDescricao(),
+      const tamMb = (resultado.tamanhoBytes / (1024 * 1024)).toFixed(1);
+      setFeedbackPdf({
+        tipo: 'sucesso',
+        texto: `Relatório PDF baixado com sucesso: ${resultado.totalItens.toLocaleString('pt-BR')} produtos em ${resultado.totalPaginas} páginas (${tamMb} MB).`,
       });
-      setIsModalPdfOpen(false);
-      return;
-    }
-
-    if (pdfTipoAgrupamento === 'PROMOTOR') {
-      const prom = promotores.find((p) => p.promotorId === pdfEntidadeSelecionada);
-      const nomeEntidade = prom ? prom.nome : pdfEntidadeSelecionada || 'GERAL';
-      const subtituloEntidade = prom ? `Agência: ${prom.agenciaNome || 'Não informada'}` : '';
-      const itensAlvo = prom
-        ? itensFiltrados.filter((it) => it.promotores_nomes?.includes(prom.nome))
-        : itensFiltrados;
-
-      gerarRelatorioPromotorPdf(nomeEntidade, itensAlvo, {
-        filialNome,
-        subtituloEntidade,
-        exibirValorEstoque: pdfExibirValor,
-        limiteQuantidade: pdfLimiteExportacao,
-        filtrosDescricao: getFiltrosAtivosDescricao(),
+      setTimeout(() => setFeedbackPdf(null), 8000);
+    } catch (err: any) {
+      console.error('Erro na geração do PDF:', err);
+      setFeedbackPdf({
+        tipo: 'erro',
+        texto: `Falha ao gerar PDF: ${err?.message || 'Erro durante a exportação.'}`,
       });
-      setIsModalPdfOpen(false);
-      return;
+    } finally {
+      setIsGerandoPdf(false);
     }
-
-    if (pdfTipoAgrupamento === 'AGENCIA') {
-      const nomeEntidade = pdfEntidadeSelecionada || 'GERAL';
-      const itensAlvo = pdfEntidadeSelecionada
-        ? itensFiltrados.filter((it) => it.agencias_nomes?.includes(nomeEntidade))
-        : itensFiltrados;
-
-      gerarRelatorioAgenciaPdf(nomeEntidade, itensAlvo, {
-        filialNome,
-        subtituloEntidade: `Agência: ${nomeEntidade}`,
-        exibirValorEstoque: pdfExibirValor,
-        limiteQuantidade: pdfLimiteExportacao,
-        filtrosDescricao: getFiltrosAtivosDescricao(),
-      });
-      setIsModalPdfOpen(false);
-      return;
-    }
-
-    // Geral (Filtros Ativos) - Relatório A4 Institucional
-    const fonteOficial = isvService.temPlanilhaIsv()
-      ? 'Planilha Operacional Oficial ISV'
-      : 'BASE DO RUB';
-
-    gerarRelatorioIsvA4Pdf(itensFiltrados, {
-      tituloFiltro: 'Geral da Loja',
-      tipoAgrupamento: 'GERAL',
-      exibirValorEstoque: pdfExibirValor,
-      filialNome,
-      limiteQuantidade: pdfLimiteExportacao,
-      fonteOficial,
-      filtrosDescricao: getFiltrosAtivosDescricao(),
-    });
-
-    setIsModalPdfOpen(false);
   };
 
   const getFiltrosAtivosDescricao = (): string => {
-    const parts: string[] = [];
-    if (filtros.setorOperacional && filtros.setorOperacional !== 'TODOS') {
-      const conf = SETORES_OPERACIONAIS_CONFIG[filtros.setorOperacional];
-      parts.push(`Setor: ${conf ? conf.label : filtros.setorOperacional}`);
-    }
-    if (filtros.diasSemVenda !== null) {
-      parts.push(`Dias s/ venda ${filtros.modoDiasSemVenda === 'EXATO' ? '=' : '>='} ${filtros.diasSemVenda}d`);
-    }
-    if (filtros.idade !== null) {
-      parts.push(`Idade ${filtros.modoIdade === 'EXATO' ? '=' : '>='} ${filtros.idade}d`);
-    }
-    if (filtros.filtroEstoque !== 'TODOS') {
-      parts.push(filtros.filtroEstoque === 'COM_ESTOQUE' ? 'Com Estoque' : 'Estoque Zerado');
-    }
-    if (filtros.filtroValor !== 'TODOS') {
-      parts.push(filtros.filtroValor === 'ATE_250' ? 'Até R$250' : 'Acima R$250');
-    }
-    if (filtros.situacaoVinculo !== 'TODOS') {
-      parts.push(
-        filtros.situacaoVinculo === 'COM_PROMOTOR'
-          ? 'Com Promotor'
-          : filtros.situacaoVinculo === 'SEM_PROMOTOR'
-          ? 'Sem Promotor'
-          : 'Múltiplos CNPJs'
-      );
-    }
-    return parts.join(' | ');
+    return formatarResumoFiltrosIsv(filtros);
   };
 
-  const handleQuickPrintTop30 = () => {
-    gerarRelatorioTop30Pdf(itensFiltrados, {
-      filialNome: 'FILIAL 172 — CASCAVEL',
-      exibirValorEstoque: true,
-    });
+  const handleQuickPrintTop30 = async () => {
+    if (isGerandoPdf) return;
+    setIsGerandoPdf(true);
+    setFeedbackPdf(null);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const resultado = await gerarRelatorioTop30Pdf(itensFiltrados, {
+        filialNome: 'FILIAL 172 — CASCAVEL',
+        exibirValorEstoque: true,
+      });
+
+      const tamKb = (resultado.tamanhoBytes / 1024).toFixed(0);
+      setFeedbackPdf({
+        tipo: 'sucesso',
+        texto: `TOP 30 gerado com sucesso: ${resultado.totalItens} produtos (${tamKb} KB).`,
+      });
+      setTimeout(() => setFeedbackPdf(null), 8000);
+    } catch (err: any) {
+      console.error('Erro ao gerar TOP 30:', err);
+      setFeedbackPdf({
+        tipo: 'erro',
+        texto: `Falha ao gerar TOP 30: ${err?.message || 'Erro durante a exportação.'}`,
+      });
+    } finally {
+      setIsGerandoPdf(false);
+    }
   };
 
   return (
@@ -468,25 +481,72 @@ export const IsvView: React.FC<IsvViewProps> = ({
             <button
               id="btn-quick-print-top30"
               type="button"
+              disabled={isGerandoPdf}
               onClick={handleQuickPrintTop30}
-              className="px-3.5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-amber-400 cursor-pointer"
+              className="px-3.5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:bg-amber-400 disabled:cursor-wait text-slate-950 font-black text-xs uppercase tracking-wider transition-all flex items-center gap-1.5 shadow-md active:scale-95 border border-amber-400 cursor-pointer"
               title="Exporta imediatamente os 30 maiores produtos por valor em PDF A4 Horizontal"
             >
-              <FileText className="w-4 h-4 stroke-[2.5]" />
-              <span>Imprimir Top 30 (A4)</span>
+              {isGerandoPdf ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin stroke-[2.5]" />
+                  <span>Gerando...</span>
+                </>
+              ) : (
+                <>
+                  <FileText className="w-4 h-4 stroke-[2.5]" />
+                  <span>Imprimir Top 30 (A4)</span>
+                </>
+              )}
             </button>
 
             <button
               id="btn-abrir-modal-pdf-isv"
               type="button"
+              disabled={isGerandoPdf}
               onClick={() => setIsModalPdfOpen(true)}
-              className="px-4 py-2.5 rounded-xl bg-[#F36B0B] hover:bg-[#C94F00] text-white font-black text-xs uppercase tracking-wider transition-all flex items-center gap-2 shadow-md active:scale-95 cursor-pointer"
+              className="px-4 py-2.5 rounded-xl bg-[#F36B0B] hover:bg-[#C94F00] disabled:bg-orange-500/70 disabled:cursor-wait text-white font-black text-xs uppercase tracking-wider transition-all flex items-center gap-2 shadow-md active:scale-95 cursor-pointer"
             >
-              <Download className="w-4 h-4 stroke-[2.5]" />
-              <span>Relatório A4 (PDF)</span>
+              {isGerandoPdf ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin stroke-[2.5]" />
+                  <span>Gerando PDF ({itensFiltrados.length.toLocaleString('pt-BR')})...</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-4 h-4 stroke-[2.5]" />
+                  <span>Relatório A4 ({itensFiltrados.length.toLocaleString('pt-BR')})</span>
+                </>
+              )}
             </button>
           </div>
         </div>
+
+        {/* Banner de Feedback de Geração de Relatório PDF */}
+        {feedbackPdf && (
+          <div
+            className={`rounded-xl p-3 sm:p-3.5 flex items-center justify-between gap-3 text-xs font-bold transition-all animate-fadeIn shadow-sm border ${
+              feedbackPdf.tipo === 'sucesso'
+                ? 'bg-emerald-950/90 border-emerald-500/50 text-emerald-100'
+                : 'bg-red-950/90 border-red-500/50 text-red-100'
+            }`}
+          >
+            <div className="flex items-center gap-2.5">
+              {feedbackPdf.tipo === 'sucesso' ? (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+              )}
+              <span className="leading-relaxed">{feedbackPdf.texto}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setFeedbackPdf(null)}
+              className="text-[10px] uppercase font-black px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 transition-colors shrink-0 cursor-pointer"
+            >
+              Fechar
+            </button>
+          </div>
+        )}
 
         {/* Abas Sub-Navegação: Geral / TOP 30 / Possíveis Ajustes / Ocorrências */}
         <div className="flex items-center gap-2 pt-2 border-t border-slate-800 text-xs font-black uppercase tracking-wider flex-wrap">
@@ -1692,13 +1752,23 @@ export const IsvView: React.FC<IsvViewProps> = ({
                 </button>
                 <button
                   type="button"
+                  disabled={isGerandoPdf}
                   onClick={handleDispararPdf}
-                  className="px-5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-black uppercase text-xs flex items-center gap-1.5 shadow-md active:scale-95"
+                  className="px-5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 disabled:bg-blue-400 disabled:cursor-wait text-white font-black uppercase text-xs flex items-center gap-1.5 shadow-md active:scale-95 cursor-pointer"
                 >
-                  <Download className="w-4 h-4 stroke-[2.5]" />
-                  <span>
-                    Baixar PDF A4 Horizontal ({pdfLimiteExportacao === 'TODOS' ? itensFiltrados.length : Math.min(Number(pdfLimiteExportacao), itensFiltrados.length)} Itens)
-                  </span>
+                  {isGerandoPdf ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin stroke-[2.5]" />
+                      <span>Gerando Relatório...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-4 h-4 stroke-[2.5]" />
+                      <span>
+                        Baixar PDF A4 Horizontal ({pdfLimiteExportacao === 'TODOS' ? itensFiltrados.length.toLocaleString('pt-BR') : Math.min(Number(pdfLimiteExportacao), itensFiltrados.length).toLocaleString('pt-BR')} Itens)
+                      </span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>

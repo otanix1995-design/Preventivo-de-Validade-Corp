@@ -7,26 +7,29 @@
  * - Cabeçalho azul-escuro (#0F172A) com identidade "ISV — INTELIGÊNCIA DE ESTOQUE".
  * - Identificação "FILIAL 172 — CASCAVEL".
  * - Data e hora reais de emissão.
- * - Faixa laranja (#EA580C) identificando o relatório ou filtro ativo.
+ * - Quantidade total de produtos filtrados e valor financeiro total filtrado no cabeçalho.
+ * - Faixa laranja (#EA580C) identificando o relatório e resumo legível dos filtros ativos.
  * - Cabeçalho das colunas em AMARELO (#FACC15) com texto em negrito (#0F172A).
  * - Tabela branca, compacta, com linhas pretas (lineWidth: 0.15, lineColor: [0, 0, 0]).
  * - Fonte legível, alinhamento consistente e margens de 10mm.
- * - Rodapé com total real de produtos, paginação real ("Página X de Y") e totais.
+ * - Rodapé com total real de produtos, valor filtrado e paginação real ("Página X de Y").
  * - Quebra automática de páginas com repetição dos cabeçalhos (showHead: 'everyPage').
- * - NENHUMA coluna de estoque duplicada (apenas uma única coluna "ESTOQUE").
- * 
- * Relatórios Oficiais Implementados:
- * 1. PDF — TOP 30 (Ranking dos 30 produtos com mais dias sem venda, com cores oficiais)
- * 2. PDF — Relatório por Fornecedor (Sem coluna repetida de fornecedor)
- * 3. PDF — Relatório por Promotor (Sem coluna repetida de promotor)
- * 4. PDF — Relatório por Agência (Sem coluna repetida de agência)
- * 5. PDF — Relatório Geral da Loja / Filtros Ativos
+ * - NENHUMA coluna de estoque duplicada (apenas uma única coluna "ESTOQUE", regra EMB1 + EMB9).
+ * - Download seguro com fallback para evitar bloqueios de navegador / iframe.
  */
 
-import jsPDF from 'jspdf';
+import jsPDFModule, { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { ItemIsv } from '../types';
+
+// Construtor universal para ambientes Browser (Vite) e Node.js (testes e build)
+const JsPdfClass: typeof jsPDF =
+  typeof jsPDFModule === 'function'
+    ? jsPDFModule
+    : (jsPDFModule as any)?.default || (jsPDFModule as any)?.jsPDF || jsPDF;
+import { FiltrosIsv, ItemIsv } from '../types';
 import { isvService } from './isvService';
+import { promotorService } from './promotorService';
+import { formatarMoedaBR } from './deviceId';
 import {
   classificarDiasSemVenda,
   extrairAgenciaProduto,
@@ -48,10 +51,159 @@ export interface IsvPdfOptions {
   fonteOficial?: string;
   filtrosDescricao?: string;
   tipoRelatorioTitulo?: string;
+  valorTotalFiltrado?: number;
+  totalItensFiltrados?: number;
+  ordenacaoDescricao?: string;
+  filtros?: Partial<FiltrosIsv>;
+}
+
+export interface ResultadoExportacaoPdf {
+  sucesso: boolean;
+  totalItens: number;
+  totalPaginas: number;
+  tamanhoBytes: number;
+  nomeArquivo: string;
+  mensagem?: string;
 }
 
 // ============================================================================
-// HELPER COMPARTILHADO: CABEÇALHO AZUL-ESCURO E FAIXA LARANJA INSTITUCIONAL
+// HELPER: RESUMO LEGÍVEL DOS FILTROS APLICADOS
+// ============================================================================
+
+/**
+ * Constrói uma descrição legível e oficial de todos os filtros ativos aplicados.
+ */
+export function formatarResumoFiltrosIsv(
+  filtros?: Partial<FiltrosIsv>,
+  fallback?: string
+): string {
+  if (!filtros) {
+    return fallback || 'Todos os produtos (sem filtros restritivos) | Ordenação: Maior Valor de Estoque';
+  }
+
+  const parts: string[] = [];
+
+  if (filtros.termoBusca && filtros.termoBusca.trim()) {
+    parts.push(`Busca: "${filtros.termoBusca.trim()}"`);
+  }
+
+  if (filtros.setorOperacional && filtros.setorOperacional !== 'TODOS') {
+    const mapSetor: Record<string, string> = {
+      FRIOS: 'Frios (RF.)',
+      ACOUGUE: 'Açougue (AC.)',
+      HORTIFRUTI: 'Hortifruti (HF.)',
+      LOJA: 'Loja (CR. / Mercearia)',
+    };
+    parts.push(`Setor: ${mapSetor[filtros.setorOperacional] || filtros.setorOperacional}`);
+  }
+
+  if (filtros.agencia && filtros.agencia !== 'TODAS') {
+    parts.push(`Agência: ${filtros.agencia}`);
+  }
+
+  if (filtros.industriaCnpj && filtros.industriaCnpj !== 'TODAS') {
+    const ind = isvService.getIndustriaByCnpj(filtros.industriaCnpj);
+    const nomeInd = ind?.razao_social || ind?.nome_exibicao || filtros.industriaCnpj;
+    parts.push(`Fornecedor: ${nomeInd}`);
+  }
+
+  if (filtros.promotorId && filtros.promotorId !== 'TODOS') {
+    const prom = promotorService.getPromotores().find((p) => p.promotorId === filtros.promotorId);
+    parts.push(`Promotor: ${prom?.nome || filtros.promotorId}`);
+  }
+
+  if (filtros.situacaoVinculo && filtros.situacaoVinculo !== 'TODOS') {
+    const mapVinc: Record<string, string> = {
+      COM_PROMOTOR: 'Com Promotor',
+      SEM_PROMOTOR: 'Sem Promotor',
+      MULTIPLOS_CNPJS: 'Múltiplos CNPJs',
+    };
+    parts.push(`Vínculo: ${mapVinc[filtros.situacaoVinculo] || filtros.situacaoVinculo}`);
+  }
+
+  if (filtros.diasSemVenda !== null && filtros.diasSemVenda !== undefined) {
+    parts.push(`Dias s/ Venda: ${filtros.modoDiasSemVenda === 'EXATO' ? '=' : '>='} ${filtros.diasSemVenda}d`);
+  }
+
+  if (filtros.idade !== null && filtros.idade !== undefined) {
+    parts.push(`Idade: ${filtros.modoIdade === 'EXATO' ? '=' : '>='} ${filtros.idade}d`);
+  }
+
+  if (filtros.filtroEstoque && filtros.filtroEstoque !== 'TODOS') {
+    parts.push(filtros.filtroEstoque === 'COM_ESTOQUE' ? 'Com Estoque' : 'Estoque Zerado');
+  }
+
+  if (filtros.filtroValor && filtros.filtroValor !== 'TODOS') {
+    parts.push(filtros.filtroValor === 'ATE_250' ? 'Valor até R$ 250' : 'Valor acima de R$ 250');
+  }
+
+  if (filtros.ordenacao) {
+    const mapOrd: Record<string, string> = {
+      MAIOR_VALOR: 'Maior Valor de Estoque',
+      MENOR_VALOR: 'Menor Valor de Estoque',
+      MAIS_DIAS_SEM_VENDA: 'Mais Dias Sem Venda',
+      MAIOR_IDADE: 'Maior Idade da Mercadoria',
+      CODIGO: 'Código do Produto',
+    };
+    parts.push(`Ordenação: ${mapOrd[filtros.ordenacao] || filtros.ordenacao}`);
+  }
+
+  if (parts.length === 0) {
+    return fallback || 'Todos os produtos (sem filtros restritivos) | Ordenação: Maior Valor de Estoque';
+  }
+
+  return parts.join(' | ');
+}
+
+// ============================================================================
+// HELPER: DOWNLOAD SEGURO DE PDF EM AMBIENTES WEB E IFRAME
+// ============================================================================
+
+/**
+ * Dispara o download de um documento jsPDF de forma universal e segura,
+ * utilizando Blob URL com fallback para doc.save.
+ */
+export function dispararDownloadPdf(
+  doc: jsPDF,
+  nomeArquivo: string
+): { sucesso: boolean; tamanhoBytes: number } {
+  try {
+    const blob = doc.output('blob');
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = nomeArquivo;
+      link.target = '_self';
+      link.rel = 'noopener';
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        if (document.body.contains(link)) {
+          document.body.removeChild(link);
+        }
+        URL.revokeObjectURL(url);
+      }, 5000);
+      return { sucesso: true, tamanhoBytes: blob.size };
+    }
+
+    doc.save(nomeArquivo);
+    return { sucesso: true, tamanhoBytes: blob.size };
+  } catch (err: any) {
+    console.warn('Falha no download via URL Blob, tentando fallback doc.save():', err);
+    try {
+      doc.save(nomeArquivo);
+      return { sucesso: true, tamanhoBytes: 0 };
+    } catch (saveErr: any) {
+      console.error('Falha crítica ao salvar PDF:', saveErr);
+      throw new Error(`Não foi possível salvar o arquivo PDF: ${saveErr?.message || err?.message || 'Erro desconhecido'}`);
+    }
+  }
+}
+
+// ============================================================================
+// HELPER: CABEÇALHO AZUL-ESCURO E FAIXA LARANJA INSTITUCIONAL
 // ============================================================================
 
 interface DadosCabecalhoIsv {
@@ -62,63 +214,122 @@ interface DadosCabecalhoIsv {
   subtituloFaixaLaranja?: string;
   dataHoraEmissao: string;
   filialNome: string;
+  totalProdutosFiltrados?: number;
+  valorTotalFiltrado?: number;
+  resumoFiltros?: string;
 }
 
 function desenharCabecalhoInstitucionalIsv(dados: DadosCabecalhoIsv): number {
-  const { doc, pageWidth, marginX, tituloFaixaLaranja, subtituloFaixaLaranja, dataHoraEmissao, filialNome } = dados;
+  const {
+    doc,
+    pageWidth,
+    marginX,
+    tituloFaixaLaranja,
+    subtituloFaixaLaranja,
+    dataHoraEmissao,
+    filialNome,
+    totalProdutosFiltrados,
+    valorTotalFiltrado,
+    resumoFiltros,
+  } = dados;
 
-  // 1. Cabeçalho Azul-Escuro (#0F172A)
+  // 1. Cabeçalho Azul-Escuro Institucional (#0F172A)
+  const alturaTopoAzul = 25;
   doc.setFillColor(15, 23, 42); // slate-900 institucional
-  doc.rect(0, 0, pageWidth, 22, 'F');
+  doc.rect(0, 0, pageWidth, alturaTopoAzul, 'F');
 
-  // Faixa de acento azul (#1D4ED8)
+  // Faixa de acento azul elétrico (#1D4ED8)
   doc.setFillColor(29, 78, 216);
-  doc.rect(0, 22, pageWidth, 1.5, 'F');
+  doc.rect(0, alturaTopoAzul, pageWidth, 1.5, 'F');
 
-  // Título e Identificação da Filial
+  // Linha 1 Topo Esquerda: Título Institucional
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(13);
-  doc.text('ISV — INTELIGÊNCIA DE ESTOQUE', marginX, 9);
+  doc.setFontSize(12.5);
+  doc.text('ISV — INTELIGÊNCIA DE ESTOQUE', marginX, 8.5);
+
+  // Linha 2 Topo Esquerda: Filial e Tipo de Documento
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(191, 219, 254); // blue-200
+  doc.text(`${filialNome.toUpperCase()} • RELATÓRIO EXECUTIVO OFICIAL`, marginX, 14);
+
+  // Linha 3 Topo Esquerda: Total Filtrado e Valor Total Filtrado (Exigência do usuário)
+  const totalTexto = totalProdutosFiltrados !== undefined
+    ? `${totalProdutosFiltrados.toLocaleString('pt-BR')} PRODUTOS FILTRADOS`
+    : 'PRODUTOS FILTRADOS';
+  const valorTexto = valorTotalFiltrado !== undefined
+    ? `VALOR TOTAL: ${formatarMoedaBR(valorTotalFiltrado)}`
+    : '';
+  const infoFiltroTopo = valorTexto ? `${totalTexto}  •  ${valorTexto}` : totalTexto;
 
   doc.setFontSize(8.5);
   doc.setFont('helvetica', 'bold');
-  doc.setTextColor(191, 219, 254); // blue-200
-  doc.text(filialNome.toUpperCase(), marginX, 15);
+  doc.setTextColor(52, 211, 153); // emerald-400
+  doc.text(infoFiltroTopo, marginX, 19.5);
 
-  // Data e hora reais de emissão (Direita)
+  // Topo Direita: Data e Hora Reais de Emissão
   doc.setFontSize(8);
   doc.setFont('helvetica', 'normal');
   doc.setTextColor(226, 232, 240); // slate-200
-  doc.text(`Emissão: ${dataHoraEmissao}`, pageWidth - marginX, 9, { align: 'right' });
-  doc.text('DOCUMENTO OFICIAL ISV • A4 PAISAGEM', pageWidth - marginX, 15, { align: 'right' });
+  doc.text(`Emissão: ${dataHoraEmissao}`, pageWidth - marginX, 8.5, { align: 'right' });
 
-  // 2. Faixa Laranja Institucional (#EA580C)
-  const yFaixaLaranja = 25.5;
-  const alturaFaixaLaranja = subtituloFaixaLaranja ? 12 : 9;
+  doc.setFontSize(7.5);
+  doc.setTextColor(148, 163, 184); // slate-400
+  doc.text('DOCUMENTO OFICIAL ISV • A4 PAISAGEM', pageWidth - marginX, 14, { align: 'right' });
+
+  // Regra de Estoque Consolidado
+  doc.setFont('helvetica', 'bold');
+  doc.setTextColor(253, 230, 138); // amber-200
+  doc.setFontSize(7.5);
+  doc.text('Estoque Consolidado EMB1 + EMB9', pageWidth - marginX, 19.5, { align: 'right' });
+
+  // 2. Faixa Laranja Institucional (#EA580C) com Resumo dos Filtros
+  const yFaixaLaranja = alturaTopoAzul + 3.5;
+  const larguraUtil = pageWidth - marginX * 2;
+  const larguraTextoFiltros = larguraUtil - 8;
+
+  const textoSubtituloOuFiltros = resumoFiltros
+    ? `Filtros: ${resumoFiltros}`
+    : subtituloFaixaLaranja || '';
+
+  doc.setFontSize(7.2);
+  doc.setFont('helvetica', 'normal');
+  const linhasTextoFiltro = textoSubtituloOuFiltros
+    ? doc.splitTextToSize(textoSubtituloOuFiltros, larguraTextoFiltros)
+    : [];
+
+  const alturaFaixaLaranja = linhasTextoFiltro.length > 0
+    ? Math.max(10, 6.5 + (linhasTextoFiltro.length * 3.5))
+    : 8.5;
 
   doc.setFillColor(234, 88, 12); // orange-600 vibrante
-  doc.rect(marginX, yFaixaLaranja, pageWidth - marginX * 2, alturaFaixaLaranja, 'F');
+  doc.rect(marginX, yFaixaLaranja, larguraUtil, alturaFaixaLaranja, 'F');
 
   // Borda sutil na faixa laranja
   doc.setDrawColor(194, 65, 12); // orange-700
   doc.setLineWidth(0.2);
-  doc.rect(marginX, yFaixaLaranja, pageWidth - marginX * 2, alturaFaixaLaranja, 'S');
+  doc.rect(marginX, yFaixaLaranja, larguraUtil, alturaFaixaLaranja, 'S');
 
-  // Texto da faixa laranja em branco puro
+  // Título da faixa laranja em branco puro
   doc.setTextColor(255, 255, 255);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(subtituloFaixaLaranja ? 9.5 : 9);
-  doc.text(tituloFaixaLaranja.toUpperCase(), marginX + 3.5, yFaixaLaranja + (subtituloFaixaLaranja ? 4.8 : 5.8));
+  doc.setFontSize(9);
+  doc.text(tituloFaixaLaranja.toUpperCase(), marginX + 3.5, yFaixaLaranja + 4.8);
 
-  if (subtituloFaixaLaranja) {
+  // Linhas do resumo legível dos filtros ativos
+  if (linhasTextoFiltro.length > 0) {
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.5);
+    doc.setFontSize(7.2);
     doc.setTextColor(255, 247, 237); // orange-50
-    doc.text(subtituloFaixaLaranja, marginX + 3.5, yFaixaLaranja + 9.5);
+    let currY = yFaixaLaranja + 8.5;
+    for (let i = 0; i < linhasTextoFiltro.length; i++) {
+      doc.text(linhasTextoFiltro[i], marginX + 3.5, currY);
+      currY += 3.5;
+    }
   }
 
-  return yFaixaLaranja + alturaFaixaLaranja + 3;
+  return yFaixaLaranja + alturaFaixaLaranja + 3.5;
 }
 
 /**
@@ -153,7 +364,7 @@ function aplicarRodapeTodasPaginas(
     // Esquerda: Informações da Filial e do Sistema
     doc.text(infoEsquerda, marginX, pageHeight - 5);
 
-    // Centro: Totais ou Informação Pertinente
+    // Centro: Totais e Regra de Estoque
     if (infoCentro) {
       doc.setFont('helvetica', 'bold');
       doc.setTextColor(71, 85, 105);
@@ -173,16 +384,15 @@ function aplicarRodapeTodasPaginas(
 
 /**
  * Gera o relatório oficial TOP 30 — MERCADORIAS em A4 Paisagem.
- * 
- * Faixa Laranja: TOP 30 — MERCADORIAS
- * Subtítulo: Ranking dos 30 produtos com mais dias sem venda.
- * Colunas (11): POS. | CÓDIGO | DESCRIÇÃO | EMBALAGEM | ESTOQUE | IDADE (dias) | DIAS S/VENDA | GRUPO | FORNECEDOR | AGÊNCIA | PROMOTOR
  */
-export function gerarRelatorioTop30Pdf(
+export async function gerarRelatorioTop30Pdf(
   itens: ItemIsv[],
   options?: Partial<IsvPdfOptions>
-): void {
-  const doc = new jsPDF({
+): Promise<ResultadoExportacaoPdf> {
+  // Yield para a interface renderizar estado de carregamento
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const doc = new JsPdfClass({
     orientation: 'landscape',
     unit: 'mm',
     format: 'a4',
@@ -200,30 +410,33 @@ export function gerarRelatorioTop30Pdf(
   const top30 = obterTop30Mercadorias(itens);
 
   let estoqueTotal = 0;
+  let valorTotal = 0;
   for (const it of top30) {
     estoqueTotal += it.estoque;
+    if (it.valorEstoque) valorTotal += it.valorEstoque;
   }
 
-  // Desenhar cabeçalho azul-escuro e faixa laranja
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
     marginX,
-    tituloFaixaLaranja: 'TOP 30 — MERCADORIAS',
-    subtituloFaixaLaranja: 'Ranking dos 30 produtos com mais dias sem venda.',
+    tituloFaixaLaranja: 'TOP 30 — MERCADORIAS COM MAIOR TEMPO SEM VENDA',
+    subtituloFaixaLaranja: 'Ranking oficial dos 30 produtos com mais dias sem venda e estoque positivo (estoque > 0).',
     dataHoraEmissao,
     filialNome,
+    totalProdutosFiltrados: top30.length,
+    valorTotalFiltrado: valorTotal > 0 ? valorTotal : undefined,
+    resumoFiltros: 'Critério: 30 maiores dias sem venda com estoque positivo | Regra EMB1 + EMB9 Consolidado',
   });
 
-  // Cabeçalhos das 11 colunas na ordem estrita
   const cabecalhos = [
     'POS.',
     'CÓDIGO',
     'DESCRIÇÃO',
-    'EMBALAGEM',
+    'EMB.',
     'ESTOQUE',
-    'IDADE (dias)',
-    'DIAS S/VENDA',
+    'IDADE (d)',
+    'DIAS S/V',
     'GRUPO',
     'FORNECEDOR',
     'AGÊNCIA',
@@ -244,20 +457,19 @@ export function gerarRelatorioTop30Pdf(
     p.promotor,
   ]);
 
-  // Largura útil total: 277 mm (297 - 20)
-  // 12 + 18 + 68 + 22 + 20 + 18 + 20 + 23 + 28 + 24 + 24 = 277 mm
+  // Largura útil total: 277 mm
   const columnStylesConfig: Record<number, any> = {
     0: { cellWidth: 12, halign: 'center', fontStyle: 'bold' }, // POS.
     1: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-    2: { cellWidth: 68, halign: 'left' }, // DESCRIÇÃO
-    3: { cellWidth: 22, halign: 'left' }, // EMBALAGEM
-    4: { cellWidth: 20, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
-    5: { cellWidth: 18, halign: 'center' }, // IDADE (dias)
-    6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' }, // DIAS S/VENDA
-    7: { cellWidth: 23, halign: 'left' }, // GRUPO
-    8: { cellWidth: 28, halign: 'left' }, // FORNECEDOR
+    2: { cellWidth: 64, halign: 'left' }, // DESCRIÇÃO
+    3: { cellWidth: 18, halign: 'center' }, // EMB.
+    4: { cellWidth: 20, halign: 'right', fontStyle: 'bold' }, // ESTOQUE (ÚNICA)
+    5: { cellWidth: 16, halign: 'center' }, // IDADE (d)
+    6: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // DIAS S/V
+    7: { cellWidth: 27, halign: 'left' }, // GRUPO
+    8: { cellWidth: 32, halign: 'left' }, // FORNECEDOR
     9: { cellWidth: 24, halign: 'left' }, // AGÊNCIA
-    10: { cellWidth: 24, halign: 'left' }, // PROMOTOR
+    10: { cellWidth: 26, halign: 'left' }, // PROMOTOR
   };
 
   autoTable(doc, {
@@ -266,20 +478,20 @@ export function gerarRelatorioTop30Pdf(
     startY,
     margin: { left: marginX, right: marginX, bottom: 12 },
     theme: 'grid',
-    showHead: 'everyPage', // Repete cabeçalho em todas as páginas
+    showHead: 'everyPage',
     styles: {
       font: 'helvetica',
       fontSize: 7.2,
       cellPadding: 1.6,
       textColor: [0, 0, 0],
-      lineColor: [0, 0, 0], // Linhas pretas
+      lineColor: [0, 0, 0],
       lineWidth: 0.15,
       valign: 'middle',
       overflow: 'linebreak',
     },
     headStyles: {
-      fillColor: [250, 204, 21], // Amarelo oficial (#FACC15)
-      textColor: [15, 23, 42], // Texto preto/azul-escuro em negrito
+      fillColor: [250, 204, 21], // Amarelo (#FACC15)
+      textColor: [15, 23, 42],
       fontSize: 7.5,
       fontStyle: 'bold',
       halign: 'center',
@@ -288,56 +500,51 @@ export function gerarRelatorioTop30Pdf(
       lineWidth: 0.2,
     },
     alternateRowStyles: {
-      fillColor: [255, 255, 255], // Tabela branca compacta
+      fillColor: [255, 255, 255],
     },
     columnStyles: columnStylesConfig,
     didParseCell: (data) => {
-      // Destacar cores oficiais na célula de DIAS S/VENDA (coluna index 6) e POS. (coluna index 0)
       if (data.section === 'body') {
         const itemTop = top30[data.row.index];
-        if (itemTop) {
+        if (itemTop && data.column.index === 6) {
           const classif = itemTop.classificacao;
-          if (data.column.index === 6) {
-            // DIAS S/VENDA com fundo colorido suave e texto contrastante
-            if (classif.tipo === 'CRITICO') {
-              data.cell.styles.fillColor = [254, 226, 226]; // red-100
-              data.cell.styles.textColor = [185, 28, 28]; // red-700
-              data.cell.styles.fontStyle = 'bold';
-            } else if (classif.tipo === 'ALERTA') {
-              data.cell.styles.fillColor = [255, 237, 213]; // orange-100
-              data.cell.styles.textColor = [194, 65, 12]; // orange-700
-              data.cell.styles.fontStyle = 'bold';
-            } else if (classif.tipo === 'ATENCAO') {
-              data.cell.styles.fillColor = [254, 249, 195]; // yellow-100
-              data.cell.styles.textColor = [161, 98, 7]; // yellow-800
-              data.cell.styles.fontStyle = 'bold';
-            } else if (classif.tipo === 'GIRO_NORMAL') {
-              data.cell.styles.fillColor = [209, 250, 229]; // emerald-100
-              data.cell.styles.textColor = [4, 120, 87]; // emerald-700
-              data.cell.styles.fontStyle = 'bold';
-            }
+          if (classif.tipo === 'CRITICO') {
+            data.cell.styles.fillColor = [254, 226, 226];
+            data.cell.styles.textColor = [185, 28, 28];
+            data.cell.styles.fontStyle = 'bold';
+          } else if (classif.tipo === 'ALERTA') {
+            data.cell.styles.fillColor = [255, 237, 213];
+            data.cell.styles.textColor = [194, 65, 12];
+            data.cell.styles.fontStyle = 'bold';
+          } else if (classif.tipo === 'ATENCAO') {
+            data.cell.styles.fillColor = [254, 249, 195];
+            data.cell.styles.textColor = [161, 98, 7];
+            data.cell.styles.fontStyle = 'bold';
+          } else if (classif.tipo === 'GIRO_NORMAL') {
+            data.cell.styles.fillColor = [209, 250, 229];
+            data.cell.styles.textColor = [4, 120, 87];
+            data.cell.styles.fontStyle = 'bold';
           }
         }
       }
     },
   });
 
-  // Aplicar paginação real e rodapé com totais
-  const dataAnaliseFormatada = agora.toLocaleDateString('pt-BR');
-  const unidades = new Set(top30.map((i) => (i.embalagem || 'UN').trim().toUpperCase()));
-  let infoEstoque = '';
-  if (unidades.size === 1) {
-    const uni = Array.from(unidades)[0];
-    infoEstoque = ` | Estoque Total: ${Number.isInteger(estoqueTotal) ? estoqueTotal.toLocaleString('pt-BR') : estoqueTotal.toLocaleString('pt-BR', { minimumFractionDigits: 3 })} ${uni}`;
-  }
-  const infoCentro = `Total de Itens: ${top30.length} produtos classificados${infoEstoque} | Data de Análise: ${dataAnaliseFormatada}`;
+  const infoCentro = `Total de Itens: ${top30.length} classificados | Estoque Consolidado EMB1+EMB9: ${Number.isInteger(estoqueTotal) ? estoqueTotal.toLocaleString('pt-BR') : estoqueTotal.toLocaleString('pt-BR', { minimumFractionDigits: 3 })}`;
   const infoEsquerda = `ISV • Inteligência de Estoque — ${filialNome}`;
-
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
-  // Download do PDF
   const timestamp = agora.toISOString().slice(0, 10);
-  doc.save(`ISV_TOP30_MERCADORIAS_FILIAL172_${timestamp}.pdf`);
+  const nomeArquivo = `ISV_TOP30_MERCADORIAS_FILIAL172_${timestamp}.pdf`;
+  const dl = dispararDownloadPdf(doc, nomeArquivo);
+
+  return {
+    sucesso: dl.sucesso,
+    totalItens: top30.length,
+    totalPaginas: doc.getNumberOfPages(),
+    tamanhoBytes: dl.tamanhoBytes,
+    nomeArquivo,
+  };
 }
 
 // ============================================================================
@@ -346,17 +553,15 @@ export function gerarRelatorioTop30Pdf(
 
 /**
  * Gera o relatório oficial por Fornecedor.
- * 
- * Faixa Laranja: FORNECEDOR: [NOME DO FORNECEDOR SELECIONADO]
- * Colunas (9): CÓDIGO | DESCRIÇÃO | EMBALAGEM | ESTOQUE | IDADE (dias) | DIAS S/VENDA | GRUPO | AGÊNCIA | PROMOTOR
- * Regra: Não repete coluna FORNECEDOR na tabela.
  */
-export function gerarRelatorioFornecedorPdf(
+export async function gerarRelatorioFornecedorPdf(
   fornecedorNome: string,
   itens: ItemIsv[],
   options?: Partial<IsvPdfOptions>
-): void {
-  const doc = new jsPDF({
+): Promise<ResultadoExportacaoPdf> {
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const doc = new JsPdfClass({
     orientation: 'landscape',
     unit: 'mm',
     format: 'a4',
@@ -381,7 +586,6 @@ export function gerarRelatorioFornecedorPdf(
     }
   }
 
-  // Filtra itens do fornecedor caso ainda não estejam filtrados
   const itensDoFornecedor = itens.filter((it) => {
     if (!fornecedorNome || fornecedorNome === 'TODOS' || fornecedorNome === 'TODAS') return true;
     const fn = (extrairFornecedorProduto(it) || '').toUpperCase();
@@ -389,7 +593,17 @@ export function gerarRelatorioFornecedorPdf(
     return fn.includes(razaoSocialFornecedor) || indNomes.some((n) => n.includes(razaoSocialFornecedor));
   });
 
-  // Desenhar cabeçalho azul-escuro e faixa laranja com a Razão Social da Indústria
+  const itensProcessados = options?.limiteQuantidade && options.limiteQuantidade !== 'TODOS'
+    ? itensDoFornecedor.slice(0, Number(options.limiteQuantidade))
+    : itensDoFornecedor;
+
+  let valorTotal = 0;
+  for (const it of itensProcessados) {
+    if (it.valor_estoque) valorTotal += it.valor_estoque;
+  }
+
+  const resumoFiltros = options?.filtrosDescricao || formatarResumoFiltrosIsv(options?.filtros, `Fornecedor: ${razaoSocialFornecedor}`);
+
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
@@ -398,45 +612,50 @@ export function gerarRelatorioFornecedorPdf(
     subtituloFaixaLaranja: options?.subtituloEntidade,
     dataHoraEmissao,
     filialNome,
+    totalProdutosFiltrados: itensProcessados.length,
+    valorTotalFiltrado: valorTotal > 0 ? valorTotal : undefined,
+    resumoFiltros,
   });
 
-  // Cabeçalhos (9 colunas - sem coluna Fornecedor)
   const cabecalhos = [
     'CÓDIGO',
     'DESCRIÇÃO',
-    'EMBALAGEM',
+    'EMB.',
     'ESTOQUE',
-    'IDADE (dias)',
-    'DIAS S/VENDA',
+    'IDADE (d)',
+    'DIAS S/V',
     'GRUPO',
     'AGÊNCIA',
     'PROMOTOR',
+    'VALOR ESTOQUE',
   ];
 
-  const linhasDados = itensDoFornecedor.map((item) => [
-    item.codigo_interno,
-    item.descricao,
-    item.embalagem || 'UN',
-    formatarEstoqueColunaUnica(item),
-    String(item.idade ?? item.produto?.idade ?? 0),
-    String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
-    extrairGrupoProduto(item),
-    extrairAgenciaProduto(item),
-    extrairPromotorProduto(item),
-  ]);
+  const linhasDados = itensProcessados.length > 0
+    ? itensProcessados.map((item) => [
+        item.codigo_interno || item.produto?.codigo_interno || '-',
+        item.descricao || item.produto?.descricao || '-',
+        item.embalagem || item.produto?.embalagem || 'UN',
+        formatarEstoqueColunaUnica(item),
+        String(item.idade ?? item.produto?.idade ?? 0),
+        String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
+        extrairGrupoProduto(item),
+        extrairAgenciaProduto(item),
+        extrairPromotorProduto(item),
+        formatarMoedaBR(item.valor_estoque),
+      ])
+    : [[{ content: 'Nenhum produto encontrado para este fornecedor.', colSpan: 10, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
 
-  // Largura útil total: 277 mm
-  // 20 + 80 + 26 + 24 + 20 + 22 + 27 + 28 + 30 = 277 mm
   const columnStylesConfig: Record<number, any> = {
-    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-    1: { cellWidth: 80, halign: 'left' }, // DESCRIÇÃO
-    2: { cellWidth: 26, halign: 'left' }, // EMBALAGEM
-    3: { cellWidth: 24, halign: 'right', fontStyle: 'bold' }, // ESTOQUE (ÚNICA COLUNA)
-    4: { cellWidth: 20, halign: 'center' }, // IDADE (dias)
-    5: { cellWidth: 22, halign: 'center', fontStyle: 'bold' }, // DIAS S/VENDA
-    6: { cellWidth: 27, halign: 'left' }, // GRUPO
-    7: { cellWidth: 28, halign: 'left' }, // AGÊNCIA
-    8: { cellWidth: 30, halign: 'left' }, // PROMOTOR
+    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+    1: { cellWidth: 68, halign: 'left' },
+    2: { cellWidth: 18, halign: 'center' },
+    3: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+    4: { cellWidth: 18, halign: 'center' },
+    5: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+    6: { cellWidth: 25, halign: 'left' },
+    7: { cellWidth: 26, halign: 'left' },
+    8: { cellWidth: 26, halign: 'left' },
+    9: { cellWidth: 30, halign: 'right', fontStyle: 'bold' },
   };
 
   autoTable(doc, {
@@ -457,7 +676,7 @@ export function gerarRelatorioFornecedorPdf(
       overflow: 'linebreak',
     },
     headStyles: {
-      fillColor: [250, 204, 21], // Amarelo (#FACC15)
+      fillColor: [250, 204, 21],
       textColor: [15, 23, 42],
       fontSize: 7.5,
       fontStyle: 'bold',
@@ -472,13 +691,22 @@ export function gerarRelatorioFornecedorPdf(
     columnStyles: columnStylesConfig,
   });
 
-  const infoCentro = `Total de Produtos: ${itensDoFornecedor.length} itens`;
+  const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
   const infoEsquerda = `ISV • Fornecedor: ${razaoSocialFornecedor} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
   const timestamp = agora.toISOString().slice(0, 10);
-  const nomeArq = razaoSocialFornecedor.replace(/[^A-Z0-9]/g, '_').substring(0, 30);
-  doc.save(`ISV_FORNECEDOR_${nomeArq}_${timestamp}.pdf`);
+  const nomeArq = razaoSocialFornecedor.replace(/[^A-Z0-9]/g, '_').substring(0, 28);
+  const nomeArquivo = `ISV_FORNECEDOR_${nomeArq}_${timestamp}.pdf`;
+  const dl = dispararDownloadPdf(doc, nomeArquivo);
+
+  return {
+    sucesso: dl.sucesso,
+    totalItens: itensProcessados.length,
+    totalPaginas: doc.getNumberOfPages(),
+    tamanhoBytes: dl.tamanhoBytes,
+    nomeArquivo,
+  };
 }
 
 // ============================================================================
@@ -487,17 +715,15 @@ export function gerarRelatorioFornecedorPdf(
 
 /**
  * Gera o relatório oficial por Promotor.
- * 
- * Faixa Laranja: PROMOTOR: [NOME DO PROMOTOR SELECIONADO]
- * Colunas (9): CÓDIGO | DESCRIÇÃO | EMBALAGEM | FORNECEDOR | ESTOQUE | IDADE (dias) | DIAS S/VENDA | GRUPO | AGÊNCIA
- * Regra: Não repete coluna PROMOTOR na tabela.
  */
-export function gerarRelatorioPromotorPdf(
+export async function gerarRelatorioPromotorPdf(
   promotorNome: string,
   itens: ItemIsv[],
   options?: Partial<IsvPdfOptions>
-): void {
-  const doc = new jsPDF({
+): Promise<ResultadoExportacaoPdf> {
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const doc = new JsPdfClass({
     orientation: 'landscape',
     unit: 'mm',
     format: 'a4',
@@ -519,52 +745,69 @@ export function gerarRelatorioPromotorPdf(
     return pNomes.some((n) => n.includes(nomePromLimpo));
   });
 
+  const itensProcessados = options?.limiteQuantidade && options.limiteQuantidade !== 'TODOS'
+    ? itensDoPromotor.slice(0, Number(options.limiteQuantidade))
+    : itensDoPromotor;
+
+  let valorTotal = 0;
+  for (const it of itensProcessados) {
+    if (it.valor_estoque) valorTotal += it.valor_estoque;
+  }
+
+  const resumoFiltros = options?.filtrosDescricao || formatarResumoFiltrosIsv(options?.filtros, `Promotor: ${nomePromLimpo}`);
+
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
     marginX,
     tituloFaixaLaranja: `PROMOTOR: ${nomePromLimpo}`,
+    subtituloFaixaLaranja: options?.subtituloEntidade,
     dataHoraEmissao,
     filialNome,
+    totalProdutosFiltrados: itensProcessados.length,
+    valorTotalFiltrado: valorTotal > 0 ? valorTotal : undefined,
+    resumoFiltros,
   });
 
-  // Cabeçalhos (9 colunas - sem coluna Promotor)
   const cabecalhos = [
     'CÓDIGO',
     'DESCRIÇÃO',
-    'EMBALAGEM',
+    'EMB.',
     'FORNECEDOR',
     'ESTOQUE',
-    'IDADE (dias)',
-    'DIAS S/VENDA',
+    'IDADE (d)',
+    'DIAS S/V',
     'GRUPO',
     'AGÊNCIA',
+    'VALOR ESTOQUE',
   ];
 
-  const linhasDados = itensDoPromotor.map((item) => [
-    item.codigo_interno,
-    item.descricao,
-    item.embalagem || 'UN',
-    extrairFornecedorProduto(item),
-    formatarEstoqueColunaUnica(item),
-    String(item.idade ?? item.produto?.idade ?? 0),
-    String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
-    extrairGrupoProduto(item),
-    extrairAgenciaProduto(item),
-  ]);
+  const linhasDados = itensProcessados.length > 0
+    ? itensProcessados.map((item) => [
+        item.codigo_interno || item.produto?.codigo_interno || '-',
+        item.descricao || item.produto?.descricao || '-',
+        item.embalagem || item.produto?.embalagem || 'UN',
+        extrairFornecedorProduto(item),
+        formatarEstoqueColunaUnica(item),
+        String(item.idade ?? item.produto?.idade ?? 0),
+        String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
+        extrairGrupoProduto(item),
+        extrairAgenciaProduto(item),
+        formatarMoedaBR(item.valor_estoque),
+      ])
+    : [[{ content: 'Nenhum produto encontrado para este promotor.', colSpan: 10, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
 
-  // Largura útil total: 277 mm
-  // 20 + 76 + 25 + 35 + 24 + 20 + 22 + 27 + 28 = 277 mm
   const columnStylesConfig: Record<number, any> = {
-    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-    1: { cellWidth: 76, halign: 'left' }, // DESCRIÇÃO
-    2: { cellWidth: 25, halign: 'left' }, // EMBALAGEM
-    3: { cellWidth: 35, halign: 'left' }, // FORNECEDOR
-    4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
-    5: { cellWidth: 20, halign: 'center' }, // IDADE (dias)
-    6: { cellWidth: 22, halign: 'center', fontStyle: 'bold' }, // DIAS S/VENDA
-    7: { cellWidth: 27, halign: 'left' }, // GRUPO
-    8: { cellWidth: 28, halign: 'left' }, // AGÊNCIA
+    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+    1: { cellWidth: 66, halign: 'left' },
+    2: { cellWidth: 16, halign: 'center' },
+    3: { cellWidth: 34, halign: 'left' },
+    4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+    5: { cellWidth: 18, halign: 'center' },
+    6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+    7: { cellWidth: 24, halign: 'left' },
+    8: { cellWidth: 25, halign: 'left' },
+    9: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
   };
 
   autoTable(doc, {
@@ -585,7 +828,7 @@ export function gerarRelatorioPromotorPdf(
       overflow: 'linebreak',
     },
     headStyles: {
-      fillColor: [250, 204, 21], // Amarelo (#FACC15)
+      fillColor: [250, 204, 21],
       textColor: [15, 23, 42],
       fontSize: 7.5,
       fontStyle: 'bold',
@@ -600,13 +843,22 @@ export function gerarRelatorioPromotorPdf(
     columnStyles: columnStylesConfig,
   });
 
-  const infoCentro = `Total de Produtos Vinculados: ${itensDoPromotor.length} itens`;
+  const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
   const infoEsquerda = `ISV • Promotor: ${nomePromLimpo} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
   const timestamp = agora.toISOString().slice(0, 10);
-  const nomeArq = nomePromLimpo.replace(/[^A-Z0-9]/g, '_').substring(0, 30);
-  doc.save(`ISV_PROMOTOR_${nomeArq}_${timestamp}.pdf`);
+  const nomeArq = nomePromLimpo.replace(/[^A-Z0-9]/g, '_').substring(0, 28);
+  const nomeArquivo = `ISV_PROMOTOR_${nomeArq}_${timestamp}.pdf`;
+  const dl = dispararDownloadPdf(doc, nomeArquivo);
+
+  return {
+    sucesso: dl.sucesso,
+    totalItens: itensProcessados.length,
+    totalPaginas: doc.getNumberOfPages(),
+    tamanhoBytes: dl.tamanhoBytes,
+    nomeArquivo,
+  };
 }
 
 // ============================================================================
@@ -615,17 +867,15 @@ export function gerarRelatorioPromotorPdf(
 
 /**
  * Gera o relatório oficial por Agência.
- * 
- * Faixa Laranja: AGÊNCIA: [NOME DA AGÊNCIA SELECIONADA]
- * Colunas (9): CÓDIGO | DESCRIÇÃO | EMBALAGEM | FORNECEDOR | ESTOQUE | IDADE (dias) | DIAS S/VENDA | GRUPO | PROMOTOR
- * Regra: Não repete coluna AGÊNCIA na tabela.
  */
-export function gerarRelatorioAgenciaPdf(
+export async function gerarRelatorioAgenciaPdf(
   agenciaNome: string,
   itens: ItemIsv[],
   options?: Partial<IsvPdfOptions>
-): void {
-  const doc = new jsPDF({
+): Promise<ResultadoExportacaoPdf> {
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const doc = new JsPdfClass({
     orientation: 'landscape',
     unit: 'mm',
     format: 'a4',
@@ -647,52 +897,69 @@ export function gerarRelatorioAgenciaPdf(
     return agNomes.some((n) => n.includes(nomeAgLimpo));
   });
 
+  const itensProcessados = options?.limiteQuantidade && options.limiteQuantidade !== 'TODOS'
+    ? itensDaAgencia.slice(0, Number(options.limiteQuantidade))
+    : itensDaAgencia;
+
+  let valorTotal = 0;
+  for (const it of itensProcessados) {
+    if (it.valor_estoque) valorTotal += it.valor_estoque;
+  }
+
+  const resumoFiltros = options?.filtrosDescricao || formatarResumoFiltrosIsv(options?.filtros, `Agência: ${nomeAgLimpo}`);
+
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
     marginX,
     tituloFaixaLaranja: `AGÊNCIA: ${nomeAgLimpo}`,
+    subtituloFaixaLaranja: options?.subtituloEntidade,
     dataHoraEmissao,
     filialNome,
+    totalProdutosFiltrados: itensProcessados.length,
+    valorTotalFiltrado: valorTotal > 0 ? valorTotal : undefined,
+    resumoFiltros,
   });
 
-  // Cabeçalhos (9 colunas - sem coluna Agência)
   const cabecalhos = [
     'CÓDIGO',
     'DESCRIÇÃO',
-    'EMBALAGEM',
+    'EMB.',
     'FORNECEDOR',
     'ESTOQUE',
-    'IDADE (dias)',
-    'DIAS S/VENDA',
+    'IDADE (d)',
+    'DIAS S/V',
     'GRUPO',
     'PROMOTOR',
+    'VALOR ESTOQUE',
   ];
 
-  const linhasDados = itensDaAgencia.map((item) => [
-    item.codigo_interno,
-    item.descricao,
-    item.embalagem || 'UN',
-    extrairFornecedorProduto(item),
-    formatarEstoqueColunaUnica(item),
-    String(item.idade ?? item.produto?.idade ?? 0),
-    String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
-    extrairGrupoProduto(item),
-    extrairPromotorProduto(item),
-  ]);
+  const linhasDados = itensProcessados.length > 0
+    ? itensProcessados.map((item) => [
+        item.codigo_interno || item.produto?.codigo_interno || '-',
+        item.descricao || item.produto?.descricao || '-',
+        item.embalagem || item.produto?.embalagem || 'UN',
+        extrairFornecedorProduto(item),
+        formatarEstoqueColunaUnica(item),
+        String(item.idade ?? item.produto?.idade ?? 0),
+        String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
+        extrairGrupoProduto(item),
+        extrairPromotorProduto(item),
+        formatarMoedaBR(item.valor_estoque),
+      ])
+    : [[{ content: 'Nenhum produto encontrado para esta agência.', colSpan: 10, styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] } } as any]];
 
-  // Largura útil total: 277 mm
-  // 20 + 76 + 25 + 35 + 24 + 20 + 22 + 27 + 28 = 277 mm
   const columnStylesConfig: Record<number, any> = {
-    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-    1: { cellWidth: 76, halign: 'left' }, // DESCRIÇÃO
-    2: { cellWidth: 25, halign: 'left' }, // EMBALAGEM
-    3: { cellWidth: 35, halign: 'left' }, // FORNECEDOR
-    4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
-    5: { cellWidth: 20, halign: 'center' }, // IDADE (dias)
-    6: { cellWidth: 22, halign: 'center', fontStyle: 'bold' }, // DIAS S/VENDA
-    7: { cellWidth: 27, halign: 'left' }, // GRUPO
-    8: { cellWidth: 28, halign: 'left' }, // PROMOTOR
+    0: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+    1: { cellWidth: 66, halign: 'left' },
+    2: { cellWidth: 16, halign: 'center' },
+    3: { cellWidth: 34, halign: 'left' },
+    4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+    5: { cellWidth: 18, halign: 'center' },
+    6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+    7: { cellWidth: 24, halign: 'left' },
+    8: { cellWidth: 25, halign: 'left' },
+    9: { cellWidth: 28, halign: 'right', fontStyle: 'bold' },
   };
 
   autoTable(doc, {
@@ -713,7 +980,7 @@ export function gerarRelatorioAgenciaPdf(
       overflow: 'linebreak',
     },
     headStyles: {
-      fillColor: [250, 204, 21], // Amarelo (#FACC15)
+      fillColor: [250, 204, 21],
       textColor: [15, 23, 42],
       fontSize: 7.5,
       fontStyle: 'bold',
@@ -728,126 +995,205 @@ export function gerarRelatorioAgenciaPdf(
     columnStyles: columnStylesConfig,
   });
 
-  const infoCentro = `Total de Produtos Vinculados: ${itensDaAgencia.length} itens`;
+  const infoCentro = `Total: ${itensProcessados.length} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotal)} | Estoque Consolidado EMB1+EMB9`;
   const infoEsquerda = `ISV • Agência: ${nomeAgLimpo} — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
   const timestamp = agora.toISOString().slice(0, 10);
-  const nomeArq = nomeAgLimpo.replace(/[^A-Z0-9]/g, '_').substring(0, 30);
-  doc.save(`ISV_AGENCIA_${nomeArq}_${timestamp}.pdf`);
+  const nomeArq = nomeAgLimpo.replace(/[^A-Z0-9]/g, '_').substring(0, 28);
+  const nomeArquivo = `ISV_AGENCIA_${nomeArq}_${timestamp}.pdf`;
+  const dl = dispararDownloadPdf(doc, nomeArquivo);
+
+  return {
+    sucesso: dl.sucesso,
+    totalItens: itensProcessados.length,
+    totalPaginas: doc.getNumberOfPages(),
+    tamanhoBytes: dl.tamanhoBytes,
+    nomeArquivo,
+  };
 }
 
 // ============================================================================
-// 5. PDF GERAL DA LOJA (COMPATIBILIDADE RETROATIVA TOTALMENTE ATUALIZADA)
+// 5. PDF GERAL DA LOJA / RESULTADOS FILTRADOS (CONFORME REQUISITOS ISV)
 // ============================================================================
 
 /**
- * Gera relatório geral do ISV seguindo o padrão oficial A4 Paisagem.
+ * Gera relatório geral do ISV com exatamente o mesmo conjunto de produtos filtrados
+ * exibidos no Dashboard ou módulo ISV, preservando:
+ * - Todos os produtos filtrados (sem limite visual de 30 da página).
+ * - Ordenação escolhida pelo usuário.
+ * - Cabeçalho com total de produtos, valor total filtrado e resumo legível dos filtros ativos.
+ * - Coluna única de ESTOQUE com a regra EMB1 + EMB9 consolidada.
+ * - Execução assíncrona não bloqueante e download confiável.
  */
-export function gerarRelatorioIsvA4Pdf(
+export async function gerarRelatorioIsvA4Pdf(
   itens: ItemIsv[],
   options: IsvPdfOptions
-): void {
+): Promise<ResultadoExportacaoPdf> {
   // Roteamento inteligente baseado no tipo de agrupamento solicitado
   if (options.tipoAgrupamento === 'TOP30' || options.limiteQuantidade === 30) {
-    gerarRelatorioTop30Pdf(itens, options);
-    return;
+    return gerarRelatorioTop30Pdf(itens, options);
   }
 
   if (options.tipoAgrupamento === 'FORNECEDOR' && options.nomeEntidade) {
-    gerarRelatorioFornecedorPdf(options.nomeEntidade, itens, options);
-    return;
+    return gerarRelatorioFornecedorPdf(options.nomeEntidade, itens, options);
   }
 
   if (options.tipoAgrupamento === 'PROMOTOR' && options.nomeEntidade) {
-    gerarRelatorioPromotorPdf(options.nomeEntidade, itens, options);
-    return;
+    return gerarRelatorioPromotorPdf(options.nomeEntidade, itens, options);
   }
 
   if (options.tipoAgrupamento === 'AGENCIA' && options.nomeEntidade) {
-    gerarRelatorioAgenciaPdf(options.nomeEntidade, itens, options);
-    return;
+    return gerarRelatorioAgenciaPdf(options.nomeEntidade, itens, options);
   }
 
-  // Relatório Geral da Loja com Filtros Ativos
-  const doc = new jsPDF({
+  // Yield para o thread da UI renderizar o indicador "Gerando PDF..."
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  const doc = new JsPdfClass({
     orientation: 'landscape',
     unit: 'mm',
     format: 'a4',
   });
 
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
+  const pageWidth = doc.internal.pageSize.getWidth(); // 297 mm
+  const pageHeight = doc.internal.pageSize.getHeight(); // 210 mm
   const marginX = 10;
 
   const agora = new Date();
   const dataHoraEmissao = agora.toLocaleString('pt-BR');
   const filialNome = options.filialNome || 'FILIAL 172 — CASCAVEL';
 
-  // Aplicar limite de exportação se especificado
+  // Aplicar limite de exportação se explicitamente especificado, caso contrário exporta TODOS
   const itensProcessados =
     options.limiteQuantidade && options.limiteQuantidade !== 'TODOS'
       ? itens.slice(0, Number(options.limiteQuantidade))
       : itens;
 
-  let tituloFaixaLaranja = options.tituloFiltro || 'RELATÓRIO GERAL DA LOJA';
+  // Cálculo financeiro e estoque consolidado
+  let valorTotalFiltrado = options.valorTotalFiltrado;
+  if (valorTotalFiltrado === undefined) {
+    valorTotalFiltrado = 0;
+    for (let i = 0; i < itensProcessados.length; i++) {
+      if (itensProcessados[i].valor_estoque) {
+        valorTotalFiltrado += itensProcessados[i].valor_estoque!;
+      }
+    }
+  }
+
+  let estoqueTotalGeral = 0;
+  for (let i = 0; i < itensProcessados.length; i++) {
+    estoqueTotalGeral += (itensProcessados[i].estoque_total ?? itensProcessados[i].produto?.estoque_total ?? 0);
+  }
+
+  let tituloFaixaLaranja = options.tipoRelatorioTitulo || options.tituloFiltro || 'PAINEL ISV — PRODUTOS FILTRADOS';
   if (options.nomeEntidade) {
     tituloFaixaLaranja = `${options.tipoAgrupamento || 'ENTIDADE'}: ${options.nomeEntidade}`;
   }
 
-  const subtituloFaixa = options.subtituloEntidade || (options.filtrosDescricao ? `Filtros: ${options.filtrosDescricao}` : undefined);
+  // Resumo legível dos filtros ativos aplicados
+  const resumoFiltros = options.filtrosDescricao || formatarResumoFiltrosIsv(options.filtros);
 
   const startY = desenharCabecalhoInstitucionalIsv({
     doc,
     pageWidth,
     marginX,
     tituloFaixaLaranja,
-    subtituloFaixaLaranja: subtituloFaixa,
+    subtituloFaixaLaranja: options.subtituloEntidade,
     dataHoraEmissao,
     filialNome,
+    totalProdutosFiltrados: itensProcessados.length,
+    valorTotalFiltrado,
+    resumoFiltros,
   });
 
-  // Colunas oficiais com única coluna de estoque
-  const cabecalhos = [
-    'CÓDIGO',
-    'DESCRIÇÃO',
-    'EMBALAGEM',
-    'FORNECEDOR',
-    'ESTOQUE',
-    'IDADE (dias)',
-    'DIAS S/VENDA',
-    'GRUPO',
-    'AGÊNCIA',
-    'PROMOTOR',
-  ];
+  const exibirValor = options.exibirValorEstoque !== false;
 
-  const linhasDados = itensProcessados.map((item) => [
-    item.codigo_interno,
-    item.descricao,
-    item.embalagem || 'UN',
-    extrairFornecedorProduto(item),
-    formatarEstoqueColunaUnica(item),
-    String(item.idade ?? item.produto?.idade ?? 0),
-    String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0),
-    extrairGrupoProduto(item),
-    extrairAgenciaProduto(item),
-    extrairPromotorProduto(item),
-  ]);
+  // 11 Colunas Oficiais quando exibirValor = true, ou 10 quando false
+  const cabecalhos = exibirValor
+    ? [
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'FORNECEDOR',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'AGÊNCIA',
+        'PROMOTOR',
+        'VALOR ESTOQUE',
+      ]
+    : [
+        'CÓDIGO',
+        'DESCRIÇÃO',
+        'EMB.',
+        'FORNECEDOR',
+        'ESTOQUE',
+        'IDADE (d)',
+        'DIAS S/V',
+        'GRUPO',
+        'AGÊNCIA',
+        'PROMOTOR',
+      ];
 
-  // Largura útil total: 277 mm
-  // 18 + 68 + 22 + 32 + 22 + 18 + 22 + 25 + 25 + 25 = 277 mm
-  const columnStylesConfig: Record<number, any> = {
-    0: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
-    1: { cellWidth: 68, halign: 'left' }, // DESCRIÇÃO
-    2: { cellWidth: 22, halign: 'left' }, // EMBALAGEM
-    3: { cellWidth: 32, halign: 'left' }, // FORNECEDOR
-    4: { cellWidth: 22, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
-    5: { cellWidth: 18, halign: 'center' }, // IDADE (dias)
-    6: { cellWidth: 22, halign: 'center', fontStyle: 'bold' }, // DIAS S/VENDA
-    7: { cellWidth: 25, halign: 'left' }, // GRUPO
-    8: { cellWidth: 25, halign: 'left' }, // AGÊNCIA
-    9: { cellWidth: 25, halign: 'left' }, // PROMOTOR
-  };
+  const linhasDados = itensProcessados.length > 0
+    ? itensProcessados.map((item) => {
+        const cod = item.codigo_interno || item.produto?.codigo_interno || '-';
+        const desc = item.descricao || item.produto?.descricao || '-';
+        const emb = item.embalagem || item.produto?.embalagem || 'UN';
+        const forn = extrairFornecedorProduto(item);
+        const est = formatarEstoqueColunaUnica(item);
+        const idade = String(item.idade ?? item.produto?.idade ?? 0);
+        const dias = String(item.dias_sem_venda ?? item.produto?.dias_sem_venda ?? 0);
+        const grupo = extrairGrupoProduto(item);
+        const ag = extrairAgenciaProduto(item);
+        const prom = extrairPromotorProduto(item);
+        const valor = formatarMoedaBR(item.valor_estoque);
+
+        if (exibirValor) {
+          return [cod, desc, emb, forn, est, idade, dias, grupo, ag, prom, valor];
+        } else {
+          return [cod, desc, emb, forn, est, idade, dias, grupo, ag, prom];
+        }
+      })
+    : [
+        [
+          {
+            content: 'Nenhum produto atende aos filtros selecionados.',
+            colSpan: cabecalhos.length,
+            styles: { halign: 'center', fontStyle: 'italic', textColor: [100, 116, 139] },
+          } as any,
+        ],
+      ];
+
+  // Largura útil total: 277 mm (297mm - 2*10mm margens), usando 275mm para margem de segurança
+  const columnStylesConfig: Record<number, any> = exibirValor
+    ? {
+        0: { cellWidth: 18, halign: 'center', fontStyle: 'bold' }, // CÓDIGO
+        1: { cellWidth: 52, halign: 'left' }, // DESCRIÇÃO
+        2: { cellWidth: 15, halign: 'center' }, // EMB.
+        3: { cellWidth: 34, halign: 'left' }, // FORNECEDOR
+        4: { cellWidth: 20, halign: 'right', fontStyle: 'bold' }, // ESTOQUE
+        5: { cellWidth: 15, halign: 'center' }, // IDADE (d)
+        6: { cellWidth: 17, halign: 'center', fontStyle: 'bold' }, // DIAS S/V
+        7: { cellWidth: 24, halign: 'left' }, // GRUPO
+        8: { cellWidth: 25, halign: 'left' }, // AGÊNCIA
+        9: { cellWidth: 25, halign: 'left' }, // PROMOTOR
+        10: { cellWidth: 30, halign: 'right', fontStyle: 'bold' }, // VALOR ESTOQUE
+      }
+    : {
+        0: { cellWidth: 18, halign: 'center', fontStyle: 'bold' },
+        1: { cellWidth: 62, halign: 'left' },
+        2: { cellWidth: 16, halign: 'center' },
+        3: { cellWidth: 38, halign: 'left' },
+        4: { cellWidth: 24, halign: 'right', fontStyle: 'bold' },
+        5: { cellWidth: 17, halign: 'center' },
+        6: { cellWidth: 20, halign: 'center', fontStyle: 'bold' },
+        7: { cellWidth: 26, halign: 'left' },
+        8: { cellWidth: 26, halign: 'left' },
+        9: { cellWidth: 28, halign: 'left' },
+      };
 
   autoTable(doc, {
     head: [cabecalhos],
@@ -858,8 +1204,8 @@ export function gerarRelatorioIsvA4Pdf(
     showHead: 'everyPage',
     styles: {
       font: 'helvetica',
-      fontSize: 7.2,
-      cellPadding: 1.6,
+      fontSize: 7.0,
+      cellPadding: 1.4,
       textColor: [0, 0, 0],
       lineColor: [0, 0, 0],
       lineWidth: 0.15,
@@ -867,9 +1213,9 @@ export function gerarRelatorioIsvA4Pdf(
       overflow: 'linebreak',
     },
     headStyles: {
-      fillColor: [250, 204, 21], // Amarelo (#FACC15)
+      fillColor: [250, 204, 21], // Amarelo oficial (#FACC15)
       textColor: [15, 23, 42],
-      fontSize: 7.5,
+      fontSize: 7.3,
       fontStyle: 'bold',
       halign: 'center',
       valign: 'middle',
@@ -882,29 +1228,42 @@ export function gerarRelatorioIsvA4Pdf(
     columnStyles: columnStylesConfig,
   });
 
-  const infoCentro = `Exibindo ${itensProcessados.length} de ${itens.length} produtos`;
-  const infoEsquerda = `ISV • Relatório Geral — ${filialNome}`;
+  const estoqueFormatado = Number.isInteger(estoqueTotalGeral)
+    ? estoqueTotalGeral.toLocaleString('pt-BR')
+    : estoqueTotalGeral.toLocaleString('pt-BR', { minimumFractionDigits: 3 });
+
+  const infoCentro = `Exibindo ${itensProcessados.length.toLocaleString('pt-BR')} produtos | Valor Filtrado: ${formatarMoedaBR(valorTotalFiltrado)} | Estoque Consolidado: ${estoqueFormatado}`;
+  const infoEsquerda = `ISV • Inteligência de Estoque — ${filialNome}`;
   aplicarRodapeTodasPaginas(doc, pageWidth, pageHeight, marginX, infoEsquerda, infoCentro);
 
   const timestamp = agora.toISOString().slice(0, 10);
-  doc.save(`ISV_RELATORIO_GERAL_${timestamp}.pdf`);
+  const nomeArquivo = `ISV_RELATORIO_FILTRADOS_${timestamp}.pdf`;
+  const dl = dispararDownloadPdf(doc, nomeArquivo);
+
+  return {
+    sucesso: dl.sucesso,
+    totalItens: itensProcessados.length,
+    totalPaginas: doc.getNumberOfPages(),
+    tamanhoBytes: dl.tamanhoBytes,
+    nomeArquivo,
+  };
 }
 
 // Alias retrocompatíveis
 export const gerarRelatorioIsvA3Pdf = gerarRelatorioIsvA4Pdf;
 
-export function gerarRelatorioEntidadeIsvA4Pdf(
+export async function gerarRelatorioEntidadeIsvA4Pdf(
   tipo: 'INDUSTRIA' | 'AGENCIA' | 'FORNECEDOR' | 'PROMOTOR',
   entidadeNome: string,
   subtitulo: string,
   itens: ItemIsv[],
   options?: Partial<IsvPdfOptions>
-): void {
+): Promise<ResultadoExportacaoPdf> {
   if (tipo === 'AGENCIA') {
-    gerarRelatorioAgenciaPdf(entidadeNome, itens, options);
+    return gerarRelatorioAgenciaPdf(entidadeNome, itens, { ...options, subtituloEntidade: subtitulo });
   } else if (tipo === 'PROMOTOR') {
-    gerarRelatorioPromotorPdf(entidadeNome, itens, options);
+    return gerarRelatorioPromotorPdf(entidadeNome, itens, { ...options, subtituloEntidade: subtitulo });
   } else {
-    gerarRelatorioFornecedorPdf(entidadeNome, itens, options);
+    return gerarRelatorioFornecedorPdf(entidadeNome, itens, { ...options, subtituloEntidade: subtitulo });
   }
 }
