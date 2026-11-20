@@ -32,6 +32,7 @@ import { rubSyncService } from './rubSyncService';
 import { buildVencimentoKey, cleanForFirestore, getDeviceId } from './deviceId';
 import { LoteVencimento, ProdutoSMG } from '../types';
 import { dbGetAll, STORES } from './db';
+import { authRoleService } from './authRoleService';
 
 export interface ItemReconciliacaoVencimento {
   id: string;
@@ -148,6 +149,12 @@ export class ReorganizacaoNuvemService {
    * Executa a Reorganização e Ressincronização Limpa em lote atômico e verificável.
    */
   public async executarReorganizacaoCompleta(filialId = '172'): Promise<RelatorioReorganizacaoNuvem> {
+    if (!authRoleService.podePublicarRub()) {
+      throw new Error(
+        'Acesso negado: a reorganização e ressyncronização completa da nuvem exige autenticação Google verificada da Gerência (GERENCIA_ADMIN — Filial 172).'
+      );
+    }
+
     if (this._isExecuting) {
       throw new Error('Uma reorganização já está em andamento. Aguarde a conclusão.');
     }

@@ -103,7 +103,7 @@ export class BackupService {
           filialId,
           dataHoraIso: new Date().toISOString(),
           timestamp: Date.now(),
-          totalTabelas: 18,
+          totalTabelas: Object.values(STORES).length,
           totalRegistros: 0,
           contagemPorTabela,
           checksumSimples: checksum,

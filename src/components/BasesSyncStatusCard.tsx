@@ -48,6 +48,30 @@ export const BasesSyncStatusCard: React.FC<BasesSyncStatusCardProps> = ({ compac
     }
   };
 
+  const handleSincronizarSpcoi = async () => {
+    if (isQuotaBlocked) {
+      setFeedbackMsg('Cota diária gratuita do Firebase Spark aguardando liberação. Operando com IndexedDB local.');
+      return;
+    }
+    setSincronizandoTudo(true);
+    setFeedbackMsg(null);
+    try {
+      const res = await spcoiSyncService.verificarSincronizacaoComRemoto('172');
+      if (!res.verificado) {
+        setFeedbackMsg('Não foi possível consultar a versão remota da SPCOI007. Base local preservada.');
+      } else if (res.baixouNovaVersao) {
+        setFeedbackMsg(`SPCOI007 atualizado com sucesso (${res.versaoId || 'nova versão'}).`);
+      } else {
+        setFeedbackMsg('SPCOI007 já está sincronizado na versão mais recente.');
+      }
+      setTimeout(() => setFeedbackMsg(null), 4000);
+    } catch (e: any) {
+      setFeedbackMsg(`Erro ao sincronizar SPCOI007: ${e?.message || 'Falha de conexão'}`);
+    } finally {
+      setSincronizandoTudo(false);
+    }
+  };
+
   const handleSincronizarTudo = async () => {
     if (isQuotaBlocked) {
       setFeedbackMsg('Cota diária gratuita do Firebase Spark aguardando liberação. Use "Verificar Liberação da Cota" após o reset diário.');
@@ -178,32 +202,32 @@ export const BasesSyncStatusCard: React.FC<BasesSyncStatusCardProps> = ({ compac
             <Cloud className="w-5 h-5 text-indigo-400" />
             <h3 className="font-bold text-base tracking-wide text-white">
               {modoLocalAtivo
-                ? 'Situação Local das 3 Bases Operacionais — Filial 172'
+                ? 'Arquitetura Híbrida das 3 Bases — Filial 172'
                 : 'Sincronização Nuvem das 3 Bases Operacionais — Filial 172'}
             </h3>
           </div>
           <p className="text-xs text-indigo-200/80 mt-0.5">
             {modoLocalAtivo
-              ? 'Bases pesadas distribuídas via Arquivo Único (.zip) no IndexedDB. Firebase Spark reservado a Vencimentos e Vínculos EAN.'
+              ? 'BASE RUB e SAEOU060 via Arquivo Único (.zip). SPCOI007, Vencimentos e Vínculos EAN sincronizados via Firebase Spark.'
               : 'Fonte mestre centralizada no Firebase com persistência durável no IndexedDB local'}
           </p>
         </div>
 
-        {!modoLocalAtivo && (
-          <button
-            type="button"
-            onClick={handleSincronizarTudo}
-            disabled={sincronizandoTudo || isQuotaBlocked || anyPublishing}
-            className="inline-flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white shadow transition-colors"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${sincronizandoTudo ? 'animate-spin' : ''}`} />
-            {isQuotaBlocked
-              ? 'Aguardando Cota Spark'
-              : sincronizandoTudo
-              ? 'Sincronizando...'
-              : 'Verificar e Sincronizar Tudo'}
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={modoLocalAtivo ? handleSincronizarSpcoi : handleSincronizarTudo}
+          disabled={sincronizandoTudo || isQuotaBlocked || anyPublishing}
+          className="inline-flex items-center justify-center gap-2 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-xs font-semibold text-white shadow transition-colors cursor-pointer"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${sincronizandoTudo ? 'animate-spin' : ''}`} />
+          {isQuotaBlocked
+            ? 'Aguardando Cota Spark'
+            : sincronizandoTudo
+            ? 'Sincronizando...'
+            : modoLocalAtivo
+            ? 'Sincronizar SPCOI007'
+            : 'Verificar e Sincronizar Tudo'}
+        </button>
       </div>
 
       {isQuotaBlocked && (
@@ -280,7 +304,7 @@ export const BasesSyncStatusCard: React.FC<BasesSyncStatusCardProps> = ({ compac
                 {item.versaoId ? item.versaoId.split('_').slice(0, 3).join('_') : 'v_local'}
               </span>
 
-              {!modoLocalAtivo &&
+              {(!modoLocalAtivo || item.id === 'SPCOI007') &&
                 (item.status === 'LOCAL' ||
                   item.status === 'ERRO' ||
                   item.status === 'PENDENTE_CONFIRMACAO' ||
@@ -290,7 +314,7 @@ export const BasesSyncStatusCard: React.FC<BasesSyncStatusCardProps> = ({ compac
                   type="button"
                   onClick={() => handlePublicarBase(item.id)}
                   disabled={item.emAndamento || anyPublishing || isQuotaBlocked}
-                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-300 hover:text-white disabled:opacity-40 bg-indigo-900/50 hover:bg-indigo-800/80 px-2 py-0.5 rounded border border-indigo-700/60 transition-colors"
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-300 hover:text-white disabled:opacity-40 bg-indigo-900/50 hover:bg-indigo-800/80 px-2 py-0.5 rounded border border-indigo-700/60 transition-colors cursor-pointer"
                   title={
                     isQuotaBlocked
                       ? 'Publicação aguardando liberação da cota diária do Firebase Spark'

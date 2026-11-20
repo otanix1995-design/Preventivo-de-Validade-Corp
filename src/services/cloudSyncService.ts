@@ -979,19 +979,25 @@ class CloudSyncService {
     }
   }
 
-  public async deleteLoteFromCloud(loteId: string): Promise<void> {
+  public async deleteLoteFromCloud(loteId: string, motivoExclusao = 'Exclusão lógica local'): Promise<void> {
     if (isFirestoreQuotaExceeded()) return;
     try {
       await ensureAuth().catch(() => null);
       const loteDocRef = doc(db, 'vencimentos', loteId);
       const agora = new Date().toISOString();
+      const motivoSeguro =
+        motivoExclusao && motivoExclusao.trim().length >= 3
+          ? motivoExclusao.trim().slice(0, 200)
+          : 'Exclusão lógica local';
       await setDoc(
         loteDocRef,
         {
           vencimentoId: loteId,
           id: loteId,
+          filialId: '172',
           isDeleted: true,
           deletedAt: agora,
+          motivoExclusao: motivoSeguro,
           updatedAt: agora,
           deviceId: getDeviceId(),
         },

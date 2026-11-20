@@ -403,6 +403,7 @@ export const SubstituirPromotorModal: React.FC<SubstituirPromotorModalProps> = (
             cnpjs,
             removerDaOrigem: true,
             filialId: promotorAtual.filialId || '172',
+            deferirSyncComercial: true,
           }),
       });
 

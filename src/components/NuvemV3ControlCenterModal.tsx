@@ -43,6 +43,9 @@ import {
   DiagnosticoLimpezaBases,
   ResultadoLimpezaBases,
 } from '../services/limpezaTresBasesService';
+import { STORES } from '../services/db';
+
+const TOTAL_TABELAS_INDEXEDDB = Object.values(STORES).length;
 
 export type TabSecao = 'REORGANIZACAO' | 'SINCRONIZACAO' | 'BASE_RUB' | 'BACKUP' | 'DIAGNOSTICO' | 'PAPEIS' | 'LIMPEZA_BASES';
 
@@ -137,7 +140,11 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
   if (!isOpen) return null;
 
   const handleMudarPapel = (papel: PapelOperacional) => {
-    authRoleService.alternarPapel(papel);
+    const res = authRoleService.alternarPapel(papel);
+    if (!res.alterado && res.motivo) {
+      setSyncToast(res.motivo);
+      setTimeout(() => setSyncToast(null), 5000);
+    }
   };
 
   const handleCarregarDiagnostico = async () => {
@@ -170,9 +177,11 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
       return;
     }
 
-    // Eleva papel operacional local para Gerência / Administrador
-    if (authRoleService.getPapel() !== 'GERENCIA_ADMIN') {
-      authRoleService.alternarPapel('GERENCIA_ADMIN');
+    if (!authRoleService.podePublicarRub()) {
+      setErroLimpeza(
+        'Acesso negado: faça login com a conta Google autorizada da Gerência (aba "Papéis & Acesso") antes de executar a limpeza das 3 bases.'
+      );
+      return;
     }
 
     setExecutandoLimpeza(true);
@@ -216,9 +225,15 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
 
   const handleExecutarReorganizacao = async () => {
     if (isExecutandoReorg) return;
+    if (!authRoleService.podePublicarRub()) {
+      setReorgToast(
+        'Acesso negado: faça login com a conta Google autorizada da Gerência (aba "Papéis & Acesso") para executar a reorganização.'
+      );
+      return;
+    }
     const confirma = window.confirm(
       'Confirma o início da REORGANIZAÇÃO E RESSINCRONIZAÇÃO LIMPA DA FILIAL 172?\n\n' +
-      '1. Backup prévio verificável das 18 tabelas do IndexedDB e fila offline\n' +
+      `1. Backup prévio verificável das ${TOTAL_TABELAS_INDEXEDDB} tabelas do IndexedDB e fila offline\n` +
       '2. Identificação e reconciliação dos 85 vencimentos antigos da nuvem pertencentes à filial 172\n' +
       '3. Aplicação de tombstones irreversíveis e enfileiramento de exclusões lógicas auditadas\n' +
       '4. Preservação integral de Vínculos EAN, SAEOU060, SPCOI007, ISV e vencimentos ativos\n' +
@@ -330,14 +345,14 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
   const handleGerarBackupCompleto = async () => {
     if (isGerandoBackup) return;
     setIsGerandoBackup(true);
-    setBackupToast('Lendo todas as 18 tabelas do IndexedDB e filas...');
+    setBackupToast(`Lendo todas as ${TOTAL_TABELAS_INDEXEDDB} tabelas do IndexedDB e filas...`);
     try {
       const snap = await backupService.gerarSnapshotCompleto('172');
       const valid = backupService.validarIntegridade(snap);
       if (valid.valido) {
         setBackupGerado(snap);
         setBackupToast(
-          `Backup gerado com sucesso! Total de ${snap.metadados.totalRegistros} registros nas 18 tabelas. Clique para baixar o arquivo JSON.`
+          `Backup gerado com sucesso! Total de ${snap.metadados.totalRegistros} registros nas ${snap.metadados.totalTabelas} tabelas. Clique para baixar o arquivo JSON.`
         );
       } else {
         setBackupToast(`Divergência no backup: ${valid.mensagem}`);
@@ -446,7 +461,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
             }`}
           >
             <FileJson className="w-3.5 h-3.5" />
-            <span>Backup 18 Tabelas</span>
+            <span>Backup {TOTAL_TABELAS_INDEXEDDB} Tabelas</span>
           </button>
 
           <button
@@ -513,7 +528,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
                           Reorganização e Ressincronização Limpa — Filial 172
                         </h3>
                         <p className="text-xs text-slate-600 mt-0.5">
-                          Executa em lote atômico: backup das 18 tabelas, reconciliação e tombstones dos 85 vencimentos antigos, preservação de bases válidas e publicação da BASE RUB mestre.
+                          Executa em lote atômico: backup das {TOTAL_TABELAS_INDEXEDDB} tabelas, reconciliação e tombstones dos 85 vencimentos antigos, preservação de bases válidas e publicação da BASE RUB mestre.
                         </p>
                       </div>
                     </div>
@@ -579,7 +594,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
                         </span>
                       </div>
                       <p className="text-xs text-slate-600">
-                        Snapshot completo de todas as <strong>18 tabelas</strong> do IndexedDB e da fila offline salvo em memória e armazenamento seguro.
+                        Snapshot completo de todas as <strong>{TOTAL_TABELAS_INDEXEDDB} tabelas</strong> do IndexedDB e da fila offline salvo em memória e armazenamento seguro.
                       </p>
                       <div className="p-2.5 bg-slate-50 rounded-lg text-[11px] font-mono text-slate-700">
                         <div>Total registros: <strong>{relatorioReorg.etapas.backup.totalRegistros}</strong></div>
@@ -926,10 +941,10 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
             <div className="space-y-4">
               <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2">
                 <h4 className="text-xs font-black uppercase text-slate-900">
-                  Backup Completo Estruturado (18 Tabelas do IndexedDB)
+                  Backup Completo Estruturado ({TOTAL_TABELAS_INDEXEDDB} Tabelas do IndexedDB)
                 </h4>
                 <p className="text-xs text-slate-600 leading-relaxed">
-                  Exporta um arquivo JSON integral contendo todas as 18 tabelas operacionais da Filial 172
+                  Exporta um arquivo JSON integral contendo todas as {TOTAL_TABELAS_INDEXEDDB} tabelas operacionais da Filial 172
                   (produtos, vencimentos, vínculos EAN, SAEOU060, histórico, ISV, auditoria) e as filas persistentes offline.
                 </p>
               </div>
@@ -1196,7 +1211,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
                     onClick={handleRodarTestesSeguranca}
                     className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold uppercase rounded-lg transition-colors cursor-pointer"
                   >
-                    Re-executar 11 Testes
+                    Re-executar {relatorioSeguranca.totalTestes} Testes
                   </button>
                 </div>
 
@@ -1525,7 +1540,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
         {/* Modal Footer */}
         <div className="p-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs">
           <span className="text-slate-500 font-bold">
-            Filial 172 | Nuvem V3 Ativa | IndexedDB 18 Tabelas
+            Filial 172 | Nuvem V3 Ativa | IndexedDB {TOTAL_TABELAS_INDEXEDDB} Tabelas
           </span>
           <button
             onClick={onClose}

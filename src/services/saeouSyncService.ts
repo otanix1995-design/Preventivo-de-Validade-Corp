@@ -91,6 +91,7 @@ export interface SaeouSyncServiceOptions {
   readTimeoutMs?: number;
   concurrencyLimit?: number;
   setMetaFn?: (key: string, val: any) => Promise<void>;
+  podePublicarFn?: () => { permitido: boolean; motivoRecusa?: string };
   getUsuarioFn?: () => UsuarioOperacional;
 }
 
@@ -117,6 +118,7 @@ export class SaeouSyncService {
   private readonly _readTimeoutMs: number;
   private readonly _concurrencyLimit: number;
   private readonly _setMetaFn: (key: string, val: any) => Promise<void>;
+  private readonly _podePublicarFn: () => { permitido: boolean; motivoRecusa?: string };
   private readonly _getUsuarioFn: () => UsuarioOperacional;
 
   private _unsubQuota: (() => void) | null = null;
@@ -128,6 +130,21 @@ export class SaeouSyncService {
     this._concurrencyLimit = options?.concurrencyLimit ?? DEFAULT_CONCURRENCY_LIMIT;
     this._setMetaFn = options?.setMetaFn ?? dbSetMeta;
     this._getUsuarioFn = options?.getUsuarioFn ?? (() => authRoleService.getUsuarioAtual());
+    this._podePublicarFn =
+      options?.podePublicarFn ??
+      (options?.getUsuarioFn
+        ? () => {
+            const u = this._getUsuarioFn();
+            if (u.papel !== 'GERENCIA_ADMIN') {
+              return {
+                permitido: false,
+                motivoRecusa:
+                  'Apenas a Gerência/Administrador possui permissão para publicar o SAEOU060 na nuvem central.',
+              };
+            }
+            return { permitido: true };
+          }
+        : () => authRoleService.podePublicarRub());
 
     if (options?.autoStart !== false) {
       this.carregarVersaoLocal();
@@ -334,6 +351,29 @@ export class SaeouSyncService {
     filialId: string = '172',
     onProgress?: (pct: number, msg: string, chunkAtual?: number, totalChunks?: number) => void
   ): Promise<ResultadoPublicacaoBase> {
+    const permissao = this._podePublicarFn();
+    if (!permissao.permitido) {
+      const motivo =
+        permissao.motivoRecusa ||
+        'Apenas a Gerência/Administrador autenticada (Filial 172) possui permissão para publicar o SAEOU060 na nuvem central.';
+      this.atualizarStatus({
+        status: 'LOCAL',
+        emAndamento: false,
+        etapa: 'ERRO',
+        progressoPorcentagem: 0,
+        mensagem: motivo,
+        erro: motivo,
+        aguardandoConfirmacaoNuvem: false,
+      });
+      return {
+        sucesso: false,
+        estadoPublicacao: 'RECUSADA_PERMISSAO',
+        versaoConfirmadaNoServidor: false,
+        mensagem: motivo,
+        motivoRecusa: motivo,
+      };
+    }
+
     if (!registros || registros.length === 0) {
       return {
         sucesso: false,

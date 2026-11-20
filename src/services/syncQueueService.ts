@@ -360,8 +360,13 @@ class SyncQueueService {
             loteDocRef,
             {
               vencimentoId: op.registroId,
+              filialId: op.payload?.filialId || '172',
               isDeleted: true,
               deletedAt: agora,
+              motivoExclusao:
+                typeof op.payload?.motivoExclusao === 'string' && op.payload.motivoExclusao.trim().length >= 3
+                  ? op.payload.motivoExclusao.trim().slice(0, 200)
+                  : 'Exclusão lógica local (tombstone)',
               updatedAt: agora,
               operationId: op.operationId,
               deviceId: getDeviceId(),
@@ -378,11 +383,16 @@ class SyncQueueService {
       case 'DELETE_VENCIMENTO': {
         // Exclusão por tombstone lógico central (NÃO apaga fisicamente para evitar ressuscitação)
         const agora = new Date().toISOString();
+        const motivoSeguro =
+          typeof op.payload?.motivoExclusao === 'string' && op.payload.motivoExclusao.trim().length >= 3
+            ? op.payload.motivoExclusao.trim().slice(0, 200)
+            : 'Exclusão lógica via fila offline';
         const deletePayload = {
           vencimentoId: op.registroId,
           id: op.registroId,
           isDeleted: true,
           deletedAt: agora,
+          motivoExclusao: motivoSeguro,
           updatedAt: agora,
           operationId: op.operationId,
           deviceId: getDeviceId(),

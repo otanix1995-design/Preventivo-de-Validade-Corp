@@ -28,19 +28,20 @@ function assert(condition: boolean, msg: string) {
 async function runTestSuite() {
   console.log('--- INICIANDO TESTES DE VALIDAÇÃO DAS CORREÇÕES DE IMPORTAÇÃO (FILIAL 172) ---');
 
-  // TESTE 1: Validação de autorização com GERENCIA_ADMIN
-  console.log('\n[Teste 1] Publicação com papel GERENCIA_ADMIN...');
+  // TESTE 1: Blindagem contra auto-escalonamento local para GERENCIA_ADMIN sem sessão verificada no servidor
+  console.log('\n[Teste 1] Bloqueio de auto-escalonamento local para GERENCIA_ADMIN...');
   const papelOriginal = authRoleService.getPapel();
   try {
-    authRoleService.alternarPapel('GERENCIA_ADMIN', 'Gerente Cascavel');
-    const permissaoGerencia = authRoleService.podePublicarRub();
-    assert(permissaoGerencia.permitido === true, 'GERENCIA_ADMIN deve possuir permissão para publicar a BASE RUB.');
-    console.log('  ✓ Papel GERENCIA_ADMIN aprovado para publicação da BASE RUB.');
+    const resTentativa = authRoleService.alternarPapel('GERENCIA_ADMIN', 'Tentativa Local');
+    assert(resTentativa.alterado === false, 'alternarPapel(GERENCIA_ADMIN) sem verificação no servidor deve ser bloqueado.');
+    const permissaoSemServidor = authRoleService.podePublicarRub();
+    assert(permissaoSemServidor.permitido === false, 'podePublicarRub() deve recusar publicação sem login verificado no servidor.');
+    console.log('  ✓ Auto-escalonamento local para GERENCIA_ADMIN bloqueado com segurança.');
   } finally {
     authRoleService.alternarPapel(papelOriginal);
   }
 
-  // TESTE 2: Recusa correta de usuário sem autorização (CONFERENTE_ENCARREGADO e OPERADOR_LOJA)
+  // TESTE 2: Recusa correta de usuário sem autorização nas três bases (CONFERENTE_ENCARREGADO e OPERADOR_LOJA)
   console.log('\n[Teste 2] Recusa correta de usuário sem autorização...');
   authRoleService.alternarPapel('CONFERENTE_ENCARREGADO', 'Encarregado Cascavel');
   const permissaoConferente = authRoleService.podePublicarRub();
@@ -80,7 +81,23 @@ async function runTestSuite() {
   const resRecusa = await rubSyncService.publicarBaseRubCentral(dummyProdutos, dummyMeta, '172');
   assert(resRecusa.sucesso === false, 'publicarBaseRubCentral deve retornar sucesso: false para usuário não-gerência.');
   assert(resRecusa.motivoRecusa !== undefined, 'Deve retornar o motivo da recusa.');
-  console.log(`  ✓ Recusa confirmada: "${resRecusa.mensagem}" (sucesso: ${resRecusa.sucesso})`);
+
+  const resRecusaSaeou = await saeouSyncService.publicarSaeouCentral([
+    {
+      id: 'saeou_1',
+      codigo_interno: '123456',
+      digito: '7',
+      codigo_exibicao: '123456-7',
+      descricao: 'TESTE',
+      data_validade: '2026-12-31',
+      quantidade: 5,
+      embalagem: 'UN',
+      filialId: '172',
+      atualizado_em: new Date().toISOString(),
+    } as any,
+  ], '172');
+  assert(resRecusaSaeou.sucesso === false && resRecusaSaeou.estadoPublicacao === 'RECUSADA_PERMISSAO', 'publicarSaeouCentral deve bloquear usuário sem GERENCIA_ADMIN.');
+  console.log(`  ✓ Recusa confirmada para RUB e SAEOU060: "${resRecusa.mensagem}" (sucesso: ${resRecusa.sucesso})`);
 
   // TESTE 3: Tratamento de falhas e ausência de dados
   console.log('\n[Teste 3] Tratamento de bases vazias e dados inválidos...');
@@ -92,7 +109,7 @@ async function runTestSuite() {
 
   const resVaziaSaeou = await saeouSyncService.publicarSaeouCentral([], '172');
   assert(resVaziaSaeou.sucesso === false, 'SAEOU060 vazio não deve ser enviado.');
-  console.log('  ✓ Validação preventiva de bases vazias confirmada para as três bases.');
+  console.log('  ✓ Validação preventiva confirmada para as três bases.');
 
   // TESTE 4: Progresso real contínuo e callbacks durante envio
   console.log('\n[Teste 4] Progresso contínuo e callbacks com contagem de chunks...');

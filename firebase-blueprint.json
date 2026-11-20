@@ -1,157 +1,391 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "entities": {
-    "Produto": {
-      "title": "Produto",
-      "description": "Cadastro e estoque central de produtos da SMGOI013",
+    "UsuarioAutorizado": {
+      "title": "UsuarioAutorizado",
+      "description": "Perfil RBAC autorizado no servidor Firestore para governança administrativa da Filial 172",
       "type": "object",
       "properties": {
-        "codigoInterno": { "type": "string", "description": "Código interno raiz do produto" },
-        "digito": { "type": "string", "description": "Dígito verificador do produto" },
-        "codigoCompleto": { "type": "string", "description": "Código completo original" },
-        "descricao": { "type": "string", "description": "Descrição da mercadoria" },
-        "embalagem": { "type": "string", "description": "Embalagem comercial" },
-        "setor": { "type": "string", "description": "Setor de atuação ou físico" },
-        "filialId": { "type": "string", "description": "Número da filial" },
-        "emb1": { "type": "number", "description": "Estoque embalagem principal (KG ou CX)" },
-        "emb9": { "type": "number", "description": "Estoque embalagem fracionada (G ou UN)" },
-        "tipoEstoque": { "type": "string", "description": "PESO ou UNIDADE" },
+        "uid": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 200 },
+        "nome": { "type": "string", "maxLength": 150 },
+        "filialId": { "type": "string", "pattern": "^172$" },
+        "papel": { "type": "string", "enum": ["OPERADOR_LOJA", "CONFERENTE_ENCARREGADO", "GERENCIA_ADMIN"] },
+        "ativo": { "type": "boolean" }
+      },
+      "required": ["uid", "filialId", "papel", "ativo"]
+    },
+    "Produto": {
+      "title": "Produto",
+      "description": "Cadastro e estoque central de produtos da BASE RUB (36 colunas)",
+      "type": "object",
+      "properties": {
+        "codigoInterno": { "type": "string", "maxLength": 20 },
+        "digito": { "type": "string", "maxLength": 10 },
+        "codigoCompleto": { "type": "string", "maxLength": 40 },
+        "descricao": { "type": "string", "maxLength": 200 },
+        "embalagem": { "type": "string", "maxLength": 40 },
+        "setor": { "type": "string", "maxLength": 60 },
+        "filialId": { "type": "string", "maxLength": 10 },
+        "emb1": { "type": "number" },
+        "emb9": { "type": "number" },
+        "tipoEstoque": { "type": "string", "maxLength": 20 },
         "dataImportacao": { "type": "string", "format": "date-time" },
         "atualizadoEm": { "type": "string", "format": "date-time" }
       },
       "required": ["codigoInterno", "descricao", "filialId"]
+    },
+    "VersaoBaseCentral": {
+      "title": "VersaoBaseCentral",
+      "description": "Metadados de versão publicada de BASE RUB, SPCOI007 ou SAEOU060 da filial 172",
+      "type": "object",
+      "properties": {
+        "versaoId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "filialId": { "type": "string", "pattern": "^172$" },
+        "totalRegistros": { "type": "number" },
+        "totalFornecedores": { "type": "number" },
+        "totalIndustrias": { "type": "number" },
+        "totalChunks": { "type": "number" },
+        "checksumBase": { "type": "string", "maxLength": 128 },
+        "formato": { "type": "string", "maxLength": 64 },
+        "industriasFormato": { "type": "string", "maxLength": 64 },
+        "industriasChecksum": { "type": "string", "maxLength": 128 },
+        "industriasBytes": { "type": "string", "description": "Firestore Bytes compactado com fflate tabular das indústrias" },
+        "versaoAnteriorId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "maxLength": 40 },
+        "publicadoEm": { "type": "string", "maxLength": 60 },
+        "publicadoPor": { "type": "string", "maxLength": 150 }
+      },
+      "required": ["versaoId", "filialId"]
+    },
+    "ChunkBaseCentral": {
+      "title": "ChunkBaseCentral",
+      "description": "Bloco compactado de registros (<450KB) vinculado a uma versão oficial de base",
+      "type": "object",
+      "properties": {
+        "versaoId": { "type": "string", "maxLength": 128 },
+        "indice": { "type": "number" },
+        "index": { "type": "number" },
+        "totalChunks": { "type": "number" },
+        "totalItens": { "type": "number" },
+        "itemsCount": { "type": "number" },
+        "compressedBytesCount": { "type": "number" },
+        "uncompressedBytesCount": { "type": "number" },
+        "checksum": { "type": "string", "maxLength": 128 },
+        "checksumChunk": { "type": "string", "maxLength": 128 },
+        "formato": { "type": "string", "maxLength": 64 },
+        "dadosBytes": { "type": "string", "description": "Firestore Bytes compactado com fflate tabular" },
+        "dados": { "type": "string", "maxLength": 950000 }
+      },
+      "required": ["versaoId"]
+    },
+    "ConfigPonteiroFilial": {
+      "title": "ConfigPonteiroFilial",
+      "description": "Ponteiro mestre de versão ativa por base da Filial 172",
+      "type": "object",
+      "properties": {
+        "versaoAtivaId": { "type": "string", "maxLength": 128 },
+        "versaoAnteriorId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "maxLength": 40 },
+        "atualizadoEm": { "type": "string", "maxLength": 60 }
+      }
     },
     "VinculoEanCentral": {
       "title": "VinculoEanCentral",
       "description": "Vínculo direto entre código de barras EAN e código interno do produto",
       "type": "object",
       "properties": {
-        "ean": { "type": "string" },
-        "codigoInterno": { "type": "string" },
-        "filialId": { "type": "string" },
+        "ean": { "type": "string", "maxLength": 32 },
+        "codigoInterno": { "type": "string", "maxLength": 20 },
+        "filialId": { "type": "string", "maxLength": 10 },
         "atualizadoEm": { "type": "string", "format": "date-time" }
       },
       "required": ["ean", "codigoInterno", "filialId"]
     },
     "VencimentoCentral": {
       "title": "VencimentoCentral",
-      "description": "Lote de vencimento com garantia de unicidade",
+      "description": "Lote de vencimento com garantia de unicidade e proteção de campos imutáveis",
       "type": "object",
       "properties": {
-        "vencimentoId": { "type": "string" },
-        "codigoInterno": { "type": "string" },
-        "digito": { "type": "string" },
-        "filialId": { "type": "string" },
-        "dataVencimento": { "type": "string" },
+        "id": { "type": "string", "maxLength": 128 },
+        "vencimentoId": { "type": "string", "maxLength": 128 },
+        "codigoInterno": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "codigo_interno": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "digito": { "type": "string", "maxLength": 10 },
+        "filialId": { "type": "string", "pattern": "^172$" },
+        "dataVencimento": { "type": "string", "minLength": 10, "maxLength": 10 },
+        "data_validade": { "type": "string", "minLength": 10, "maxLength": 10 },
         "quantidade": { "type": "number" },
+        "quantidade_total_unidades": { "type": "number" },
         "precoNormal": { "type": "number" },
         "preco_normal": { "type": "number" },
         "precoTrabalhado": { "type": "number" },
         "preco_trabalhado": { "type": "number" },
         "enviarParaComprador": { "type": "boolean" },
-        "status": { "type": "string" },
-        "criadoPorTipo": { "type": "string" },
-        "criadoPorId": { "type": "string" },
-        "atualizadoPorTipo": { "type": "string" },
-        "atualizadoPorId": { "type": "string" },
+        "status": { "type": "string", "maxLength": 40 },
+        "isDeleted": { "type": "boolean" },
+        "motivoExclusao": { "type": "string", "minLength": 3, "maxLength": 200 },
         "criadoEm": { "type": "string", "format": "date-time" },
         "atualizadoEm": { "type": "string", "format": "date-time" }
       },
-      "required": ["codigoInterno", "filialId", "dataVencimento", "quantidade"]
+      "required": ["filialId"]
+    },
+    "DivergenciaCentral": {
+      "title": "DivergenciaCentral",
+      "description": "Alerta operacional de divergência entre bases ou contagens",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "tipo": { "type": "string", "minLength": 3, "maxLength": 60 },
+        "origem": { "type": "string", "maxLength": 60 },
+        "codigo_interno": { "type": "string", "maxLength": 20 },
+        "identificador": { "type": "string", "maxLength": 80 },
+        "descricao": { "type": "string", "maxLength": 300 },
+        "descricao_problema": { "type": "string", "maxLength": 500 },
+        "impacto": { "type": "string", "enum": ["BAIXO", "MEDIO", "ALTO"] },
+        "status": { "type": "string", "enum": ["ABERTA", "RESOLVIDA"] },
+        "data_registro": { "type": "string", "minLength": 10, "maxLength": 60 }
+      },
+      "required": ["tipo", "data_registro"]
     },
     "PromotorCentral": {
       "title": "PromotorCentral",
-      "description": "Cadastro e credenciais do promotor de vendas",
+      "description": "Cadastro e credenciais do promotor de vendas da Filial 172",
       "type": "object",
       "properties": {
-        "promotorId": { "type": "string" },
-        "nome": { "type": "string" },
-        "agenciaNome": { "type": "string" },
-        "filialId": { "type": "string" },
+        "promotorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "nome": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "agenciaId": { "type": "string", "maxLength": 128 },
+        "agenciaNome": { "type": "string", "maxLength": 150 },
+        "filialId": { "type": "string", "pattern": "^172$" },
         "setores": { "type": "array" },
+        "industriasAtendidas": { "type": "array" },
         "permissoes": { "type": "object" },
-        "status": { "type": "string" },
+        "status": { "type": "string", "maxLength": 30 },
         "dispositivoVinculado": { "type": "object" },
-        "ultimoAcesso": { "type": "string" },
-        "ultimaSincronizacao": { "type": "string" }
+        "ultimoAcesso": { "type": "string", "maxLength": 60 },
+        "ultimaSincronizacao": { "type": "string", "maxLength": 60 },
+        "atualizadoEm": { "type": "string", "maxLength": 60 }
       },
-      "required": ["promotorId", "nome", "filialId", "setores"]
+      "required": ["promotorId", "nome", "filialId"]
+    },
+    "AgenciaCentral": {
+      "title": "AgenciaCentral",
+      "description": "Cadastro mestre de agências de promotores da Filial 172",
+      "type": "object",
+      "properties": {
+        "agenciaId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "nome": { "type": "string", "minLength": 2, "maxLength": 150 },
+        "filialId": { "type": "string", "pattern": "^172$" },
+        "ativo": { "type": "boolean" },
+        "criadoEm": { "type": "string", "maxLength": 60 },
+        "atualizadoEm": { "type": "string", "maxLength": 60 }
+      },
+      "required": ["agenciaId", "nome", "filialId"]
+    },
+    "VinculoComercialCentral": {
+      "title": "VinculoComercialCentral",
+      "description": "Vínculo comercial entre promotor, agência e indústria da SPCOI007",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "vinculoId": { "type": "string", "maxLength": 128 },
+        "promotorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "promotorNome": { "type": "string", "maxLength": 150 },
+        "agenciaId": { "type": "string", "maxLength": 128 },
+        "agenciaNome": { "type": "string", "maxLength": 150 },
+        "industriaId": { "type": "string", "maxLength": 128 },
+        "cnpj": { "type": "string", "maxLength": 20 },
+        "cnpjFormatado": { "type": "string", "maxLength": 30 },
+        "industriaRazaoSocial": { "type": "string", "maxLength": 200 },
+        "filialId": { "type": "string", "pattern": "^172$" },
+        "ativo": { "type": "boolean" },
+        "criadoEm": { "type": "string", "maxLength": 60 },
+        "atualizadoEm": { "type": "string", "maxLength": 60 },
+        "criadoPor": { "type": "string", "maxLength": 120 },
+        "atualizadoPor": { "type": "string", "maxLength": 120 }
+      },
+      "required": ["promotorId", "filialId"]
+    },
+    "MovimentacaoComercialCentral": {
+      "title": "MovimentacaoComercialCentral",
+      "description": "Histórico imutável de movimentações, transferências e substituições comerciais da Filial 172",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "filialId": { "type": "string", "pattern": "^172$" },
+        "tipo": { "type": "string", "maxLength": 60 },
+        "dataHora": { "type": "string", "maxLength": 60 },
+        "atualizadoEm": { "type": "string", "maxLength": 60 },
+        "promotorId": { "type": "string", "maxLength": 128 },
+        "promotorNome": { "type": "string", "maxLength": 150 },
+        "promotorSubstitutoId": { "type": "string", "maxLength": 128 },
+        "promotorSubstitutoNome": { "type": "string", "maxLength": 150 },
+        "agenciaId": { "type": "string", "maxLength": 128 },
+        "agenciaNome": { "type": "string", "maxLength": 150 },
+        "agenciaAnteriorId": { "type": "string", "maxLength": 128 },
+        "agenciaAnteriorNome": { "type": "string", "maxLength": 150 },
+        "cnpjsTransferidos": { "type": "array" },
+        "industriasTransferidas": { "type": "array" },
+        "cnpjsOrigemAntes": { "type": "array" },
+        "cnpjsIgnoradosDuplicidade": { "type": "array" },
+        "modoTransferencia": { "type": "string", "enum": ["TODAS", "MANUAL", "NENHUMA"] },
+        "inativacaoOrigem": { "type": "boolean" },
+        "motivo": { "type": "string", "maxLength": 500 },
+        "detalhes": { "type": "string", "maxLength": 1000 },
+        "realizadoPor": { "type": "string", "maxLength": 120 }
+      },
+      "required": ["id", "filialId", "tipo", "dataHora", "detalhes", "realizadoPor"]
     },
     "VinculoPromotorCentral": {
       "title": "VinculoPromotorCentral",
-      "description": "Código de vínculo e token temporário para ativação do App Promotor",
+      "description": "Código de vínculo de 6 dígitos e token temporário protegido para ativação do App Promotor",
       "type": "object",
       "properties": {
-        "vinculoId": { "type": "string" },
-        "promotorId": { "type": "string" },
-        "codigoVinculo": { "type": "string" },
-        "tokenVinculo": { "type": "string" },
-        "filialId": { "type": "string" },
+        "vinculoId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "promotorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "codigoVinculo": { "type": "string", "minLength": 4, "maxLength": 20 },
+        "tokenVinculo": { "type": "string", "maxLength": 128 },
+        "filialId": { "type": "string", "pattern": "^172$" },
         "setores": { "type": "array" },
-        "status": { "type": "string" },
-        "dataCriacao": { "type": "string" },
-        "dataExpiracao": { "type": "string" },
-        "dataUtilizacao": { "type": "string" },
-        "dispositivoId": { "type": "string" }
+        "status": { "type": "string", "enum": ["AGUARDANDO", "UTILIZADO", "EXPIRADO", "REVOGADO"] },
+        "dataCriacao": { "type": "string", "maxLength": 60 },
+        "dataExpiracao": { "type": "string", "maxLength": 60 },
+        "dataUtilizacao": { "type": "string", "maxLength": 60 },
+        "dispositivoId": { "type": "string", "minLength": 3, "maxLength": 128 }
       },
       "required": ["vinculoId", "promotorId", "codigoVinculo", "status"]
     },
     "AuditoriaCentral": {
       "title": "AuditoriaCentral",
-      "description": "Registro de auditoria de operações realizadas",
+      "description": "Registro append-only de auditoria de operações realizadas",
       "type": "object",
       "properties": {
-        "auditoriaId": { "type": "string" },
-        "promotorId": { "type": "string" },
-        "promotorNome": { "type": "string" },
-        "filialId": { "type": "string" },
-        "setor": { "type": "string" },
-        "tipoAcao": { "type": "string" },
-        "codigoInterno": { "type": "string" },
-        "digito": { "type": "string" },
-        "descricao": { "type": "string" },
-        "valorAnterior": { "type": "string" },
-        "valorNovo": { "type": "string" },
-        "operationId": { "type": "string" },
-        "dataHora": { "type": "string" }
+        "auditoriaId": { "type": "string", "maxLength": 128 },
+        "promotorId": { "type": "string", "maxLength": 128 },
+        "promotorNome": { "type": "string", "maxLength": 150 },
+        "filialId": { "type": "string", "maxLength": 10 },
+        "setor": { "type": "string", "maxLength": 80 },
+        "tipoAcao": { "type": "string", "maxLength": 80 },
+        "codigoInterno": { "type": "string", "maxLength": 20 },
+        "digito": { "type": "string", "maxLength": 10 },
+        "descricao": { "type": "string", "maxLength": 500 },
+        "valorAnterior": { "type": "string", "maxLength": 1000 },
+        "valorNovo": { "type": "string", "maxLength": 2000 },
+        "operationId": { "type": "string", "maxLength": 128 },
+        "dataHora": { "type": "string", "maxLength": 60 }
       },
-      "required": ["auditoriaId", "filialId", "tipoAcao", "dataHora"]
+      "required": ["filialId", "tipoAcao", "dataHora"]
+    },
+    "OperacaoPromotorSync": {
+      "title": "OperacaoPromotorSync",
+      "description": "Operação idempotente enviada pelo dispositivo do promotor",
+      "type": "object",
+      "properties": {
+        "operationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "promotorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "tipoAcao": { "type": "string", "maxLength": 60 },
+        "processado": { "type": "boolean" },
+        "processadoEm": { "type": "string", "maxLength": 60 },
+        "status": { "type": "string", "maxLength": 40 },
+        "mensagemErro": { "type": "string", "maxLength": 500 }
+      },
+      "required": ["operationId", "promotorId", "tipoAcao"]
     },
     "SolicitacaoVencimentoPromotor": {
       "title": "SolicitacaoVencimentoPromotor",
       "description": "Solicitação de cadastro ou contagem de vencimento enviada pelo promotor para aprovação gerencial",
       "type": "object",
       "properties": {
-        "solicitacaoId": { "type": "string" },
-        "filialId": { "type": "string" },
-        "codigoInterno": { "type": "string" },
-        "digito": { "type": "string" },
-        "codigoCompleto": { "type": "string" },
-        "descricao": { "type": "string" },
-        "embalagem": { "type": "string" },
+        "solicitacaoId": { "type": "string", "maxLength": 128 },
+        "filialId": { "type": "string", "pattern": "^172$" },
+        "codigoInterno": { "type": "string", "minLength": 1, "maxLength": 20 },
+        "digito": { "type": "string", "maxLength": 10 },
+        "codigoCompleto": { "type": "string", "maxLength": 40 },
+        "descricao": { "type": "string", "maxLength": 200 },
+        "embalagem": { "type": "string", "maxLength": 40 },
         "fatorEmbalagem": { "type": "number" },
-        "unidadeMedida": { "type": "string" },
-        "dataValidade": { "type": "string", "description": "Formato canônico YYYY-MM-DD" },
+        "unidadeMedida": { "type": "string", "maxLength": 20 },
+        "dataValidade": { "type": "string", "description": "Formato canônico YYYY-MM-DD", "maxLength": 10 },
         "quantidadeTotalUnidades": { "type": "number", "description": "Total canônico em unidades" },
         "quantidadeInformadaOriginal": { "type": "number" },
         "quantidadeCaixas": { "type": "number" },
         "quantidadeUnidades": { "type": "number" },
-        "quantidadeTexto": { "type": "string" },
+        "quantidadeTexto": { "type": "string", "maxLength": 60 },
         "precoNormal": { "type": "number" },
-        "promotorId": { "type": "string" },
-        "promotorNome": { "type": "string" },
-        "agencia": { "type": "string" },
-        "setor": { "type": "string" },
+        "promotorId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "promotorNome": { "type": "string", "maxLength": 150 },
+        "agencia": { "type": "string", "maxLength": 150 },
+        "setor": { "type": "string", "maxLength": 60 },
         "enviadoEm": { "type": "string", "format": "date-time" },
         "status": { "type": "string", "enum": ["PENDENTE_ANALISE", "APROVADO", "RECUSADO"] }
       },
       "required": ["filialId", "codigoInterno", "digito", "dataValidade", "quantidadeTotalUnidades", "promotorId", "status"]
+    },
+    "MetadadoImportacao": {
+      "title": "MetadadoImportacao",
+      "description": "Metadados centrais e histórico de importações de bases operacionais",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "filialId": { "type": "string", "maxLength": 10 },
+        "tipo": { "type": "string", "maxLength": 60 },
+        "totalRegistros": { "type": "number" },
+        "atualizadoEm": { "type": "string", "maxLength": 60 }
+      }
+    },
+    "ConnectionProbe": {
+      "title": "ConnectionProbe",
+      "description": "Documento read-only para verificação inicial de conectividade Firestore",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "maxLength": 32 }
+      }
     }
   },
   "firestore": {
+    "/usuarios_autorizados/{userId}": {
+      "schema": "UsuarioAutorizado",
+      "description": "Perfis RBAC autorizados no servidor (somente leitura restrita; escrita exclusiva via Admin SDK)"
+    },
+    "/filiais/{filialId}/catalogo_rub_versoes/{versaoId}": {
+      "schema": "VersaoBaseCentral",
+      "description": "Versões publicadas da BASE RUB (36 colunas)"
+    },
+    "/filiais/{filialId}/catalogo_rub_versoes/{versaoId}/chunks/{chunkId}": {
+      "schema": "ChunkBaseCentral",
+      "description": "Chunks da BASE RUB"
+    },
+    "/filiais/{filialId}/spcoi_versoes/{versaoId}": {
+      "schema": "VersaoBaseCentral",
+      "description": "Versões publicadas da SPCOI007 (Fornecedores e Indústrias)"
+    },
+    "/filiais/{filialId}/spcoi_versoes/{versaoId}/chunks/{chunkId}": {
+      "schema": "ChunkBaseCentral",
+      "description": "Chunks compactados da SPCOI007"
+    },
+    "/filiais/{filialId}/saeou_versoes/{versaoId}": {
+      "schema": "VersaoBaseCentral",
+      "description": "Versões publicadas da SAEOU060 (Entradas de loja)"
+    },
+    "/filiais/{filialId}/saeou_versoes/{versaoId}/chunks/{chunkId}": {
+      "schema": "ChunkBaseCentral",
+      "description": "Chunks da SAEOU060"
+    },
+    "/filiais/{filialId}/config/{configDoc}": {
+      "schema": "ConfigPonteiroFilial",
+      "description": "Ponteiros oficiais de versão ativa das bases da Filial 172"
+    },
+    "/filiais/{filialId}/vencimentos/{vencimentoId}": {
+      "schema": "VencimentoCentral",
+      "description": "Vencimentos segregados por filial (soft-delete com justificativa; hard-delete bloqueado)"
+    },
+    "/filiais/{filialId}/auditoria/{auditId}": {
+      "schema": "AuditoriaCentral",
+      "description": "Trilha de auditoria append-only por filial"
+    },
     "/produtos/{produtoId}": {
       "schema": "Produto",
-      "description": "Coleção central de produtos SMGOI013"
+      "description": "Coleção central legada de produtos"
     },
     "/vinculosEAN/{vinculoEanId}": {
       "schema": "VinculoEanCentral",
@@ -159,23 +393,87 @@
     },
     "/vencimentos/{vencimentoId}": {
       "schema": "VencimentoCentral",
-      "description": "Coleção central de vencimentos com regra de unicidade"
+      "description": "Coleção global compatível de vencimentos com validação estrita"
+    },
+    "/divergencias/{divId}": {
+      "schema": "DivergenciaCentral",
+      "description": "Alertas operacionais de divergências"
     },
     "/promotores/{promotorId}": {
       "schema": "PromotorCentral",
-      "description": "Cadastro e controle dos promotores"
+      "description": "Cadastro e controle dos promotores (escrita exclusiva Gerência Admin)"
+    },
+    "/agencias/{agenciaId}": {
+      "schema": "AgenciaCentral",
+      "description": "Cadastro de agências de promotores (escrita exclusiva Gerência Admin)"
+    },
+    "/vinculos_promotor_industria/{vinculoId}": {
+      "schema": "VinculoComercialCentral",
+      "description": "Vínculos comerciais promotor x indústria (escrita exclusiva Gerência Admin)"
+    },
+    "/vinculosPromotorIndustria/{vinculoId}": {
+      "schema": "VinculoComercialCentral",
+      "description": "Alias camelCase de vínculos promotor x indústria (escrita exclusiva Gerência Admin)"
+    },
+    "/vinculosPromotorAgencia/{vinculoId}": {
+      "schema": "VinculoComercialCentral",
+      "description": "Vínculos promotor x agência (escrita exclusiva Gerência Admin)"
+    },
+    "/vinculos_comerciais/{vinculoId}": {
+      "schema": "VinculoComercialCentral",
+      "description": "Vínculos comerciais consolidados (escrita exclusiva Gerência Admin)"
     },
     "/vinculosPromotor/{vinculoId}": {
       "schema": "VinculoPromotorCentral",
-      "description": "Códigos de 6 dígitos e tokens de vínculo do App Promotor"
+      "description": "Códigos de 6 dígitos e tokens de vínculo do App Promotor (leitura restrita à Gerência Admin)"
+    },
+    "/vinculos_promotores/{vinculoId}": {
+      "schema": "VinculoPromotorCentral",
+      "description": "Coleção espelho protegida de códigos/tokens de vínculo de dispositivo"
     },
     "/auditoria/{auditoriaId}": {
       "schema": "AuditoriaCentral",
-      "description": "Trilha de auditoria das ações e operações"
+      "description": "Trilha de auditoria append-only das ações e operações"
+    },
+    "/auditoria_promotores/{auditoriaId}": {
+      "schema": "AuditoriaCentral",
+      "description": "Trilha de auditoria append-only das ações de promotores"
+    },
+    "/operacoes_promotores/{operationId}": {
+      "schema": "OperacaoPromotorSync",
+      "description": "Registro idempotente de operações de sincronização de promotores"
+    },
+    "/movimentacoes_comerciais/{movId}": {
+      "schema": "MovimentacaoComercialCentral",
+      "description": "Histórico imutável de movimentações, substituições e transferências comerciais da Filial 172"
     },
     "/solicitacoesVencimentoPromotor/{solicitacaoId}": {
       "schema": "SolicitacaoVencimentoPromotor",
       "description": "Solicitações de cadastro e contagem enviadas pelos promotores para análise"
+    },
+    "/metadados/{docId}": {
+      "schema": "MetadadoImportacao",
+      "description": "Metadados centrais legados"
+    },
+    "/catalogo_chunks/{chunkId}": {
+      "schema": "ChunkBaseCentral",
+      "description": "Chunks legados de catálogo"
+    },
+    "/vinculos_chunks/{chunkId}": {
+      "schema": "ChunkBaseCentral",
+      "description": "Chunks legados de vínculos EAN"
+    },
+    "/saeou060_chunks/{chunkId}": {
+      "schema": "ChunkBaseCentral",
+      "description": "Chunks legados da SAEOU060"
+    },
+    "/historico_importacoes/{histId}": {
+      "schema": "MetadadoImportacao",
+      "description": "Histórico central de importações"
+    },
+    "/test/{docId}": {
+      "schema": "ConnectionProbe",
+      "description": "Sonda read-only para verificação inicial de conectividade Firestore"
     }
   }
 }

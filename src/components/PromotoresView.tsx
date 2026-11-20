@@ -9,19 +9,20 @@ import {
   Filter,
   History,
   QrCode,
+  RefreshCw,
   RotateCcw,
   Search,
   ShieldCheck,
   Smartphone,
-  Sparkles,
   UserCheck,
   UserPlus,
   Users,
-  Wifi,
   WifiOff
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
+import { ComercialSyncStatus, comercialSyncService } from '../services/comercialSyncService';
 import { promotorService } from '../services/promotorService';
+import { EstadoAuthServidor, firebaseAuthService } from '../services/firebaseAuthService';
 import {
   formatarSetoresExibicao,
   getPromotorSetores,
@@ -50,6 +51,10 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
     pendenciasSincronizacao: 0,
     acoesHoje: 0,
   });
+  const [authServidor, setAuthServidor] = useState<EstadoAuthServidor>(() => firebaseAuthService.getEstado());
+  const [isAutenticandoGoogle, setIsAutenticandoGoogle] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<ComercialSyncStatus>(() => comercialSyncService.getStatus());
+  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'lista' | 'agencias' | 'vinculo_industrias' | 'auditoria'>('lista');
   const [searchQuery, setSearchQuery] = useState('');
@@ -86,9 +91,42 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
     const unsub = promotorService.subscribe(() => {
       carregarDados();
     });
+    const unsubAuth = firebaseAuthService.subscribe(setAuthServidor);
+    const unsubSync = comercialSyncService.subscribeStatus(setSyncStatus);
 
-    return () => unsub();
+    return () => {
+      unsub();
+      unsubAuth();
+      unsubSync();
+    };
   }, []);
+
+  const handleSincronizarAgora = async () => {
+    setSyncFeedback(null);
+    const res = await comercialSyncService.sincronizarAgora();
+    carregarDados();
+    if (!res.sucesso) {
+      setSyncFeedback(res.mensagem);
+    } else if (res.enviados > 0 || res.recebidos > 0) {
+      setSyncFeedback(res.mensagem);
+    }
+  };
+
+  const isGerenciaAutenticada =
+    authServidor.isAutenticado &&
+    !authServidor.isAnonimo &&
+    authServidor.isVerificadoServidor &&
+    authServidor.perfil?.papel === 'GERENCIA_ADMIN' &&
+    authServidor.perfil?.filialId === '172';
+
+  const handleLoginGerenciaGoogle = async () => {
+    setIsAutenticandoGoogle(true);
+    try {
+      await firebaseAuthService.loginComGoogle();
+    } finally {
+      setIsAutenticandoGoogle(false);
+    }
+  };
 
   // Filtered promoters
   const promotoresFiltrados = useMemo(() => {
@@ -191,8 +229,36 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
             </p>
           </div>
 
-          {/* Primary Actions: Substituir/Transferir & Novo Promotor */}
+          {/* Primary Actions: Sync & Substituir/Transferir & Novo Promotor */}
           <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              id="btn-sincronizar-comercial"
+              onClick={handleSincronizarAgora}
+              disabled={syncStatus.emAndamento}
+              className={`px-3.5 py-2.5 rounded-xl border text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-2xs transition-all cursor-pointer shrink-0 disabled:opacity-60 ${
+                syncStatus.estado === 'SINCRONIZADO'
+                  ? 'bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-800'
+                  : syncStatus.estado === 'OFFLINE' || syncStatus.estado === 'BLOQUEADO_COTA' || syncStatus.estado === 'ERRO'
+                  ? 'bg-rose-50 hover:bg-rose-100 border-rose-200 text-rose-800'
+                  : 'bg-blue-50 hover:bg-blue-100 border-blue-200 text-blue-800'
+              }`}
+              title={
+                syncStatus.ultimaSincronizacaoIso
+                  ? `Última sincronização: ${new Date(syncStatus.ultimaSincronizacaoIso).toLocaleString('pt-BR')}`
+                  : 'Sincronizar dados comerciais com o Firestore'
+              }
+            >
+              <RefreshCw className={`w-3.5 h-3.5 stroke-[2.5] ${syncStatus.emAndamento ? 'animate-spin' : ''}`} />
+              <span>
+                {syncStatus.emAndamento
+                  ? 'Sincronizando...'
+                  : syncStatus.pendentesCount > 0
+                  ? `Sincronizar (${syncStatus.pendentesCount})`
+                  : 'Sincronizar'}
+              </span>
+            </button>
+
             <button
               type="button"
               id="btn-substituir-promotor-massa"
@@ -217,7 +283,62 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
             </button>
           </div>
         </div>
+
+        {(syncStatus.pendentesCount > 0 || syncFeedback || syncStatus.ultimoErro || !syncStatus.online) && (
+          <div className="mt-3 pt-2.5 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <div className="flex items-center gap-2 font-bold text-slate-700">
+              {!syncStatus.online ? (
+                <span className="text-amber-800">
+                  Modo offline: alterações salvas localmente e serão sincronizadas ao reconectar.
+                </span>
+              ) : syncStatus.pendentesCount > 0 && !isGerenciaAutenticada ? (
+                <span className="text-amber-800">
+                  {syncStatus.pendentesCount} alteração(ões) comercial(is) aguardando login Google da Gerência para envio.
+                </span>
+              ) : syncStatus.pendentesCount > 0 ? (
+                <span className="text-blue-800">
+                  {syncStatus.pendentesCount} alteração(ões) pendente(s) na fila de sincronização.
+                </span>
+              ) : null}
+              {(syncFeedback || syncStatus.ultimoErro) && (
+                <span className="text-slate-600 font-semibold">
+                  {syncFeedback || syncStatus.ultimoErro}
+                </span>
+              )}
+            </div>
+            {syncStatus.ultimaSincronizacaoIso && (
+              <span className="text-[10px] font-mono text-gray-500">
+                Sincronizado em {new Date(syncStatus.ultimaSincronizacaoIso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            )}
+          </div>
+        )}
       </div>
+
+      {/* Security Guard Banner: Gerência Google Auth required for Cloud Sync & Tokens */}
+      {!isGerenciaAutenticada && (
+        <div className="bg-amber-50 border border-amber-300 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <ShieldCheck className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-950">
+              <p className="font-black uppercase tracking-tight">
+                Proteção de Segurança Ativa — Sincronização em Nuvem Restrita à Gerência
+              </p>
+              <p className="text-[11px] text-amber-800 mt-0.5">
+                Códigos/tokens de vínculo de dispositivos e gravações definitivas no Firestore (promotores, agências e vínculos comerciais) exigem autenticação Google verificada da Gerência.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleLoginGerenciaGoogle}
+            disabled={isAutenticandoGoogle}
+            className="px-3.5 py-2 rounded-lg bg-amber-700 hover:bg-amber-800 disabled:opacity-50 text-white text-xs font-black uppercase tracking-wider shrink-0 cursor-pointer transition-colors"
+          >
+            {isAutenticandoGoogle ? 'Conectando...' : 'Entrar como Gerência (Google)'}
+          </button>
+        </div>
+      )}
 
       {/* 4 Indicadores Operacionais */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

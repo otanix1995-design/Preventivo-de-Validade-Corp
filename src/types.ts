@@ -148,6 +148,9 @@ export interface LoteVencimento {
   updatedAt?: string;
   deletedAt?: string | null;
   isDeleted?: boolean;
+  motivoExclusao?: string;
+  usuarioExclusao?: string;
+  papelExclusao?: string;
   version?: number;
   criadoPor?: string;
   atualizadoPor?: string;
@@ -344,6 +347,7 @@ export interface Promotor {
   substituidoPorPromotorNome?: string | null;
   criadoPor: string;
   atualizadoPor: string;
+  atualizadoEm?: string | null;
 }
 
 export type StatusVinculo = 'AGUARDANDO' | 'UTILIZADO' | 'EXPIRADO' | 'CANCELADO';
@@ -367,6 +371,7 @@ export interface VinculoPromotor {
   dispositivoId?: string | null;
   dispositivoNome?: string | null;
   dataUtilizacao?: string | null;
+  atualizadoEm?: string | null;
 }
 
 export type TipoAcaoAuditoria =
@@ -597,6 +602,8 @@ export interface VinculoPromotorIndustria {
   cnpj: string;
   filialId: string;
   criado_em: string;
+  atualizadoEm?: string;
+  ativo?: boolean;
 }
 
 export interface SolicitacaoAjusteIsv {
@@ -914,6 +921,9 @@ export interface VinculoPromotorAgencia {
   agenciaId: string;
   agenciaNome: string;
   filialId: string;
+  ativo?: boolean;
+  criadoEm?: string;
+  atualizadoEm?: string;
 }
 
 export interface VinculoAgenciaIndustria {

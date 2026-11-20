@@ -86,6 +86,7 @@ export interface ResultadoLimpezaBases {
   detalhesExclusao: {
     baseRub: {
       produtosLocaisRemovidos: number;
+      registrosOperacionaisRemovidos: number;
       versoesRemotasRemovidas: number;
       chunksRemotosRemovidos: number;
       chunksLegadosRemovidos: number;
@@ -251,6 +252,7 @@ export class LimpezaTresBasesService {
         chunksLegadosTotal: rubChunksLegadosTotal,
         locaisAfetados: [
           `IndexedDB store "${STORES.PRODUTOS}" (${countProdutos} registros)`,
+          `IndexedDB store "${STORES.ISV_REGISTROS_OPERACIONAIS}" (${countRegIsv} registros BASE RUB)`,
           `IndexedDB metadata "meta_rub_sync"`,
           `Firestore /filiais/${filialId}/catalogo_rub_versoes (${rubVersoesTotal} versões)`,
           `Firestore subcoleções chunks (/filiais/${filialId}/catalogo_rub_versoes/*/chunks)`,
@@ -268,7 +270,6 @@ export class LimpezaTresBasesService {
         locaisAfetados: [
           `IndexedDB store "${STORES.SPCOI007_FORNECEDORES}" (${countFornecedores} fornecedores)`,
           `IndexedDB store "${STORES.INDUSTRIAS}" (${countIndustrias} indústrias)`,
-          `IndexedDB store "${STORES.ISV_REGISTROS_OPERACIONAIS}" (${countRegIsv} registros)`,
           `IndexedDB metadata "meta_spcoi_sync"`,
           `Firestore /filiais/${filialId}/spcoi_versoes (${spcoiVersoesTotal} versões)`,
           `Firestore subcoleções chunks (/filiais/${filialId}/spcoi_versoes/*/chunks)`,
@@ -329,11 +330,13 @@ export class LimpezaTresBasesService {
       );
     }
 
-    // 2. Autorização administrativa:
-    // A confirmação expressa específica (código de segurança LIMPAR-BASES-172) autoriza a operação da gerência.
-    // Elevamos o contexto operacional para GERENCIA_ADMIN caso ainda não esteja definido.
-    if (authRoleService.getPapel() !== 'GERENCIA_ADMIN') {
-      authRoleService.alternarPapel('GERENCIA_ADMIN');
+    // 2. Autorização administrativa estrita (sem auto-escalonamento local):
+    const permGerencia = authRoleService.podePublicarRub();
+    if (!permGerencia.permitido) {
+      throw new Error(
+        permGerencia.motivoRecusa ||
+          'OPERAÇÃO BLOQUEADA: Apenas a Gerência autenticada com conta Google verificada na Filial 172 pode executar a limpeza das bases.'
+      );
     }
 
     const agoraIso = new Date().toISOString();
@@ -601,6 +604,7 @@ export class LimpezaTresBasesService {
     // 7. ATUALIZAÇÃO DOS SERVIÇOS EM MEMÓRIA
     productRepository.redefinirBasesOperacionaisAposLimpeza();
     isvService.redefinirSpcoiAposLimpeza();
+    isvService.redefinirBaseRubOperacionalAposLimpeza();
     rubSyncService.redefinirEstadoLocalAposLimpeza();
     spcoiSyncService.redefinirEstadoLocalAposLimpeza();
     saeouSyncService.redefinirEstadoLocalAposLimpeza();
@@ -625,6 +629,7 @@ export class LimpezaTresBasesService {
       detalhesExclusao: {
         baseRub: {
           produtosLocaisRemovidos: iniProdutos,
+          registrosOperacionaisRemovidos: iniRegIsv,
           versoesRemotasRemovidas: rubVersoesRemovidas,
           chunksRemotosRemovidos: rubChunksRemovidos,
           chunksLegadosRemovidos: rubChunksLegadosRemovidos,
@@ -632,7 +637,7 @@ export class LimpezaTresBasesService {
         spcoi007: {
           fornecedoresLocaisRemovidos: iniFornecedores,
           industriasLocaisRemovidas: iniIndustrias,
-          registrosOperacionaisRemovidos: iniRegIsv,
+          registrosOperacionaisRemovidos: 0,
           versoesRemotasRemovidas: spcoiVersoesRemovidas,
           chunksRemotosRemovidos: spcoiChunksRemovidos,
         },

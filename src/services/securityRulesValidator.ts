@@ -21,6 +21,7 @@ export interface ContextoAutenticacaoSimulado {
   role: PapelOperacional | null;
   email?: string | null;
   emailVerified?: boolean;
+  isAnonimo?: boolean;
   ativo?: boolean;
   temDocumentoServidor?: boolean;
 }
@@ -94,8 +95,23 @@ export class SecurityRulesValidator {
     const pathSegments = req.caminho.replace(/^\//, '').split('/');
     const rootCollection = pathSegments[0];
 
+    const isValidDocId = (id: string | undefined): boolean => {
+      if (!id || typeof id !== 'string') return false;
+      if (id.length < 1 || id.length > 128) return false;
+      if (id.includes('..') || id.includes('/')) return false;
+      return /^[a-zA-Z0-9_.-]+$/.test(id);
+    };
+
+    const isAuthenticatedNonAnon = (): boolean =>
+      Boolean(auth && auth.uid && auth.isAnonimo !== true);
+
     const isGerenteAdminReal = (targetFilial: string): boolean => {
-      if (!auth || !auth.uid) return false;
+      if (targetFilial !== '172') return false;
+      if (!isAuthenticatedNonAnon()) return false;
+      if (auth.emailVerified !== true) return false;
+      if (auth.email === 'jottarms@gmail.com' && (auth.filialId === '172' || auth.filialId == null)) {
+        return true;
+      }
       if (auth.temDocumentoServidor === false) return false;
       if (auth.ativo !== true) return false;
       if (auth.role !== 'GERENCIA_ADMIN') return false;
@@ -103,22 +119,37 @@ export class SecurityRulesValidator {
       return true;
     };
 
+    if (req.metodo !== 'list') {
+      const targetDocId = pathSegments[pathSegments.length - 1];
+      if (!isValidDocId(targetDocId)) {
+        return { permitido: false, motivo: `Rejeitado (ID Poisoning): Identificador de documento '${targetDocId}' inválido.` };
+      }
+    }
+
+    // 0. Sonda /test/connection
+    if (rootCollection === 'test') {
+      if (req.metodo === 'get' && pathSegments[1] === 'connection') {
+        return { permitido: true, motivo: 'Permitido: Leitura da sonda /test/connection.' };
+      }
+      return { permitido: false, motivo: 'Rejeitado: Coleção /test é somente leitura no documento connection.' };
+    }
+
     // 1. Gestão de Usuários: /usuarios_autorizados/{userId}
     if (rootCollection === 'usuarios_autorizados') {
       const targetUserId = pathSegments[1];
 
       if (req.metodo === 'get') {
-        if (auth && auth.uid && (auth.uid === targetUserId || isGerenteAdminReal('172'))) {
-          return { permitido: true, motivo: 'Permitido: Leitura de perfil de usuário autorizado.' };
+        if (isAuthenticatedNonAnon() && (auth.uid === targetUserId || isGerenteAdminReal('172'))) {
+          return { permitido: true, motivo: 'Permitido: Leitura de perfil próprio ou por Gerência.' };
         }
-        return { permitido: false, motivo: 'Rejeitado: Proibido ler perfis de terceiros.' };
+        return { permitido: false, motivo: 'Rejeitado: Proibido ler perfis PII de terceiros.' };
       }
 
       if (req.metodo === 'list') {
-        if (auth && auth.uid) {
-          return { permitido: true, motivo: 'Permitido: Listagem de autorizações para usuários autenticados.' };
+        if (isGerenteAdminReal('172')) {
+          return { permitido: true, motivo: 'Permitido: Listagem de usuários restrita a GERENCIA_ADMIN Filial 172.' };
         }
-        return { permitido: false, motivo: 'Rejeitado: Usuário não autenticado.' };
+        return { permitido: false, motivo: 'Rejeitado (PII Blanket Guard): Listagem de /usuarios_autorizados restrita a GERENCIA_ADMIN.' };
       }
 
       if (req.metodo === 'create' || req.metodo === 'update' || req.metodo === 'delete') {
@@ -209,8 +240,8 @@ export class SecurityRulesValidator {
             return { permitido: false, motivo: 'Rejeitado: Quantidade fora dos limites operacionais (0 a 100.000).' };
           }
 
-          if (dados.isDeleted === true) {
-            return { permitido: false, motivo: 'Rejeitado: Lote novo não pode ser criado já pré-excluído.' };
+          if (dados.isDeleted === true && !isGerenteAdminReal('172')) {
+            return { permitido: false, motivo: 'Rejeitado: Lote novo não pode ser criado já pré-excluído sem credencial da Gerência.' };
           }
 
           return { permitido: true, motivo: 'Permitido: Cadastro público de lote validado com sucesso.' };
@@ -278,8 +309,8 @@ export class SecurityRulesValidator {
 
           // Soft-delete
           if (dados.isDeleted === true) {
-            if (!dados.motivoExclusao || typeof dados.motivoExclusao !== 'string' || dados.motivoExclusao.trim().length < 3) {
-              return { permitido: false, motivo: 'Rejeitado: Exclusão lógica exige justificativa formal com no mínimo 3 caracteres.' };
+            if (!dados.motivoExclusao || typeof dados.motivoExclusao !== 'string' || dados.motivoExclusao.trim().length < 3 || dados.motivoExclusao.length > 200) {
+              return { permitido: false, motivo: 'Rejeitado: Exclusão lógica exige justificativa formal entre 3 e 200 caracteres.' };
             }
           }
 
@@ -291,6 +322,12 @@ export class SecurityRulesValidator {
       if (subColecao === 'auditoria') {
         if (req.metodo === 'delete' || req.metodo === 'update') {
           return { permitido: false, motivo: 'Rejeitado: Auditoria é rigorosamente imutável (allow update, delete: if false).' };
+        }
+        if (req.metodo === 'create') {
+          const dados = req.novosDados || {};
+          if (dados.filialId !== '172' || !dados.tipoAcao || !dados.dataHora) {
+            return { permitido: false, motivo: 'Rejeitado: Auditoria exige filialId="172", tipoAcao e dataHora válidos.' };
+          }
         }
         return { permitido: true, motivo: 'Permitido: Operação de auditoria autorizada.' };
       }
@@ -340,20 +377,36 @@ export class SecurityRulesValidator {
       }
     }
 
-    // 4. Módulo de Promotores
-    if (rootCollection === 'promotores') {
+    // 4. Módulo de Promotores, Agências e Vínculos Comerciais
+    if (
+      rootCollection === 'promotores' ||
+      rootCollection === 'agencias' ||
+      rootCollection === 'vinculos_promotor_industria' ||
+      rootCollection === 'vinculosPromotorIndustria' ||
+      rootCollection === 'vinculosPromotorAgencia' ||
+      rootCollection === 'vinculos_comerciais'
+    ) {
       if (req.metodo === 'get' || req.metodo === 'list') {
-        return { permitido: true, motivo: 'Permitido: Leitura de promotores cadastrados.' };
+        return { permitido: true, motivo: `Permitido: Leitura operacional de ${rootCollection}.` };
       }
       if (!isGerenteAdminReal('172')) {
-        return { permitido: false, motivo: 'Rejeitado: Gestão de promotores restrita a GERENCIA_ADMIN da filial 172.' };
+        return {
+          permitido: false,
+          motivo: `Rejeitado: Escrita em ${rootCollection} restrita exclusivamente a GERENCIA_ADMIN verificado da filial 172.`,
+        };
       }
-      return { permitido: true, motivo: 'Permitido: Gestão de promotor autorizada para Gerência.' };
+      return { permitido: true, motivo: `Permitido: Gestão de ${rootCollection} autorizada para Gerência.` };
     }
 
     if (rootCollection === 'vinculosPromotor' || rootCollection === 'vinculos_promotores') {
       if (req.metodo === 'get' || req.metodo === 'list') {
-        return { permitido: true, motivo: 'Permitido: Leitura de vínculos de promotores.' };
+        if (!isGerenteAdminReal('172')) {
+          return {
+            permitido: false,
+            motivo: 'Rejeitado: Códigos e tokens de vinculação de dispositivos são restritos a GERENCIA_ADMIN.',
+          };
+        }
+        return { permitido: true, motivo: 'Permitido: Leitura de vínculos autorizada para Gerência.' };
       }
       if (req.metodo === 'create' || req.metodo === 'delete') {
         if (!isGerenteAdminReal('172')) {
@@ -364,11 +417,13 @@ export class SecurityRulesValidator {
       if (req.metodo === 'update') {
         const dados = req.novosDados || {};
         const existentes = req.dadosExistentes || {};
-        // Ativação legítima de vínculo pelo promotor no aplicativo móvel
         const isPromotorActivation =
           existentes.status === 'AGUARDANDO' &&
           dados.status === 'UTILIZADO' &&
-          dados.dispositivoId &&
+          dados.vinculoId === existentes.vinculoId &&
+          dados.promotorId === existentes.promotorId &&
+          dados.codigoVinculo === existentes.codigoVinculo &&
+          (!existentes.tokenVinculo || dados.tokenVinculo === existentes.tokenVinculo) &&
           typeof dados.dispositivoId === 'string' &&
           dados.dispositivoId.length >= 3;
 
@@ -402,28 +457,34 @@ export class SecurityRulesValidator {
       if (req.metodo === 'update') {
         const dados = req.novosDados || {};
         const existentes = req.dadosExistentes || {};
-        // Aprovação ou recusa exige GERENCIA_ADMIN
-        const isApprovalOrRecusal = dados.status === 'APROVADO' || dados.status === 'RECUSADO';
-        if (isApprovalOrRecusal) {
-          if (!isGerenteAdminReal('172')) {
-            return { permitido: false, motivo: 'Rejeitado: Aprovação ou recusa de solicitação de promotor restrita a GERENCIA_ADMIN da filial 172.' };
-          }
+        if (isGerenteAdminReal('172')) {
           return { permitido: true, motivo: 'Permitido: Resolução de solicitação de promotor por administrador.' };
         }
-        // Promotor atualizando sua própria solicitação enquanto pendente
-        if (existentes.status === 'PENDENTE_ANALISE' && dados.status === 'PENDENTE_ANALISE') {
+        if (
+          existentes.status === 'PENDENTE_ANALISE' &&
+          dados.status === 'PENDENTE_ANALISE' &&
+          dados.filialId === existentes.filialId &&
+          dados.promotorId === existentes.promotorId &&
+          dados.codigoInterno === existentes.codigoInterno
+        ) {
           return { permitido: true, motivo: 'Permitido: Ajuste de contagem em solicitação pendente pelo promotor.' };
         }
-        return { permitido: false, motivo: 'Rejeitado: Transição de status de solicitação não permitida.' };
+        return { permitido: false, motivo: 'Rejeitado: Transição de status pós-terminal ou sem permissão.' };
       }
     }
 
-    // 5. Coleções Globais e Chunks
+    // 5. Coleção Global /vencimentos — espelha as mesmas validações estritas de /filiais/172/vencimentos
     if (rootCollection === 'vencimentos') {
       if (req.metodo === 'delete') {
         return { permitido: false, motivo: 'Rejeitado: Hard-delete bloqueado em /vencimentos.' };
       }
-      return { permitido: true, motivo: 'Permitido: Acesso operacional à coleção global /vencimentos.' };
+      if (req.metodo === 'get' || req.metodo === 'list') {
+        return { permitido: true, motivo: 'Permitido: Leitura operacional de /vencimentos.' };
+      }
+      return this.avaliarRequisicao(auth, {
+        ...req,
+        caminho: `/filiais/172/vencimentos/${pathSegments[1] || 'doc'}`,
+      });
     }
 
     const isGlobalAdminColecao = [
@@ -455,12 +516,30 @@ export class SecurityRulesValidator {
       if (req.metodo === 'delete' || req.metodo === 'update') {
         return { permitido: false, motivo: `Rejeitado: Imutabilidade de auditoria em ${rootCollection}.` };
       }
+      if (req.metodo === 'create') {
+        const dados = req.novosDados || {};
+        if (dados.filialId !== '172' || !dados.tipoAcao || !dados.dataHora) {
+          return { permitido: false, motivo: `Rejeitado: Registro de auditoria em ${rootCollection} exige schema completo.` };
+        }
+      }
       return { permitido: true, motivo: `Permitido: Registro de auditoria em ${rootCollection}.` };
     }
 
     if (rootCollection === 'operacoes_promotores') {
       if (req.metodo === 'delete') {
         return { permitido: false, motivo: 'Rejeitado: Exclusão bloqueada em operacoes_promotores.' };
+      }
+      if (req.metodo === 'create') {
+        const dados = req.novosDados || {};
+        if (!dados.operationId || !dados.promotorId || !dados.tipoAcao) {
+          return { permitido: false, motivo: 'Rejeitado: operacoes_promotores exige operationId, promotorId e tipoAcao.' };
+        }
+      }
+      if (req.metodo === 'update') {
+        const dados = req.novosDados || {};
+        if (!isGerenteAdminReal('172') && dados.processado !== true) {
+          return { permitido: false, motivo: 'Rejeitado: Atualização não autorizada em operacoes_promotores.' };
+        }
       }
       return { permitido: true, motivo: 'Permitido: Operação de promotores registrada.' };
     }
@@ -643,8 +722,8 @@ export class SecurityRulesValidator {
         id: 'SEC_13_DIVERGENCIA_ADMIN_DELETE_PERMITTED',
         nome: '13. Divergências: Exclusão Autorizada para Gerência da Filial 172',
         categoria: 'DIVERGENCIAS',
-        descricao: 'Apenas a Gerência com credencial no servidor pode purgar histórico de alertas.',
-        contextoAuth: { uid: 'gerente_172', filialId: '172', role: 'GERENCIA_ADMIN', ativo: true, temDocumentoServidor: true },
+        descricao: 'Apenas a Gerência com credencial verificada no servidor pode purgar histórico de alertas.',
+        contextoAuth: { uid: 'gerente_172', filialId: '172', role: 'GERENCIA_ADMIN', emailVerified: true, ativo: true, temDocumentoServidor: true },
         requisicao: { metodo: 'delete', caminho: '/divergencias/div_01' },
         resultadoEsperado: 'PERMITIDO',
       },
@@ -686,7 +765,7 @@ export class SecurityRulesValidator {
             filialId: '172',
             promotorId: 'prom_01',
             codigoInterno: '85327',
-            status: 'APROVADO', // Proibido no create
+            status: 'APROVADO',
             quantidadeTotalUnidades: 12,
           },
         },
@@ -738,8 +817,8 @@ export class SecurityRulesValidator {
         id: 'SEC_18_LEGITIMATE_ADMIN_BASE_PUBLISH',
         nome: '18. Gerência: Publicação Oficial da BASE RUB por Administrador Autorizado',
         categoria: 'GOVERNANCA_ADMIN',
-        descricao: 'Gerente com credencial no servidor publicando a nova versão da BASE RUB.',
-        contextoAuth: { uid: 'gerente_172', filialId: '172', role: 'GERENCIA_ADMIN', ativo: true, temDocumentoServidor: true },
+        descricao: 'Gerente com credencial verificada no servidor publicando a nova versão da BASE RUB.',
+        contextoAuth: { uid: 'gerente_172', filialId: '172', role: 'GERENCIA_ADMIN', emailVerified: true, ativo: true, temDocumentoServidor: true },
         requisicao: {
           metodo: 'create',
           caminho: '/filiais/172/catalogo_rub_versoes/rub_172_v2',
@@ -765,7 +844,7 @@ export class SecurityRulesValidator {
         nome: '20. Gerência: Autoatribuição de Administrador via Cliente Web Bloqueada',
         categoria: 'GOVERNANCA_ADMIN',
         descricao: 'Nenhum cliente pode criar registro em /usuarios_autorizados (exige Admin SDK / Console).',
-        contextoAuth: { uid: 'hacker_ou_qualquer', filialId: '172', role: null, email: 'jottarms@gmail.com' },
+        contextoAuth: { uid: 'hacker_ou_qualquer', filialId: '172', role: null, email: 'jottarms@gmail.com', emailVerified: true },
         requisicao: {
           metodo: 'create',
           caminho: '/usuarios_autorizados/hacker_ou_qualquer',
@@ -775,7 +854,7 @@ export class SecurityRulesValidator {
       },
 
       // -----------------------------------------------------------------------
-      // 6. ZERO-TRUST DEFAULT-DENY E ROTAS DESCONHECIDAS
+      // 6. ZERO-TRUST DEFAULT-DENY, TOKENS, AGÊNCIAS E ISOLAMENTO PII
       // -----------------------------------------------------------------------
       {
         id: 'SEC_21_UNKNOWN_COLLECTION_DENIED',
@@ -800,8 +879,65 @@ export class SecurityRulesValidator {
         nome: '23. Imutabilidade: Alteração de Histórico de Auditoria Bloqueada',
         categoria: 'DEFAULT_DENY',
         descricao: 'Auditoria é estritamente append-only.',
-        contextoAuth: { uid: 'gerente_172', filialId: '172', role: 'GERENCIA_ADMIN', ativo: true, temDocumentoServidor: true },
+        contextoAuth: { uid: 'gerente_172', filialId: '172', role: 'GERENCIA_ADMIN', emailVerified: true, ativo: true, temDocumentoServidor: true },
         requisicao: { metodo: 'update', caminho: '/filiais/172/auditoria/audit_01', novosDados: { alterado: true } },
+        resultadoEsperado: 'NEGADO',
+      },
+      {
+        id: 'SEC_24_DEVICE_TOKEN_QUERY_BLOCKED',
+        nome: '24. Proteção de Tokens: Consulta não autorizada a códigos de vínculo bloqueada',
+        categoria: 'PROMOTORES',
+        descricao: 'Usuário sem credencial de Gerência não pode listar ou consultar tokens/códigos de dispositivos.',
+        contextoAuth: { uid: 'operador_01', filialId: '172', role: 'OPERADOR_LOJA', emailVerified: true, ativo: true },
+        requisicao: { metodo: 'list', caminho: '/vinculosPromotor' },
+        resultadoEsperado: 'NEGADO',
+      },
+      {
+        id: 'SEC_25_UNAUTH_AGENCIA_OR_LINK_WRITE_BLOCKED',
+        nome: '25. Comercial: Cadastro não autorizado de agência ou vínculo comercial bloqueado',
+        categoria: 'PROMOTORES',
+        descricao: 'Apenas GERENCIA_ADMIN pode cadastrar ou editar agências e vínculos promotor-indústria.',
+        contextoAuth: { uid: null, filialId: null, role: null },
+        requisicao: {
+          metodo: 'create',
+          caminho: '/agencias/ag_hack',
+          novosDados: { agenciaId: 'ag_hack', nome: 'Agencia Falsa', filialId: '172' },
+        },
+        resultadoEsperado: 'NEGADO',
+      },
+      {
+        id: 'SEC_26_PII_LIST_BLOCKED',
+        nome: '26. Isolamento PII: Listagem de /usuarios_autorizados por não-admin bloqueada',
+        categoria: 'GOVERNANCA_ADMIN',
+        descricao: 'Operador comum autenticado não pode enumerar lista de usuários autorizados.',
+        contextoAuth: { uid: 'user_comum', filialId: '172', role: 'OPERADOR_LOJA', emailVerified: true, ativo: true },
+        requisicao: { metodo: 'list', caminho: '/usuarios_autorizados' },
+        resultadoEsperado: 'NEGADO',
+      },
+      {
+        id: 'SEC_27_EMAIL_SPOOF_UNVERIFIED_BLOCKED',
+        nome: '27. Anti-Spoofing: E-mail de admin sem email_verified rejeitado',
+        categoria: 'GOVERNANCA_ADMIN',
+        descricao: 'Bloqueia publicação quando token apresenta e-mail administrativo sem verificação.',
+        contextoAuth: { uid: 'spoof_uid', filialId: '172', role: null, email: 'jottarms@gmail.com', emailVerified: false },
+        requisicao: {
+          metodo: 'create',
+          caminho: '/filiais/172/spcoi_versoes/spcoi_hack',
+          novosDados: { versaoId: 'spcoi_hack' },
+        },
+        resultadoEsperado: 'NEGADO',
+      },
+      {
+        id: 'SEC_28_ID_POISONING_BLOCKED',
+        nome: '28. Path Hardening: ID malicioso com traversal (..) bloqueado',
+        categoria: 'VENCIMENTOS_IMUTABILIDADE',
+        descricao: 'Rejeita criação/leitura usando identificadores inválidos.',
+        contextoAuth: { uid: null, filialId: null, role: null },
+        requisicao: {
+          metodo: 'create',
+          caminho: '/vencimentos/lote..invalido',
+          novosDados: { filialId: '172', codigoInterno: '123', dataVencimento: '2026-12-01', quantidade: 1 },
+        },
         resultadoEsperado: 'NEGADO',
       },
     ];

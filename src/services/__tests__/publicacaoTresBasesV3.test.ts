@@ -19,7 +19,7 @@ import {
   validarIntegridadeVersaoNoServidor,
 } from '../firestorePublishGuard';
 import { RubSyncService } from '../rubSyncService';
-import { SpcoiSyncService } from '../spcoiSyncService';
+import { SpcoiSyncService, spcoiSyncService } from '../spcoiSyncService';
 import { SaeouSyncService } from '../saeouSyncService';
 import { resolverEstadoPublicacaoImportacao } from '../importacaoResultadoHelper';
 import { productRepository } from '../productRepository';
@@ -216,16 +216,28 @@ function makeProdutosPesados(count: number, approxCharsPerItem = 240_000): Produ
   }));
 }
 
+function makeIncompressiblePadding(length: number, seedOffset: number): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const chars = new Array<string>(length);
+  let x = (0x9e3779b9 ^ (seedOffset + 1)) >>> 0;
+  for (let i = 0; i < length; i++) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    chars[i] = alphabet[(x >>> 0) & 63];
+  }
+  return chars.join('');
+}
+
 function makeSpcoiPesados(count: number, approxCharsPerItem = 220_000): {
   fornecedores: FornecedorSPCOI007[];
   industrias: Industria[];
 } {
-  const padding = 'Y'.repeat(approxCharsPerItem);
   const fornecedores: FornecedorSPCOI007[] = Array.from({ length: count }, (_, i) => ({
     id: `spcoi_${i}`,
     cnpj: '12345678000199',
     cnpj_formatado: '12.345.678/0001-99',
-    razao_social: `INDUSTRIA EXEMPLO S/A ${padding}`,
+    razao_social: `INDUSTRIA EXEMPLO S/A ${makeIncompressiblePadding(approxCharsPerItem, i * 97)}`,
     codigo_interno: `${20000 + i}`,
     digito: '2',
     codigo_exibicao: `${20000 + i}-2`,
@@ -281,6 +293,7 @@ const dummyMeta: MetadadosBase = {
 
 async function runAllTests() {
   console.log('=== TESTES DE PUBLICAÇÃO SEGURA V3 DAS TRÊS BASES (FILIAL 172) ===\n');
+  spcoiSyncService.stopMonitoring();
 
   // -------------------------------------------------------------------------
   // CENÁRIO 1: Timeout e ausência de travamento indefinido
@@ -317,11 +330,12 @@ async function runAllTests() {
       writeTimeoutMs: 60,
       readTimeoutMs: 60,
       concurrencyLimit: 2,
+      maxChunkBytes: 2 * 1024,
       setMetaFn: async () => {},
       getUsuarioFn: () => makeUsuario('GERENCIA_ADMIN'),
     });
 
-    const { fornecedores, industrias } = makeSpcoiPesados(4);
+    const { fornecedores, industrias } = makeSpcoiPesados(4, 3_000);
     const t0 = Date.now();
     const resTimeout = await spcoiSvc.publicarSpcoiCentral(fornecedores, industrias);
     const elapsedMs = Date.now() - t0;

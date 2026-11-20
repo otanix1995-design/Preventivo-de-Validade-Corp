@@ -24,6 +24,7 @@ import { promotorService } from './promotorService';
 import { formatarCnpj, normalizarCnpj } from './spcoi007Parser';
 import { getProdutos } from './storage';
 import { notificarAlteracaoParaPacoteLocal } from './localPackageMode';
+import { comercialSyncService } from './comercialSyncService';
 
 export interface ResultadoTransferenciaMassa {
   cnpjsTransferidos: string[];
@@ -35,6 +36,9 @@ export interface ResultadoTransferenciaMassa {
     cnpjFormatado: string;
     nome: string;
   }>;
+  vinculosCriados?: VinculoPromotorIndustria[];
+  vinculosRemovidos?: VinculoPromotorIndustria[];
+  syncJaEnfileirado?: boolean;
   rollback: () => Promise<void>;
 }
 
@@ -305,7 +309,7 @@ export function calcularValorEstoqueCentralizado(params: ParametrosCalculoFinanc
   };
 }
 
-class IsvService {
+export class IsvService {
   private _fornecedores: FornecedorSPCOI007[] = [];
   private _industrias: Industria[] = [];
   private _vinculos: VinculoPromotorIndustria[] = [];
@@ -348,6 +352,59 @@ class IsvService {
           this.invalidarCache();
           this._notify();
         }
+      });
+    } catch {
+      // safe fallback
+    }
+    try {
+      comercialSyncService.registerIsvHandlers({
+        getVinculosIndustria: () => [...this._vinculos],
+        getIndustrias: () => [...this._industrias],
+        applyRemoteChanges: async ({ vinculosIndustria }) => {
+          if (!vinculosIndustria) return;
+          const mapaUnico = new Map<string, VinculoPromotorIndustria>();
+          for (const v of vinculosIndustria) {
+            if (!v || !v.id || v.ativo === false) continue;
+            mapaUnico.set(v.id, v);
+          }
+          this._vinculos = Array.from(mapaUnico.values());
+
+          const promotoresPorCnpj = new Map<string, string[]>();
+          for (const v of this._vinculos) {
+            const cnpjNorm = normalizarCnpj(v.cnpj);
+            if (!cnpjNorm) continue;
+            const promVivo = promotorService.getPromotorById(v.promotorId);
+            const nomeProm = promVivo ? promVivo.nome : v.promotorNome;
+            if (!nomeProm) continue;
+            const list = promotoresPorCnpj.get(cnpjNorm) || [];
+            if (!list.includes(nomeProm)) list.push(nomeProm);
+            promotoresPorCnpj.set(cnpjNorm, list);
+          }
+
+          const industriasAlteradas: Industria[] = [];
+          this._industrias = this._industrias.map((ind) => {
+            const cnpjNorm = normalizarCnpj(ind.cnpj);
+            const nextResponsaveis = promotoresPorCnpj.get(cnpjNorm) || [];
+            const prevResponsaveis = ind.promotores_responsaveis || [];
+            const mudouResp =
+              nextResponsaveis.length !== prevResponsaveis.length ||
+              nextResponsaveis.some((n, idx) => prevResponsaveis[idx] !== n);
+            if (!mudouResp) return ind;
+            const atualizada: Industria = {
+              ...ind,
+              promotores_responsaveis: nextResponsaveis,
+            };
+            industriasAlteradas.push(atualizada);
+            return atualizada;
+          });
+
+          this._rebuildIndices();
+          await dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos, true);
+          for (const ind of industriasAlteradas) {
+            await dbPut(STORES.INDUSTRIAS, ind).catch(() => {});
+          }
+          this._notify();
+        },
       });
     } catch {
       // safe fallback
@@ -633,37 +690,163 @@ class IsvService {
   public async salvarImportacaoSpcoi(
     fornecedores: FornecedorSPCOI007[],
     industrias: Industria[],
-    resumo: ResumoImportacaoSPCOI007
+    resumo: ResumoImportacaoSPCOI007,
+    opcoes?: {
+      metaSpcoiSync?: Record<string, any>;
+      persistirAtomicamente?: (ops: AtomicBatchOp[]) => Promise<void>;
+    }
   ): Promise<void> {
-    // 1. Preservar nomes comerciais de exibição já customizados pelo usuário
-    const industriasExistentesMap = new Map<string, Industria>();
-    this._industrias.forEach((i) => industriasExistentesMap.set(i.cnpj, i));
+    if (!Array.isArray(fornecedores) || fornecedores.length === 0) {
+      throw new Error('Base SPCOI007 vazia: substituição atômica abortada para proteger os dados locais.');
+    }
 
-    const industriasAtualizadas = industrias.map((nova) => {
-      const existente = industriasExistentesMap.get(nova.cnpj);
-      if (existente) {
-        return {
-          ...nova,
-          nome_exibicao: existente.nome_exibicao || nova.razao_social,
-          ativo: existente.ativo !== undefined ? existente.ativo : true,
-          promotores_responsaveis: existente.promotores_responsaveis || [],
-        };
-      }
-      return nova;
+    // 0. Snapshot profundo pré-substituição para rollback integral em caso de falha
+    const snapshotFornecedores: FornecedorSPCOI007[] = this._fornecedores.map((f) => ({ ...f }));
+    const snapshotIndustrias: Industria[] = this._industrias.map((i) => ({
+      ...i,
+      promotores_responsaveis: [...(i.promotores_responsaveis || [])],
+    }));
+    const snapshotHistoricoSpcoi: ResumoImportacaoSPCOI007[] = this._historicoSpcoi.map((h) => ({ ...h }));
+    const prevMetaSpcoi = opcoes?.metaSpcoiSync
+      ? await dbGetMeta<any>('meta_spcoi_sync', null).catch(() => null)
+      : null;
+
+    // 1. Preservar configurações das indústrias e TODOS os vínculos comerciais existentes (Promotor ↔ Indústria)
+    const industriasExistentesMap = new Map<string, Industria>();
+    this._industrias.forEach((i) => {
+      const cnpjNorm = normalizarCnpj(i.cnpj);
+      if (cnpjNorm) industriasExistentesMap.set(cnpjNorm, i);
     });
 
-    // 2. Atualizar estado em memória
-    this._fornecedores = fornecedores;
-    this._industrias = industriasAtualizadas;
-    this._historicoSpcoi = [resumo, ...this._historicoSpcoi.slice(0, 19)];
-    this._rebuildIndices();
+    const promotoresPorCnpj = new Map<string, string[]>();
+    for (const v of this._vinculos) {
+      const cnpjNorm = normalizarCnpj(v.cnpj);
+      if (!cnpjNorm) continue;
+      const promVivo = promotorService.getPromotorById(v.promotorId);
+      const nomeProm = promVivo ? promVivo.nome : v.promotorNome;
+      if (!nomeProm) continue;
+      const list = promotoresPorCnpj.get(cnpjNorm) || [];
+      if (!list.includes(nomeProm)) list.push(nomeProm);
+      promotoresPorCnpj.set(cnpjNorm, list);
+    }
 
-    // 3. Persistir de forma atômica no IndexedDB
-    await Promise.all([
-      dbPutAll(STORES.SPCOI007_FORNECEDORES, fornecedores),
-      dbPutAll(STORES.INDUSTRIAS, industriasAtualizadas),
-      dbPutAll(STORES.HISTORICO_IMPORTACOES_SPCOI007, this._historicoSpcoi),
-    ]);
+    const industriasAtualizadas = (industrias || []).map((nova) => {
+      const cnpjNorm = normalizarCnpj(nova.cnpj) || nova.cnpj;
+      const existente = industriasExistentesMap.get(cnpjNorm);
+      const promotoresVinculados = promotoresPorCnpj.get(cnpjNorm);
+
+      if (existente) {
+        return {
+          ...existente,
+          ...nova,
+          cnpj: cnpjNorm,
+          cnpj_formatado: nova.cnpj_formatado || existente.cnpj_formatado || formatarCnpj(cnpjNorm),
+          razao_social: nova.razao_social || existente.razao_social,
+          nome_exibicao: existente.nome_exibicao || nova.nome_exibicao || nova.razao_social,
+          ativo: existente.ativo !== undefined ? existente.ativo : (nova.ativo ?? true),
+          promotores_responsaveis:
+            promotoresVinculados && promotoresVinculados.length > 0
+              ? promotoresVinculados
+              : existente.promotores_responsaveis || nova.promotores_responsaveis || [],
+        };
+      }
+
+      return {
+        ...nova,
+        cnpj: cnpjNorm,
+        promotores_responsaveis:
+          promotoresVinculados && promotoresVinculados.length > 0
+            ? promotoresVinculados
+            : nova.promotores_responsaveis || [],
+      };
+    });
+
+    const nextHistoricoSpcoi = [resumo, ...this._historicoSpcoi.slice(0, 19)];
+
+    const ops: AtomicBatchOp[] = [
+      {
+        storeName: STORES.SPCOI007_FORNECEDORES,
+        type: 'putAll',
+        items: fornecedores,
+        clearFirst: true,
+      },
+      {
+        storeName: STORES.INDUSTRIAS,
+        type: 'putAll',
+        items: industriasAtualizadas,
+        clearFirst: true,
+      },
+      {
+        storeName: STORES.HISTORICO_IMPORTACOES_SPCOI007,
+        type: 'putAll',
+        items: nextHistoricoSpcoi,
+        clearFirst: true,
+      },
+    ];
+
+    if (opcoes?.metaSpcoiSync) {
+      ops.push({
+        storeName: STORES.METADADOS,
+        type: 'setMeta',
+        key: 'meta_spcoi_sync',
+        value: opcoes.metaSpcoiSync,
+      });
+    }
+
+    const executor = opcoes?.persistirAtomicamente ?? dbRunAtomicBatch;
+
+    try {
+      // 2. Persistir atomicamente no IndexedDB ANTES de comutar o estado ativo em memória
+      await executor(ops);
+
+      // 3. Atualizar estado em memória e reconstruir índices (preservando _vinculos e _registrosIsvOperacional)
+      this._fornecedores = fornecedores;
+      this._industrias = industriasAtualizadas;
+      this._historicoSpcoi = nextHistoricoSpcoi;
+      this._rebuildIndices();
+    } catch (err) {
+      // Rollback completo em memória e no IndexedDB para o snapshot anterior
+      this._fornecedores = snapshotFornecedores;
+      this._industrias = snapshotIndustrias;
+      this._historicoSpcoi = snapshotHistoricoSpcoi;
+      this._rebuildIndices();
+
+      try {
+        const rollbackOps: AtomicBatchOp[] = [
+          {
+            storeName: STORES.SPCOI007_FORNECEDORES,
+            type: 'putAll',
+            items: snapshotFornecedores,
+            clearFirst: true,
+          },
+          {
+            storeName: STORES.INDUSTRIAS,
+            type: 'putAll',
+            items: snapshotIndustrias,
+            clearFirst: true,
+          },
+          {
+            storeName: STORES.HISTORICO_IMPORTACOES_SPCOI007,
+            type: 'putAll',
+            items: snapshotHistoricoSpcoi,
+            clearFirst: true,
+          },
+        ];
+        if (opcoes?.metaSpcoiSync) {
+          rollbackOps.push({
+            storeName: STORES.METADADOS,
+            type: 'setMeta',
+            key: 'meta_spcoi_sync',
+            value: prevMetaSpcoi,
+          });
+        }
+        await dbRunAtomicBatch(rollbackOps);
+      } catch (rbErr) {
+        console.warn('[IsvService] Aviso no rollback atômico da SPCOI007:', rbErr);
+      }
+
+      throw err;
+    }
 
     notificarAlteracaoParaPacoteLocal(
       'SPCOI007',
@@ -1091,6 +1274,7 @@ class IsvService {
     const jaExiste = this._vinculos.some((v) => v.id === id);
     if (jaExiste) return;
 
+    const agora = new Date().toISOString();
     const novoVinculo: VinculoPromotorIndustria = {
       id,
       promotorId: promotor.promotorId,
@@ -1098,7 +1282,9 @@ class IsvService {
       agenciaNome: promotor.agenciaNome || '',
       cnpj: cnpjNorm,
       filialId,
-      criado_em: new Date().toISOString(),
+      criado_em: agora,
+      atualizadoEm: agora,
+      ativo: true,
     };
 
     this._vinculos.push(novoVinculo);
@@ -1114,6 +1300,7 @@ class IsvService {
 
     this._rebuildIndices();
     await dbPut(STORES.VINCULOS_PROMOTOR_INDUSTRIA, novoVinculo);
+    await comercialSyncService.registrarVinculoIndustriaSync(novoVinculo, ind);
     notificarAlteracaoParaPacoteLocal(
       'VINCULO_COMERCIAL',
       `Vínculo criado: ${promotor.nome} ↔ CNPJ ${cnpjNorm}`
@@ -1131,6 +1318,10 @@ class IsvService {
   ): Promise<void> {
     const cnpjNorm = normalizarCnpj(cnpj);
     const id = `${promotorId}_${cnpjNorm}_${filialId}`;
+
+    const removidos = this._vinculos.filter(
+      (v) => v.id === id || (v.promotorId === promotorId && v.cnpj === cnpjNorm)
+    );
 
     this._vinculos = this._vinculos.filter(
       (v) => v.id !== id && !(v.promotorId === promotorId && v.cnpj === cnpjNorm)
@@ -1151,6 +1342,10 @@ class IsvService {
 
     this._rebuildIndices();
     await dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos, true);
+    const agora = new Date().toISOString();
+    for (const rem of removidos) {
+      await comercialSyncService.registrarDesvinculoIndustriaSync(rem, agora);
+    }
     notificarAlteracaoParaPacoteLocal(
       'VINCULO_COMERCIAL',
       `Vínculo removido: ${promotorId} ↔ CNPJ ${cnpjNorm}`
@@ -1161,9 +1356,14 @@ class IsvService {
   /**
    * Atualiza nome/agência nos vínculos existentes quando o cadastro de um promotor é editado.
    */
-  public async sincronizarPromotorNosVinculos(promotor: Promotor): Promise<void> {
+  public async sincronizarPromotorNosVinculos(
+    promotor: Promotor,
+    opcoes?: { deferirSyncComercial?: boolean }
+  ): Promise<void> {
     let mudou = false;
     const cnpjsAfetados = new Set<string>();
+    const alterados: VinculoPromotorIndustria[] = [];
+    const agora = new Date().toISOString();
 
     this._vinculos = this._vinculos.map((v) => {
       if (v.promotorId !== promotor.promotorId) return v;
@@ -1173,11 +1373,15 @@ class IsvService {
       }
       mudou = true;
       cnpjsAfetados.add(v.cnpj);
-      return {
+      const atualizado: VinculoPromotorIndustria = {
         ...v,
         promotorNome: promotor.nome,
         agenciaNome: novaAgencia,
+        atualizadoEm: agora,
+        ativo: true,
       };
+      alterados.push(atualizado);
+      return atualizado;
     });
 
     if (!mudou) return;
@@ -1198,6 +1402,9 @@ class IsvService {
 
     this._rebuildIndices();
     await dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos, true);
+    if (!opcoes?.deferirSyncComercial && alterados.length > 0) {
+      await comercialSyncService.registrarVinculosIndustriaLoteSync(alterados, []);
+    }
     this._notify();
   }
 
@@ -1269,6 +1476,7 @@ class IsvService {
       cnpjs?: string[];
       removerDaOrigem?: boolean;
       filialId?: string;
+      deferirSyncComercial?: boolean;
       persistirAtomicamente?: (
         nextVinculos: VinculoPromotorIndustria[],
         industriasAlteradas: Industria[]
@@ -1312,6 +1520,9 @@ class IsvService {
         cnpjsJaExistentesNoDestino: [],
         cnpjsOrigemAntes,
         industriasTransferidasDetalhes: [],
+        vinculosCriados: [],
+        vinculosRemovidos: [],
+        syncJaEnfileirado: true,
         rollback: async () => {},
       };
     }
@@ -1334,6 +1545,7 @@ class IsvService {
     );
 
     const idsParaRemover = new Set<string>();
+    const vinculosRemovidos: VinculoPromotorIndustria[] = [];
     const novosVinculosDestino: VinculoPromotorIndustria[] = [];
     const cnpjsTransferidos: string[] = [];
     const cnpjsNovosNoDestino: string[] = [];
@@ -1350,6 +1562,7 @@ class IsvService {
 
       if (removerDaOrigem) {
         idsParaRemover.add(v.id);
+        vinculosRemovidos.push({ ...v });
       }
 
       if (!cnpjsTransferidos.includes(cnpjNorm)) {
@@ -1377,6 +1590,8 @@ class IsvService {
           cnpj: cnpjNorm,
           filialId,
           criado_em: agora,
+          atualizadoEm: agora,
+          ativo: true,
         });
       }
     }
@@ -1457,6 +1672,14 @@ class IsvService {
       this._vinculos = nextVinculos;
       this._industrias = nextIndustrias;
       this._rebuildIndices();
+
+      if (!opcoes.deferirSyncComercial) {
+        await comercialSyncService.registrarVinculosIndustriaLoteSync(
+          novosVinculosDestino,
+          vinculosRemovidos
+        );
+      }
+
       notificarAlteracaoParaPacoteLocal(
         'VINCULO_COMERCIAL',
         `Transferência confirmada de ${cnpjsTransferidos.length} indústria(s) para ${destinoPromotor.nome}`
@@ -1473,6 +1696,9 @@ class IsvService {
       cnpjsJaExistentesNoDestino,
       cnpjsOrigemAntes,
       industriasTransferidasDetalhes,
+      vinculosCriados: novosVinculosDestino,
+      vinculosRemovidos,
+      syncJaEnfileirado: !opcoes.deferirSyncComercial,
       rollback: restaurarSnapshot,
     };
   }
@@ -2570,8 +2796,8 @@ class IsvService {
   }
 
   /**
-   * Redefine os dados de fornecedores e indústrias em memória após a limpeza das bases operacionais.
-   * Não afeta solicitações de ajuste ou vínculos operacionais intactos.
+   * Redefine APENAS os dados de fornecedores e indústrias (SPCOI007) em memória após limpeza.
+   * JAMAIS apaga registros operacionais da BASE RUB (_registrosIsvOperacional) ou solicitações/vínculos.
    */
   public redefinirSpcoiAposLimpeza(): void {
     this._fornecedores = [];
@@ -2579,8 +2805,16 @@ class IsvService {
     this._fornecedoresByCod.clear();
     this._fornecedoresByCodDig.clear();
     this._industriasMap.clear();
-    this._registrosIsvOperacional = [];
     this._historicoSpcoi = [];
+    this._rebuildIndices();
+    this._notify();
+  }
+
+  /**
+   * Redefine os registros operacionais em memória apenas quando a própria BASE RUB é explicitamente limpa.
+   */
+  public redefinirBaseRubOperacionalAposLimpeza(): void {
+    this._registrosIsvOperacional = [];
     this._historicoIsv = [];
     this._rebuildIndices();
     this._notify();

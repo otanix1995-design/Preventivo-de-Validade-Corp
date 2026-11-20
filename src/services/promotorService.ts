@@ -7,31 +7,21 @@
  */
 
 import {
-  collection,
   doc,
-  getDocs,
-  limit,
-  onSnapshot,
-  query,
   setDoc,
-  Unsubscribe
 } from 'firebase/firestore';
 import {
   AgenciaComercial,
   DispositivoVinculado,
-  FILIAIS_DISPONIVEIS,
   HistoricoMovimentacaoComercial,
   OperacaoPromotorSync,
   PERMISSOES_PADRAO_PROMOTOR,
   PermissoesPromotor,
   Promotor,
   RegistroAuditoriaPromotor,
-  SETORES_DISPONIVEIS,
   StatusPromotor,
-  StatusVinculo,
-  TipoAcaoAuditoria,
-  TipoMovimentacaoComercial,
-  VinculoPromotor
+  VinculoPromotor,
+  VinculoPromotorIndustria,
 } from '../types';
 import {
   gerarAgenciaId,
@@ -46,12 +36,12 @@ import {
   detectQuotaResourceType,
   isFirestoreQuotaExceeded,
   isQuotaError,
-  logFirestoreRead,
   markQuotaExceeded,
-  subscribeQuotaStatus,
 } from './firebase';
 import { productRepository } from './productRepository';
 import { isModoAtualizacaoLocalAtivo, notificarAlteracaoParaPacoteLocal } from './localPackageMode';
+import { authRoleService } from './authRoleService';
+import { comercialSyncService } from './comercialSyncService';
 
 const META_KEY_HISTORICO_MOVIMENTACOES = 'historico_movimentacoes_comerciais_v1';
 
@@ -157,17 +147,53 @@ export class PromotorService {
   private _listeners = new Set<PromotoresListener>();
   private _isInitialized = false;
   private _initPromise: Promise<void> | null = null;
-  private _firestoreUnsubs: Unsubscribe[] = [];
 
   constructor() {
-    subscribeQuotaStatus((qState) => {
-      if (qState.bloqueado) {
-        this._firestoreUnsubs.forEach((u) => {
-          try { u(); } catch {}
-        });
-        this._firestoreUnsubs = [];
-      }
-    });
+    try {
+      comercialSyncService.registerPromotorHandlers({
+        getPromotores: () => [...this._promotores],
+        getAgencias: () => [...this._agencias],
+        getVinculosDispositivo: () => [...this._vinculos],
+        getHistoricoMovimentacoes: () => [...this._historicoMovimentacoes],
+        applyRemoteChanges: async ({
+          promotores,
+          agencias,
+          vinculosDispositivo,
+          historicoMovimentacoes,
+        }) => {
+          const writes: Promise<void>[] = [];
+          if (promotores) {
+            this._promotores = promotores.map(normalizePromotor);
+            writes.push(dbPutAll(STORES.PROMOTORES, this._promotores, true));
+          }
+          if (agencias) {
+            this._agencias = agencias
+              .map(normalizeAgencia)
+              .filter((a): a is AgenciaComercial => a !== null)
+              .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+            writes.push(dbPutAll(STORES.AGENCIAS, this._agencias, true));
+          }
+          if (vinculosDispositivo) {
+            this._vinculos = vinculosDispositivo.map(normalizeVinculo);
+            writes.push(dbPutAll(STORES.VINCULOS_PROMOTORES, this._vinculos, true));
+          }
+          if (historicoMovimentacoes) {
+            this._historicoMovimentacoes = historicoMovimentacoes
+              .slice()
+              .sort((a, b) => (b.dataHora || '').localeCompare(a.dataHora || ''))
+              .slice(0, 500);
+            writes.push(dbSetMeta(META_KEY_HISTORICO_MOVIMENTACOES, this._historicoMovimentacoes));
+          }
+          if (writes.length > 0) {
+            await Promise.all(writes);
+            await this._sincronizarAgenciasDePromotoresExistentes();
+            this.notify();
+          }
+        },
+      });
+    } catch {
+      // safe fallback
+    }
 
     // Expiration check timer every minute
     if (typeof window !== 'undefined') {
@@ -259,7 +285,6 @@ export class PromotorService {
           };
           this._promotores = [mariaPadrao, ...this._promotores];
           dbPut(STORES.PROMOTORES, mariaPadrao).catch(() => {});
-          this.syncDocToFirestore('promotores', mariaPadrao.promotorId, mariaPadrao);
         }
 
         // Migração não-destrutiva: garante que todas as agências já referenciadas pelos promotores existam no cadastro independente
@@ -267,9 +292,9 @@ export class PromotorService {
 
         this.verificarExpiracaoVinculos();
 
-        // 2. Conectar com Firestore em tempo real apenas quando NÃO estiver no modo de atualização local
-        if (!isModoAtualizacaoLocalAtivo()) {
-          this.initFirestoreSync();
+        // 2. Iniciar sincronização comercial centralizada via Firestore (preservando BASE RUB/SAEOU060 no ZIP)
+        if (typeof window !== 'undefined') {
+          void comercialSyncService.iniciar().catch(() => {});
         }
 
         this._isInitialized = true;
@@ -314,7 +339,7 @@ export class PromotorService {
         filialId: p.filialId || '172',
         ativo: true,
         criadoEm: p.dataCadastro || agora,
-        atualizadoEm: agora,
+        atualizadoEm: p.dataCadastro || agora,
       };
       porChave.set(chave, nova);
       novas.push(nova);
@@ -327,94 +352,6 @@ export class PromotorService {
     if (novas.length > 0) {
       for (const ag of novas) {
         await dbPut(STORES.AGENCIAS, ag).catch(() => {});
-      }
-    }
-  }
-
-  private initFirestoreSync() {
-    if (!db || isModoAtualizacaoLocalAtivo()) return;
-
-    // Requisito 10: Limpar listeners anteriores antes de abrir novos (evita ouvintes duplicados)
-    this._firestoreUnsubs.forEach((u) => {
-      try { u(); } catch {}
-    });
-    this._firestoreUnsubs = [];
-
-    // Requisito 17: Se a cota estiver excedida, não abrir listeners
-    if (isFirestoreQuotaExceeded()) {
-      return;
-    }
-
-    try {
-      // Requisito 9: Listener controlado apenas para Promotores (com limit)
-      const qPromotores = query(collection(db, 'promotores'), limit(60));
-      const unsubPromotores = onSnapshot(
-        qPromotores,
-        (snapshot) => {
-          logFirestoreRead('promotoresListener', 'promotores', snapshot.size);
-          if (!snapshot.empty) {
-            const remote: Promotor[] = [];
-            snapshot.forEach((docSnap) => {
-              const data = docSnap.data() as Promotor;
-              if (data && data.promotorId) {
-                remote.push(normalizePromotor(data));
-              }
-            });
-            if (remote.length > 0) {
-              this._promotores = remote;
-              dbPutAll(STORES.PROMOTORES, remote, true).catch(() => {});
-              this.notify();
-            }
-          }
-        },
-        (err) => {
-          console.warn('Aviso Firestore promotores onSnapshot:', err?.message);
-          if (isQuotaError(err)) {
-            markQuotaExceeded(err?.message, detectQuotaResourceType(err));
-          }
-        }
-      );
-      this._firestoreUnsubs.push(unsubPromotores);
-
-      // Vínculos listener (apenas vinculosPromotor ativo com limit, sem duplicações)
-      const qVinculos = query(collection(db, 'vinculosPromotor'), limit(60));
-      const unsubVinculosCentral = onSnapshot(
-        qVinculos,
-        (snapshot) => {
-          logFirestoreRead('vinculosListener', 'vinculosPromotor', snapshot.size);
-          if (!snapshot.empty) {
-            const remote: VinculoPromotor[] = [];
-            snapshot.forEach((docSnap) => {
-              const data = docSnap.data() as VinculoPromotor;
-              if (data && data.vinculoId) {
-                remote.push(normalizeVinculo(data));
-              }
-            });
-            if (remote.length > 0) {
-              const map = new Map<string, VinculoPromotor>();
-              this._vinculos.forEach((v) => map.set(v.vinculoId, v));
-              remote.forEach((v) => map.set(v.vinculoId, v));
-              this._vinculos = Array.from(map.values());
-              dbPutAll(STORES.VINCULOS_PROMOTORES, this._vinculos, true).catch(() => {});
-              this.notify();
-            }
-          }
-        },
-        (err) => {
-          console.warn('Aviso Firestore vinculosPromotor onSnapshot:', err?.message);
-          if (isQuotaError(err)) {
-            markQuotaExceeded(err?.message, detectQuotaResourceType(err));
-          }
-        }
-      );
-      this._firestoreUnsubs.push(unsubVinculosCentral);
-
-      // Requisito 9: REMOVIDOS listeners de auditoria, auditoria_promotores e operacoes_promotores
-      // para economizar centenas de leituras diárias desnecessárias no Firestore.
-    } catch (err: any) {
-      console.warn('Erro ao configurar Firestore listeners de promotores:', err?.message);
-      if (isQuotaError(err)) {
-        markQuotaExceeded(err?.message, detectQuotaResourceType(err));
       }
     }
   }
@@ -539,7 +476,8 @@ export class PromotorService {
     dados: Omit<HistoricoMovimentacaoComercial, 'id' | 'dataHora' | 'realizadoPor'> & {
       dataHora?: string;
       realizadoPor?: string;
-    }
+    },
+    opcoes?: { skipCloudSync?: boolean }
   ): Promise<HistoricoMovimentacaoComercial> {
     const entry: HistoricoMovimentacaoComercial = {
       id: `mov_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -549,6 +487,9 @@ export class PromotorService {
     };
     this._historicoMovimentacoes = [entry, ...this._historicoMovimentacoes].slice(0, 500);
     await dbSetMeta(META_KEY_HISTORICO_MOVIMENTACOES, this._historicoMovimentacoes);
+    if (!opcoes?.skipCloudSync) {
+      await comercialSyncService.registrarMovimentacaoSync(entry);
+    }
     return entry;
   }
 
@@ -595,6 +536,7 @@ export class PromotorService {
       a.nome.localeCompare(b.nome, 'pt-BR')
     );
     await dbPut(STORES.AGENCIAS, nova);
+    await comercialSyncService.registrarAgenciaSync(nova);
 
     await this.registrarMovimentacaoComercial({
       tipo: 'AGENCIA_CRIADA',
@@ -666,8 +608,8 @@ export class PromotorService {
     // Atualizar referência nos promotores vinculados caso o nome de exibição tenha mudado
     const nomeMudou = atual.nome !== atualizada.nome;
     const chaveAnterior = normalizarChaveAgencia(atual.nome);
+    const promotoresAtualizados: Promotor[] = [];
     if (nomeMudou) {
-      const promotoresAtualizados: Promotor[] = [];
       this._promotores = this._promotores.map((p) => {
         const pertence =
           p.agenciaId === agenciaId || normalizarChaveAgencia(p.agenciaNome) === chaveAnterior;
@@ -676,6 +618,7 @@ export class PromotorService {
           ...p,
           agenciaId,
           agenciaNome: atualizada.nome,
+          atualizadoEm: agora,
           atualizadoPor: 'SISTEMA_PRINCIPAL',
         };
         promotoresAtualizados.push(pAtualizado);
@@ -683,9 +626,10 @@ export class PromotorService {
       });
       for (const pAt of promotoresAtualizados) {
         await dbPut(STORES.PROMOTORES, pAt);
-        this.syncDocToFirestore('promotores', pAt.promotorId, pAt);
       }
     }
+
+    await comercialSyncService.registrarAgenciaSync(atualizada, promotoresAtualizados);
 
     await this.registrarMovimentacaoComercial({
       tipo: 'AGENCIA_EDITADA',
@@ -803,6 +747,7 @@ export class PromotorService {
       dataVinculo: null,
       ultimoAcesso: null,
       ultimaSincronizacao: null,
+      atualizadoEm: agora,
       criadoPor: 'SISTEMA_PRINCIPAL',
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
@@ -811,8 +756,8 @@ export class PromotorService {
     this._promotores = [novoPromotor, ...this._promotores];
     await dbPut(STORES.PROMOTORES, novoPromotor);
 
-    // Salva no Firestore
-    this.syncDocToFirestore('promotores', promotorId, novoPromotor);
+    // Enfileira e sincroniza no Firestore (Promotor + Vínculo Promotor x Agência)
+    await comercialSyncService.registrarPromotorSync(novoPromotor, true);
 
     // Registra Auditoria + Histórico Comercial
     await this.registrarAuditoria({
@@ -892,6 +837,7 @@ export class PromotorService {
       }
     }
 
+    const agora = new Date().toISOString();
     const atualizado: Promotor = {
       ...promotor,
       nome: novoNome,
@@ -901,12 +847,13 @@ export class PromotorService {
       setores: novosSetores,
       setorId: novosSetores[0],
       setorNome: novosSetores.join(' • '),
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, true);
 
     const agenciaAnteriorChave = normalizarChaveAgencia(promotor.agenciaNome);
     const agenciaNovaChave = normalizarChaveAgencia(novaAgenciaNome);
@@ -973,16 +920,18 @@ export class PromotorService {
 
     if (mesmaAgencia) return promotor;
 
+    const agora = new Date().toISOString();
     const atualizado: Promotor = {
       ...promotor,
       agenciaId: destino.agenciaId,
       agenciaNome: destino.nome,
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, true);
 
     const tinhaAgencia = !isAgenciaSemVinculoNome(anteriorNome);
     await this.registrarMovimentacaoComercial({
@@ -1049,12 +998,13 @@ export class PromotorService {
       motivoInativacao: opcoes?.inativarPromotor
         ? (opcoes.motivo?.trim() || 'Desligado da agência')
         : promotor.motivoInativacao,
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, true);
 
     await this.registrarMovimentacaoComercial({
       tipo: 'PROMOTOR_DESVINCULADO_AGENCIA',
@@ -1106,12 +1056,13 @@ export class PromotorService {
       status: 'INATIVO',
       inativadoEm: agora,
       motivoInativacao: motivo?.trim() || 'Inativado administrativamente',
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, true);
 
     await this.registrarMovimentacaoComercial({
       tipo: 'PROMOTOR_INATIVADO',
@@ -1168,12 +1119,13 @@ export class PromotorService {
       agenciaId,
       agenciaNome,
       reativadoEm: agora,
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, true);
 
     await this.registrarMovimentacaoComercial({
       tipo: 'PROMOTOR_REATIVADO',
@@ -1244,6 +1196,9 @@ export class PromotorService {
         cnpjFormatado?: string;
         nome: string;
       }>;
+      vinculosCriados?: VinculoPromotorIndustria[];
+      vinculosRemovidos?: VinculoPromotorIndustria[];
+      syncJaEnfileirado?: boolean;
       rollback?: () => Promise<void>;
     }>;
     persistirSubstituicaoHook?: () => Promise<void>;
@@ -1263,6 +1218,8 @@ export class PromotorService {
     const substitutoBase = this.getPromotorById(params.promotorSubstitutoId);
     if (!substitutoBase) throw new Error('Promotor substituto não encontrado.');
 
+    const agora = new Date().toISOString();
+
     let substitutoAlvo: Promotor = { ...substitutoBase };
     let substitutoAgenciaAlterada = false;
     let agenciaSubstitutoAnteriorNome = substitutoBase.agenciaNome;
@@ -1278,6 +1235,7 @@ export class PromotorService {
           ...substitutoBase,
           agenciaId: agDestino.agenciaId,
           agenciaNome: agDestino.nome,
+          atualizadoEm: agora,
           atualizadoPor: 'SISTEMA_PRINCIPAL',
         };
         substitutoAgenciaAlterada = true;
@@ -1290,7 +1248,6 @@ export class PromotorService {
     const snapshotHistorico = this._historicoMovimentacoes.map((h) => ({ ...h }));
     const snapshotAuditorias = this._auditorias.map((a) => ({ ...a }));
 
-    const agora = new Date().toISOString();
     const motivoLimpo = params.motivo?.trim() || 'Substituição comercial de promotor';
     const modoTransferencia: 'TODAS' | 'MANUAL' | 'NENHUMA' =
       params.confirmarTransferenciaVinculosIndustrias === true
@@ -1306,6 +1263,9 @@ export class PromotorService {
       cnpjFormatado?: string;
       nome: string;
     }> = [];
+    let vinculosIndustriaCriados: VinculoPromotorIndustria[] = [];
+    let vinculosIndustriaRemovidos: VinculoPromotorIndustria[] = [];
+    let vinculosIndSyncJaEnfileirado = false;
     let rollbackVinculos: (() => Promise<void>) | undefined;
 
     try {
@@ -1321,6 +1281,9 @@ export class PromotorService {
           cnpjsJaExistentesNoDestino = det.cnpjsJaExistentesNoDestino || [];
           cnpjsOrigemAntes = det.cnpjsOrigemAntes || [];
           industriasTransferidasDetalhes = det.industriasTransferidasDetalhes || [];
+          vinculosIndustriaCriados = det.vinculosCriados || [];
+          vinculosIndustriaRemovidos = det.vinculosRemovidos || [];
+          vinculosIndSyncJaEnfileirado = Boolean(det.syncJaEnfileirado);
           rollbackVinculos = det.rollback;
         } else if (params.onTransferirVinculos) {
           cnpjsTransferidos = await params.onTransferirVinculos(
@@ -1348,13 +1311,14 @@ export class PromotorService {
         motivoInativacao: params.inativarAntigo ? motivoLimpo : antigo.motivoInativacao,
         substituidoPorPromotorId: substitutoAlvo.promotorId,
         substituidoPorPromotorNome: substitutoAlvo.nome,
+        atualizadoEm: agora,
         atualizadoPor: 'SISTEMA_PRINCIPAL',
       };
 
       const nextVinculos = params.inativarAntigo
         ? snapshotVinculos.map((v) =>
             v.promotorId === antigo.promotorId && v.status === 'AGUARDANDO'
-              ? { ...v, status: 'CANCELADO' as const }
+              ? { ...v, status: 'CANCELADO' as const, atualizadoEm: agora }
               : v
           )
         : snapshotVinculos;
@@ -1514,14 +1478,16 @@ export class PromotorService {
       this._historicoMovimentacoes = nextHistorico;
       this._auditorias = nextAuditorias;
 
-      this.syncDocToFirestore('promotores', antigoAtualizado.promotorId, antigoAtualizado);
-      if (substitutoAgenciaAlterada) {
-        this.syncDocToFirestore('promotores', substitutoAlvo.promotorId, substitutoAlvo);
-      }
-      for (const vc of vinculosCancelados) {
-        this.syncDocToFirestore('vinculosPromotor', vc.vinculoId, vc);
-        this.syncDocToFirestore('vinculos_promotores', vc.vinculoId, vc);
-      }
+      await comercialSyncService.registrarSubstituicaoAtomicaSync({
+        promotoresAlterados: substitutoAgenciaAlterada
+          ? [antigoAtualizado, substitutoAlvo]
+          : [antigoAtualizado],
+        vinculosDispositivoCancelados: vinculosCancelados,
+        vinculosIndustriaCriados: !vinculosIndSyncJaEnfileirado ? vinculosIndustriaCriados : [],
+        vinculosIndustriaRemovidos: !vinculosIndSyncJaEnfileirado ? vinculosIndustriaRemovidos : [],
+        movimentacoes: novasMovimentacoes,
+      });
+
       this.syncDocToFirestore('auditoria', novaAuditoria.auditoriaId, novaAuditoria);
       this.syncDocToFirestore('auditoria_promotores', novaAuditoria.auditoriaId, novaAuditoria);
 
@@ -1565,15 +1531,17 @@ export class PromotorService {
       throw new Error('Promotor não encontrado.');
     }
 
+    const agora = new Date().toISOString();
     const atualizado: Promotor = {
       ...promotor,
       permissoes: { ...novasPermissoes },
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, false);
 
     await this.registrarAuditoria({
       promotorId,
@@ -1584,7 +1552,7 @@ export class PromotorService {
       setorId: atualizado.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorNovo: 'Permissões atualizadas pelo Administrador',
-      dataHora: new Date().toISOString(),
+      dataHora: agora,
       statusSincronizacao: 'SINCRONIZADO',
     });
 
@@ -1600,15 +1568,17 @@ export class PromotorService {
     // Cancelar qualquer vínculo ativo
     await this.cancelarVinculoAtivoDePromotor(promotorId);
 
+    const agora = new Date().toISOString();
     const atualizado: Promotor = {
       ...promotor,
       status: 'BLOQUEADO',
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, false);
 
     await this.registrarAuditoria({
       promotorId,
@@ -1620,7 +1590,7 @@ export class PromotorService {
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: promotor.status,
       valorNovo: `BLOQUEADO: ${motivo || 'Acesso suspenso pelo Administrador'}`,
-      dataHora: new Date().toISOString(),
+      dataHora: agora,
       statusSincronizacao: 'SINCRONIZADO',
     });
 
@@ -1634,16 +1604,18 @@ export class PromotorService {
     if (!promotor) throw new Error('Promotor não encontrado.');
 
     const novoStatus: StatusPromotor = promotor.dispositivoVinculado ? 'ATIVO' : 'PENDENTE_VINCULO';
+    const agora = new Date().toISOString();
 
     const atualizado: Promotor = {
       ...promotor,
       status: novoStatus,
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, false);
 
     await this.registrarAuditoria({
       promotorId,
@@ -1655,7 +1627,7 @@ export class PromotorService {
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: 'BLOQUEADO',
       valorNovo: novoStatus,
-      dataHora: new Date().toISOString(),
+      dataHora: agora,
       statusSincronizacao: 'SINCRONIZADO',
     });
 
@@ -1672,18 +1644,20 @@ export class PromotorService {
     await this.cancelarVinculoAtivoDePromotor(promotorId);
 
     const dispositivoNome = promotor.dispositivoVinculado?.dispositivoNome || 'Dispositivo';
+    const agora = new Date().toISOString();
 
     const atualizado: Promotor = {
       ...promotor,
       status: 'PENDENTE_VINCULO',
       dispositivoVinculado: null,
       dataVinculo: null,
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_PRINCIPAL',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, false);
 
     await this.registrarAuditoria({
       promotorId,
@@ -1695,7 +1669,7 @@ export class PromotorService {
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: dispositivoNome,
       valorNovo: 'Dispositivo desvinculado. Status: PENDENTE_VINCULO',
-      dataHora: new Date().toISOString(),
+      dataHora: agora,
       statusSincronizacao: 'SINCRONIZADO',
     });
 
@@ -1734,6 +1708,7 @@ export class PromotorService {
 
     const vinculoId = `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
+    const agoraIso = agora.toISOString();
     const novoVinculo: VinculoPromotor = {
       vinculoId,
       promotorId: promotor.promotorId,
@@ -1747,18 +1722,18 @@ export class PromotorService {
       permissoes: promotor.permissoes,
       codigoVinculo: codigo6,
       tokenVinculo,
-      dataCriacao: agora.toISOString(),
+      dataCriacao: agoraIso,
       dataExpiracao: expiracao.toISOString(),
       status: 'AGUARDANDO',
       dispositivoId: null,
       dispositivoNome: null,
       dataUtilizacao: null,
+      atualizadoEm: agoraIso,
     };
 
     this._vinculos = [novoVinculo, ...this._vinculos];
     await dbPut(STORES.VINCULOS_PROMOTORES, novoVinculo);
-    this.syncDocToFirestore('vinculosPromotor', vinculoId, novoVinculo);
-    this.syncDocToFirestore('vinculos_promotores', vinculoId, novoVinculo);
+    await comercialSyncService.registrarVinculoDispositivoSync(novoVinculo);
 
     await this.registrarAuditoria({
       promotorId: promotor.promotorId,
@@ -1769,7 +1744,7 @@ export class PromotorService {
       setorId: promotor.setorId,
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorNovo: `Novo vínculo gerado (Código: ${codigo6}, validade 30 min)`,
-      dataHora: agora.toISOString(),
+      dataHora: agoraIso,
       statusSincronizacao: 'SINCRONIZADO',
     });
 
@@ -1781,15 +1756,16 @@ export class PromotorService {
     const vinculo = this._vinculos.find((v) => v.vinculoId === vinculoId);
     if (!vinculo) return;
 
+    const agora = new Date().toISOString();
     const atualizado: VinculoPromotor = {
       ...vinculo,
       status: 'CANCELADO',
+      atualizadoEm: agora,
     };
 
     this._vinculos = this._vinculos.map((v) => (v.vinculoId === vinculoId ? atualizado : v));
     await dbPut(STORES.VINCULOS_PROMOTORES, atualizado);
-    this.syncDocToFirestore('vinculosPromotor', vinculoId, atualizado);
-    this.syncDocToFirestore('vinculos_promotores', vinculoId, atualizado);
+    await comercialSyncService.registrarVinculoDispositivoSync(atualizado);
 
     await this.registrarAuditoria({
       promotorId: vinculo.promotorId,
@@ -1799,7 +1775,7 @@ export class PromotorService {
       tipoAcao: 'SINCRONIZOU_ALTERACAO',
       valorAnterior: vinculo.status,
       valorNovo: 'Vínculo CANCELADO pelo Administrador',
-      dataHora: new Date().toISOString(),
+      dataHora: agora,
       statusSincronizacao: 'SINCRONIZADO',
     });
 
@@ -1810,16 +1786,18 @@ export class PromotorService {
     const pendentes = this._vinculos.filter(
       (v) => v.promotorId === promotorId && v.status === 'AGUARDANDO'
     );
+    const agora = new Date().toISOString();
     for (const v of pendentes) {
       v.status = 'CANCELADO';
+      v.atualizadoEm = agora;
       await dbPut(STORES.VINCULOS_PROMOTORES, v);
-      this.syncDocToFirestore('vinculosPromotor', v.vinculoId, v);
-      this.syncDocToFirestore('vinculos_promotores', v.vinculoId, v);
+      await comercialSyncService.registrarVinculoDispositivoSync(v);
     }
   }
 
   public verificarExpiracaoVinculos(): void {
     const agora = Date.now();
+    const agoraIso = new Date(agora).toISOString();
     let mudou = false;
 
     for (const v of this._vinculos) {
@@ -1827,10 +1805,12 @@ export class PromotorService {
         const expTime = new Date(v.dataExpiracao).getTime();
         if (agora > expTime) {
           v.status = 'EXPIRADO';
+          v.atualizadoEm = agoraIso;
           mudou = true;
           dbPut(STORES.VINCULOS_PROMOTORES, v).catch(() => {});
-          this.syncDocToFirestore('vinculosPromotor', v.vinculoId, v);
-          this.syncDocToFirestore('vinculos_promotores', v.vinculoId, v);
+          if (typeof window !== 'undefined' && authRoleService.isGerenciaAdminVerificadaNoServidor()) {
+            void comercialSyncService.registrarVinculoDispositivoSync(v).catch(() => {});
+          }
         }
       }
     }
@@ -1860,9 +1840,9 @@ export class PromotorService {
     vinculo.dispositivoId = dispositivo.id;
     vinculo.dispositivoNome = dispositivo.nome;
     vinculo.dataUtilizacao = agora;
+    vinculo.atualizadoEm = agora;
     await dbPut(STORES.VINCULOS_PROMOTORES, vinculo);
-    this.syncDocToFirestore('vinculosPromotor', vinculo.vinculoId, vinculo);
-    this.syncDocToFirestore('vinculos_promotores', vinculo.vinculoId, vinculo);
+    await comercialSyncService.registrarVinculoDispositivoSync(vinculo);
 
     // 2. Atualiza o promotor
     const promotor = this.getPromotorById(vinculo.promotorId);
@@ -1882,12 +1862,13 @@ export class PromotorService {
       dataVinculo: agora,
       ultimoAcesso: agora,
       ultimaSincronizacao: agora,
+      atualizadoEm: agora,
       atualizadoPor: 'SISTEMA_VINCULO',
     };
 
     this._promotores = this._promotores.map((p) => (p.promotorId === promotor.promotorId ? atualizado : p));
     await dbPut(STORES.PROMOTORES, atualizado);
-    this.syncDocToFirestore('promotores', atualizado.promotorId, atualizado);
+    await comercialSyncService.registrarPromotorSync(atualizado, false);
 
     await this.registrarAuditoria({
       promotorId: atualizado.promotorId,
@@ -2057,8 +2038,9 @@ export class PromotorService {
       // 3. Atualizar Presença e Sincronização do Promotor
       promotor.ultimoAcesso = agora;
       promotor.ultimaSincronizacao = agora;
+      promotor.atualizadoEm = agora;
       await dbPut(STORES.PROMOTORES, promotor);
-      this.syncDocToFirestore('promotores', promotor.promotorId, promotor);
+      await comercialSyncService.registrarPromotorSync(promotor, false);
 
       // 4. Salvar operação como processada
       const opSucesso: OperacaoPromotorSync = {
@@ -2131,12 +2113,6 @@ export class PromotorService {
     };
 
     try {
-      // Desativar eventuais listeners remotos de promotores antes da troca atômica
-      this._firestoreUnsubs.forEach((u) => {
-        try { u(); } catch {}
-      });
-      this._firestoreUnsubs = [];
-
       const promotoresUnicosMap = new Map<string, Promotor>();
       for (const p of params.promotores) {
         if (p && p.promotorId) {
@@ -2210,6 +2186,27 @@ export class PromotorService {
 
   private syncDocToFirestore<T>(collectionName: string, docId: string, data: T) {
     if (!db || isFirestoreQuotaExceeded() || isModoAtualizacaoLocalAtivo()) return;
+
+    const colecoesRestritasGerencia = new Set([
+      'promotores',
+      'agencias',
+      'vinculosPromotor',
+      'vinculos_promotores',
+      'vinculos_promotor_industria',
+      'vinculosPromotorAgencia',
+      'vinculos_comerciais',
+    ]);
+
+    if (
+      colecoesRestritasGerencia.has(collectionName) &&
+      !authRoleService.isGerenciaAdminVerificadaNoServidor()
+    ) {
+      console.warn(
+        `[PromotorService] Gravação na nuvem bloqueada para "${collectionName}/${docId}": requer autenticação Google verificada da Gerência (Filial 172).`
+      );
+      return;
+    }
+
     try {
       const docRef = doc(db, collectionName, docId);
       setDoc(docRef, cleanForFirestore(data), { merge: true }).catch((err) => {

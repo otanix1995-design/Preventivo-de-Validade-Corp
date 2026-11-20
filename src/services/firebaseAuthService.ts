@@ -18,7 +18,6 @@ import {
 import {
   doc,
   getDoc,
-  setDoc,
   onSnapshot,
   Unsubscribe,
 } from 'firebase/firestore';
@@ -31,7 +30,7 @@ import {
   isQuotaError,
   markQuotaExceeded,
 } from './firebase';
-import { authRoleService, PapelOperacional, UsuarioOperacional } from './authRoleService';
+import { authRoleService, PapelOperacional } from './authRoleService';
 
 export interface PerfilServidorUsuario {
   uid: string;
@@ -56,8 +55,8 @@ export interface EstadoAuthServidor {
   carregando: boolean;
 }
 
-// E-mail do administrador padrão para bootstrap seguro da Filial 172
-const ADMIN_BOOTSTRAP_EMAIL = 'jottarms@gmail.com';
+// E-mail do administrador padrão para bootstrap seguro da Filial 172 (exige emailVerified === true)
+export const ADMIN_BOOTSTRAP_EMAIL = 'jottarms@gmail.com';
 
 class FirebaseAuthService {
   private _estado: EstadoAuthServidor = {
@@ -99,8 +98,13 @@ class FirebaseAuthService {
         });
 
         if (!isAnon) {
-          await this._carregarOuProvisionarPerfilServidor(user);
+          await this._carregarPerfilServidor(user);
         } else {
+          authRoleService.aplicarSessaoServidorVerificada({
+            autenticado: false,
+            isVerificadoServidor: false,
+            uid: user.uid,
+          });
           this._atualizarEstado({
             isVerificadoServidor: false,
             perfil: null,
@@ -109,6 +113,10 @@ class FirebaseAuthService {
           });
         }
       } else {
+        authRoleService.aplicarSessaoServidorVerificada({
+          autenticado: false,
+          isVerificadoServidor: false,
+        });
         this._atualizarEstado({
           isAutenticado: false,
           isAnonimo: true,
@@ -123,10 +131,62 @@ class FirebaseAuthService {
     });
   }
 
-  private async _carregarOuProvisionarPerfilServidor(user: User): Promise<void> {
-    if (!db) return;
+  private async _carregarPerfilServidor(user: User): Promise<void> {
+    if (!db) {
+      authRoleService.aplicarSessaoServidorVerificada({
+        autenticado: false,
+        isVerificadoServidor: false,
+        uid: user.uid,
+        email: user.email,
+      });
+      return;
+    }
+
     if (isFirestoreQuotaExceeded()) {
+      const isBootstrapEmail =
+        Boolean(user.email) &&
+        user.emailVerified === true &&
+        user.email!.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
+
+      if (isBootstrapEmail) {
+        const perfilBootstrap: PerfilServidorUsuario = {
+          uid: user.uid,
+          email: user.email,
+          nome: user.displayName || 'Gerência Filial 172',
+          matricula: '172001',
+          filialId: '172',
+          papel: 'GERENCIA_ADMIN',
+          ativo: true,
+          criadoEm: new Date().toISOString(),
+        };
+        authRoleService.aplicarSessaoServidorVerificada({
+          autenticado: true,
+          isVerificadoServidor: true,
+          uid: user.uid,
+          email: user.email,
+          nome: perfilBootstrap.nome,
+          matricula: perfilBootstrap.matricula,
+          filialId: '172',
+          papel: 'GERENCIA_ADMIN',
+        });
+        this._atualizarEstado({
+          isVerificadoServidor: true,
+          perfil: perfilBootstrap,
+          carregando: false,
+          mensagem: 'Gerência autorizada (cota Spark local — e-mail verificado Filial 172).',
+        });
+        return;
+      }
+
+      authRoleService.aplicarSessaoServidorVerificada({
+        autenticado: true,
+        isVerificadoServidor: false,
+        uid: user.uid,
+        email: user.email,
+      });
       this._atualizarEstado({
+        isVerificadoServidor: false,
+        perfil: null,
         carregando: false,
         mensagem: 'Modo local ativo (cota diária Spark aguardando liberação).',
       });
@@ -139,22 +199,29 @@ class FirebaseAuthService {
 
       if (snap.exists()) {
         const perfil = snap.data() as PerfilServidorUsuario;
+        const verificado =
+          perfil.ativo === true &&
+          perfil.filialId === '172' &&
+          (perfil.papel !== 'GERENCIA_ADMIN' || user.emailVerified === true);
+
         this._atualizarEstado({
-          isVerificadoServidor: perfil.ativo === true,
+          isVerificadoServidor: verificado,
           perfil,
           carregando: false,
-          mensagem: perfil.ativo
+          mensagem: verificado
             ? `Autorizado na Filial ${perfil.filialId} (${perfil.papel})`
-            : 'Usuário desativado pelo administrador',
+            : 'Usuário desativado, sem verificação de e-mail ou filial não autorizada',
         });
 
-        // Sincroniza com o serviço de papéis operacional local
-        authRoleService.setUsuario({
-          id: user.uid,
+        authRoleService.aplicarSessaoServidorVerificada({
+          autenticado: true,
+          isVerificadoServidor: verificado,
+          uid: user.uid,
+          email: user.email,
           nome: perfil.nome || user.displayName || 'Usuário Autorizado',
           matricula: perfil.matricula || '172001',
           filialId: perfil.filialId || '172',
-          papel: perfil.papel,
+          papel: verificado ? perfil.papel : 'OPERADOR_LOJA',
         });
 
         // Escuta alterações em tempo real do documento no servidor (ex: revogação de permissão)
@@ -163,11 +230,38 @@ class FirebaseAuthService {
           (docSnap) => {
             if (docSnap.exists()) {
               const atualizado = docSnap.data() as PerfilServidorUsuario;
+              const ativoVerificado =
+                atualizado.ativo === true &&
+                atualizado.filialId === '172' &&
+                (atualizado.papel !== 'GERENCIA_ADMIN' || user.emailVerified === true);
+
               this._atualizarEstado({
-                isVerificadoServidor: atualizado.ativo === true,
+                isVerificadoServidor: ativoVerificado,
                 perfil: atualizado,
               });
-              authRoleService.setUsuario({ papel: atualizado.papel, filialId: atualizado.filialId });
+              authRoleService.aplicarSessaoServidorVerificada({
+                autenticado: true,
+                isVerificadoServidor: ativoVerificado,
+                uid: user.uid,
+                email: user.email,
+                nome: atualizado.nome || user.displayName || 'Usuário Autorizado',
+                matricula: atualizado.matricula || '172001',
+                filialId: atualizado.filialId || '172',
+                papel: ativoVerificado ? atualizado.papel : 'OPERADOR_LOJA',
+              });
+            } else {
+              this._atualizarEstado({
+                isVerificadoServidor: false,
+                perfil: null,
+                mensagem: 'Perfil removido no servidor — privilégios administrativos revogados.',
+              });
+              authRoleService.aplicarSessaoServidorVerificada({
+                autenticado: true,
+                isVerificadoServidor: false,
+                uid: user.uid,
+                email: user.email,
+                papel: 'OPERADOR_LOJA',
+              });
             }
           },
           (err) => {
@@ -181,47 +275,92 @@ class FirebaseAuthService {
           }
         );
       } else {
-        // Se o usuário é o administrador inicial autorizado (jottarms@gmail.com), cria o registro mestre da Filial 172
-        const isMasterAdmin = user.email?.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
+        // Sem autoprovisionamento no Firestore (/usuarios_autorizados é somente leitura no cliente Web).
+        // Apenas a conta bootstrap oficial com emailVerified === true é reconhecida em memória para Gerência da Filial 172.
+        const isMasterAdmin =
+          Boolean(user.email) &&
+          user.emailVerified === true &&
+          user.email!.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
 
-        const novoPerfil: PerfilServidorUsuario = {
-          uid: user.uid,
-          email: user.email,
-          nome: user.displayName || (isMasterAdmin ? 'Administrador Central' : 'Operador Loja'),
-          matricula: isMasterAdmin ? '172001' : '172999',
-          filialId: '172',
-          papel: isMasterAdmin ? 'GERENCIA_ADMIN' : 'OPERADOR_LOJA',
-          ativo: true,
-          criadoEm: new Date().toISOString(),
-        };
+        if (isMasterAdmin) {
+          const perfilBootstrap: PerfilServidorUsuario = {
+            uid: user.uid,
+            email: user.email,
+            nome: user.displayName || 'Administrador Central Filial 172',
+            matricula: '172001',
+            filialId: '172',
+            papel: 'GERENCIA_ADMIN',
+            ativo: true,
+            criadoEm: new Date().toISOString(),
+          };
 
-        await setDoc(userDocRef, novoPerfil);
+          this._atualizarEstado({
+            isVerificadoServidor: true,
+            perfil: perfilBootstrap,
+            carregando: false,
+            mensagem: 'Gerência/Admin verificada na Filial 172 (conta bootstrap autorizada).',
+          });
 
-        this._atualizarEstado({
-          isVerificadoServidor: true,
-          perfil: novoPerfil,
-          carregando: false,
-          mensagem: `Perfil criado e autorizado para a Filial 172 (${novoPerfil.papel})`,
-        });
+          authRoleService.aplicarSessaoServidorVerificada({
+            autenticado: true,
+            isVerificadoServidor: true,
+            uid: user.uid,
+            email: user.email,
+            nome: perfilBootstrap.nome,
+            matricula: perfilBootstrap.matricula,
+            filialId: '172',
+            papel: 'GERENCIA_ADMIN',
+          });
+        } else {
+          this._atualizarEstado({
+            isVerificadoServidor: false,
+            perfil: null,
+            carregando: false,
+            mensagem:
+              'Conta Google autenticada sem registro em /usuarios_autorizados. Permissões administrativas permanecem bloqueadas.',
+          });
 
-        authRoleService.setUsuario({
-          id: user.uid,
-          nome: novoPerfil.nome,
-          matricula: novoPerfil.matricula,
-          filialId: novoPerfil.filialId,
-          papel: novoPerfil.papel,
-        });
+          authRoleService.aplicarSessaoServidorVerificada({
+            autenticado: true,
+            isVerificadoServidor: false,
+            uid: user.uid,
+            email: user.email,
+            nome: user.displayName || 'Operador Loja',
+            matricula: '172999',
+            filialId: '172',
+            papel: 'OPERADOR_LOJA',
+          });
+        }
       }
     } catch (err: any) {
       if (isQuotaError(err)) {
         markQuotaExceeded(err?.message, detectQuotaResourceType(err));
       }
       console.warn('[FirebaseAuthService] Falha ao verificar perfil no Firestore:', err?.message);
+      authRoleService.aplicarSessaoServidorVerificada({
+        autenticado: false,
+        isVerificadoServidor: false,
+        uid: user.uid,
+        email: user.email,
+      });
       this._atualizarEstado({
+        isVerificadoServidor: false,
+        perfil: null,
         carregando: false,
         mensagem: `Erro ao validar autorização no servidor: ${err?.message || 'Falha de leitura'}`,
       });
     }
+  }
+
+  public isGerenteAdminFilial172(): boolean {
+    return (
+      this._estado.isAutenticado &&
+      !this._estado.isAnonimo &&
+      this._estado.isVerificadoServidor &&
+      this._estado.perfil?.ativo === true &&
+      this._estado.perfil?.filialId === '172' &&
+      this._estado.perfil?.papel === 'GERENCIA_ADMIN'
+    );
   }
 
   public async loginComGoogle(): Promise<{ sucesso: boolean; mensagem: string }> {
@@ -253,6 +392,10 @@ class FirebaseAuthService {
       this._unsubDoc();
       this._unsubDoc = null;
     }
+    authRoleService.aplicarSessaoServidorVerificada({
+      autenticado: false,
+      isVerificadoServidor: false,
+    });
     if (auth) {
       await firebaseSignOut(auth).catch(() => null);
     }
@@ -285,3 +428,4 @@ class FirebaseAuthService {
 }
 
 export const firebaseAuthService = new FirebaseAuthService();
+

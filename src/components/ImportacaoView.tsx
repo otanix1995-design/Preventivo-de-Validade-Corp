@@ -270,6 +270,32 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         return;
       }
 
+      // Verificação estrita de autorização administrativa antes da publicação legada na nuvem
+      const permissaoSaeou = authRoleService.podePublicarRub();
+      if (!permissaoSaeou.permitido) {
+        const estadoSemPermissao = resolverEstadoPublicacaoImportacao(
+          'SAEOU060',
+          {
+            sucesso: false,
+            estadoPublicacao: 'RECUSADA_PERMISSAO',
+            versaoConfirmadaNoServidor: false,
+            mensagem:
+              permissaoSaeou.motivoRecusa ||
+              'Apenas usuários autenticados com perfil GERENCIA_ADMIN podem publicar o SAEOU060 na nuvem central.',
+            motivoRecusa: permissaoSaeou.motivoRecusa,
+          },
+          80,
+          `SAEOU060 gravado localmente (${resultado.registros.length} registros).`
+        );
+        setProgressPercent(estadoSemPermissao.progressPercent);
+        setProgressStatus(estadoSemPermissao.titulo);
+        setImportModalPhase(estadoSemPermissao.phase);
+        setImportModalDetail(estadoSemPermissao.detalheTecnico || estadoSemPermissao.mensagem);
+        setCloudFeedbackBanner(estadoSemPermissao);
+        if (onImportComplete) onImportComplete();
+        return;
+      }
+
       // Publicação centralizada legada (desativada no modo de pacote único da Filial 172)
       setProgressPercent(80);
       ultimoProgressoMapeado = 80;
@@ -377,32 +403,38 @@ export const ImportacaoView: React.FC<ImportacaoViewProps> = ({
         resultado.resumo
       );
 
-      // Modo atualização local por arquivo único (.zip): não envia SPCOI007 em massa ao Firestore
-      if (isModoAtualizacaoLocalAtivo()) {
-        setProgressPercent(100);
-        setProgressStatus('SPCOI007 salvo localmente com sucesso!');
-        setImportModalPhase('CONFIRMED');
-        setImportModalDetail(
-          `SPCOI007 gravado no IndexedDB (${resultado.fornecedores.length} fornecedores, ${resultado.industrias.length} indústrias). Pronto para empacotar manualmente em "BAIXAR ATUALIZAÇÃO ISV".`
+      // Arquitetura Híbrida V1.0 (Etapa 2): apenas SPCOI007 sincroniza via Firestore (BASE RUB e SAEOU060 permanecem via .zip).
+      // Verificação estrita de autorização administrativa antes da publicação na nuvem central:
+      const permissaoSpcoi = authRoleService.podePublicarRub();
+      if (!permissaoSpcoi.permitido) {
+        const estadoSemPermissao = resolverEstadoPublicacaoImportacao(
+          'SPCOI007',
+          {
+            sucesso: false,
+            estadoPublicacao: 'RECUSADA_PERMISSAO',
+            versaoConfirmadaNoServidor: false,
+            mensagem:
+              permissaoSpcoi.motivoRecusa ||
+              'SPCOI007 salvo no IndexedDB local. Apenas GERENCIA_ADMIN autenticada pode publicar o SPCOI007 na nuvem central.',
+            motivoRecusa: permissaoSpcoi.motivoRecusa,
+          },
+          80,
+          `SPCOI007 gravado localmente (${resultado.fornecedores.length} fornecedores, ${resultado.industrias.length} indústrias).`
         );
-        setCloudFeedbackBanner({
-          phase: 'CONFIRMED',
-          progressPercent: 100,
-          titulo: 'SPCOI007 salvo no dispositivo (Filial 172)',
-          mensagem: `${resultado.fornecedores.length} fornecedores e ${resultado.industrias.length} indústrias salvos no IndexedDB sem consumir cota do Firestore.`,
-          shouldAutoClose: true,
-        });
+        setProgressPercent(estadoSemPermissao.progressPercent);
+        setProgressStatus(estadoSemPermissao.titulo);
+        setImportModalPhase(estadoSemPermissao.phase);
+        setImportModalDetail(estadoSemPermissao.detalheTecnico || estadoSemPermissao.mensagem);
+        setCloudFeedbackBanner(estadoSemPermissao);
         setUltimoResumoSpcoi(resultado.resumo);
         if (onImportComplete) onImportComplete();
-        await new Promise((r) => setTimeout(r, 1500));
-        setIsImportModalOpen(false);
         return;
       }
 
-      // Publicação centralizada legada
+      // Publicação compactada (fflate + tabular + Bytes + SHA-256) na nuvem central
       setProgressPercent(80);
       ultimoProgressoMapeado = 80;
-      setProgressStatus('Preparando envio do SPCOI007 para a nuvem central...');
+      setProgressStatus('Compactando e preparando publicação do SPCOI007 na nuvem central...');
       const resPub = await spcoiSyncService.publicarSpcoiCentral(
         resultado.fornecedores,
         resultado.industrias,

@@ -196,16 +196,28 @@ function makeProdutos(count: number, paddingChars = 240_000): ProdutoSMG[] {
   }));
 }
 
+function makeIncompressiblePadding(length: number, seedOffset: number): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  const chars = new Array<string>(length);
+  let x = (0x85ebca6b ^ (seedOffset + 1)) >>> 0;
+  for (let i = 0; i < length; i++) {
+    x ^= x << 13;
+    x ^= x >>> 17;
+    x ^= x << 5;
+    chars[i] = alphabet[(x >>> 0) & 63];
+  }
+  return chars.join('');
+}
+
 function makeSpcoi(count: number, paddingChars = 220_000): {
   fornecedores: FornecedorSPCOI007[];
   industrias: Industria[];
 } {
-  const pad = 'F'.repeat(paddingChars);
   const fornecedores: FornecedorSPCOI007[] = Array.from({ length: count }, (_, i) => ({
     id: `spcoi_spark_${i}`,
     cnpj: '99888777000166',
     cnpj_formatado: '99.888.777/0001-66',
-    razao_social: `INDUSTRIA SPARK LTDA ${pad}`,
+    razao_social: `INDUSTRIA SPARK LTDA ${makeIncompressiblePadding(paddingChars, i * 131)}`,
     codigo_interno: `${60000 + i}`,
     digito: '4',
     codigo_exibicao: `${60000 + i}-4`,

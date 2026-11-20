@@ -17,6 +17,7 @@ import { nuvemSyncEngine } from './nuvemSyncEngine';
 import { concurrentRubPublicationService } from './concurrentRubPublicationService';
 import { localInventoryService } from './localInventoryService';
 import { securityRulesValidator } from './securityRulesValidator';
+import { STORES } from './db';
 
 export interface TestItemResult {
   id: string;
@@ -55,8 +56,7 @@ export class NuvemV3TestSuite {
       if (typeof window !== 'undefined' && window.indexedDB) {
         backupSnapshot = await backupService.gerarSnapshotCompleto('172');
       } else {
-        // Ambiente isolado CLI: validação do motor de backup nas 18 tabelas estruturadas
-        const { STORES } = await import('./db');
+        // Ambiente isolado CLI: validação do motor de backup nas tabelas estruturadas
         const tabelas: Record<string, any[]> = {};
         Object.values(STORES).forEach((s) => {
           tabelas[s] = [{ id: `item_${s}_01` }];
@@ -68,6 +68,7 @@ export class NuvemV3TestSuite {
           hash |= 0;
         }
         const checksum = `CHK-${Math.abs(hash).toString(16).toUpperCase()}-${raw.length}`;
+        const totalStores = Object.values(STORES).length;
         backupSnapshot = {
           metadados: {
             app: 'Controle de Vencimentos & ISV Operacional',
@@ -75,8 +76,8 @@ export class NuvemV3TestSuite {
             filialId: '172',
             dataHoraIso: new Date().toISOString(),
             timestamp: Date.now(),
-            totalTabelas: 18,
-            totalRegistros: 18,
+            totalTabelas: totalStores,
+            totalRegistros: totalStores,
             contagemPorTabela: {},
             checksumSimples: checksum,
           },
@@ -86,12 +87,13 @@ export class NuvemV3TestSuite {
       }
       const validacao = backupService.validarIntegridade(backupSnapshot);
       const tabelasCount = Object.keys(backupSnapshot.tabelas).length;
+      const expectedTablesCount = Object.values(STORES).length;
 
       resultados.push({
         id: 'TESTE_1_BACKUP',
-        titulo: 'TESTE 1: Backup Completo de 18 Tabelas do IndexedDB',
-        descricao: 'Exportação íntegra de todas as 18 tabelas estruturadas + fila e tombstones em JSON',
-        sucesso: validacao.valido && tabelasCount === 18,
+        titulo: `TESTE 1: Backup Completo de ${expectedTablesCount} Tabelas do IndexedDB`,
+        descricao: `Exportação íntegra de todas as ${expectedTablesCount} tabelas estruturadas + fila e tombstones em JSON`,
+        sucesso: validacao.valido && tabelasCount === expectedTablesCount,
         tempoMs: Date.now() - t1Inicio,
         detalhes: `Exportadas ${tabelasCount} tabelas estruturadas com ${backupSnapshot.metadados.totalRegistros} registros. Checksum: ${backupSnapshot.metadados.checksumSimples}. Validação: Aprovada.`,
         dados: { tabelas: tabelasCount, totalRegistros: backupSnapshot.metadados.totalRegistros },
@@ -99,8 +101,8 @@ export class NuvemV3TestSuite {
     } catch (e: any) {
       resultados.push({
         id: 'TESTE_1_BACKUP',
-        titulo: 'TESTE 1: Backup Completo de 18 Tabelas do IndexedDB',
-        descricao: 'Exportação íntegra de todas as 18 tabelas estruturadas + fila e tombstones em JSON',
+        titulo: 'TESTE 1: Backup Completo das Tabelas do IndexedDB',
+        descricao: 'Exportação íntegra de todas as tabelas estruturadas + fila e tombstones em JSON',
         sucesso: false,
         tempoMs: Date.now() - t1Inicio,
         detalhes: `Falha no teste de backup: ${e?.message}`,
@@ -302,9 +304,9 @@ export class NuvemV3TestSuite {
       const permSemMotivo = authRoleService.podeExcluirLote('');
       const permComMotivo = authRoleService.podeExcluirLote('Lote recolhido pelo fornecedor');
 
-      // 3. Somente Gerência pode publicar BASE RUB
-      authRoleService.alternarPapel('GERENCIA_ADMIN', 'Gerente Teste');
-      const permGerentePub = authRoleService.podePublicarRub();
+      // 3. Tentativa local de escalonamento para GERENCIA_ADMIN SEM login Google verificado DEVE falhar
+      const resEscalacao = authRoleService.alternarPapel('GERENCIA_ADMIN', 'Gerente Teste');
+      const permGerenteSemLogin = authRoleService.podePublicarRub();
 
       // Restaurar papel padrão
       authRoleService.alternarPapel('CONFERENTE_ENCARREGADO', 'Encarregado Cascavel');
@@ -313,15 +315,16 @@ export class NuvemV3TestSuite {
         !permOperador.permitido &&
         !permSemMotivo.permitido &&
         permComMotivo.permitido &&
-        permGerentePub.permitido;
+        !resEscalacao.alterado &&
+        !permGerenteSemLogin.permitido;
 
       resultados.push({
         id: 'TESTE_6_RBAC',
-        titulo: 'TESTE 6: Autorização por Papel Operacional e Soft-Delete',
-        descricao: 'Validação do bloqueio a exclusões por operadores e exigência de justificativa documentada',
+        titulo: 'TESTE 6: Autorização por Papel, Soft-Delete e Bloqueio de Escalonamento',
+        descricao: 'Validação do bloqueio a exclusões por operadores, justificativa obrigatória e recusa de escalonamento local',
         sucesso: rbacOk,
         tempoMs: Date.now() - t6Inicio,
-        detalhes: 'Bloqueio estrito de exclusão para operadores comprovado. Exclusão por conferente requer motivo mínimo de 3 caracteres.',
+        detalhes: 'Bloqueio estrito de exclusão para operadores e recusa de escalonamento local para GERENCIA_ADMIN comprovados.',
       });
     } catch (e: any) {
       resultados.push({

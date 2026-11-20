@@ -283,6 +283,29 @@ export function utf8ByteLength(value: string): number {
   return value.length * 2;
 }
 
+/**
+ * Estima com precisão o tamanho real de um documento no Firestore,
+ * contabilizando campos binários (Bytes / Uint8Array) pelo byteLength real
+ * sem inflação de base64.
+ */
+export function estimateFirestorePayloadBytes(payload: Record<string, any>): number {
+  if (!payload || typeof payload !== 'object') return 0;
+  let binaryBytes = 0;
+  const nonBinary: Record<string, any> = {};
+
+  for (const [k, v] of Object.entries(payload)) {
+    if (v instanceof Uint8Array) {
+      binaryBytes += v.byteLength + utf8ByteLength(k) + 16;
+    } else if (v && typeof v === 'object' && typeof (v as any).toUint8Array === 'function') {
+      binaryBytes += (v as any).toUint8Array().byteLength + utf8ByteLength(k) + 16;
+    } else {
+      nonBinary[k] = v;
+    }
+  }
+
+  return binaryBytes + utf8ByteLength(JSON.stringify(nonBinary)) + 32;
+}
+
 export async function calcularChecksumSha256(conteudo: string): Promise<string> {
   if (typeof crypto !== 'undefined' && crypto.subtle) {
     try {
@@ -502,7 +525,7 @@ export async function executarEnvioChunksControlado<TChunk>(
       batch.map(async (chunkData, idxInBatch) => {
         const chunkIdx = i + idxInBatch;
         const payload = buildPayload(chunkData, chunkIdx, chunks.length);
-        const payloadBytes = utf8ByteLength(JSON.stringify(payload));
+        const payloadBytes = estimateFirestorePayloadBytes(payload);
         if (payloadBytes > MAX_FIRESTORE_DOC_UTF8_BYTES) {
           throw new Error(
             `Chunk chunk_${chunkIdx} excedeu o limite seguro do Firestore (${Math.round(payloadBytes / 1024)} KB).`

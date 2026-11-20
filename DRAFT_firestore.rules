@@ -3,12 +3,12 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // =========================================================================
-    // ISV | FILIAL 172 — REGRAS DE SEGURANÇA E GOVERNANÇA DO FIRESTORE (VERSÃO AUDITADA)
-    // ARQUITETURA HÍBRIDA: ACESSO SEM LOGIN PARA OPERAÇÃO + GERÊNCIA AUTENTICADA
+    // ISV | FILIAL 172 — REGRAS DE SEGURANÇA BLINDADAS (HIBRIDA V1.0 — ETAPA 1)
+    // ZERO-TRUST DEFAULT-DENY + AUTENTICAÇÃO REAL DA GERÊNCIA + PROTEÇÃO DE DADOS
     // =========================================================================
 
     // -------------------------------------------------------------------------
-    // 0. ZERO-TRUST DEFAULT-DENY
+    // 0. REDE DE SEGURANÇA GLOBAL (ZERO-TRUST DEFAULT-DENY)
     // Qualquer coleção, subcoleção ou rota não expressamente declarada é bloqueada.
     // -------------------------------------------------------------------------
     match /{document=**} {
@@ -16,31 +16,68 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------------
-    // FUNÇÕES AUXILIARES DE AUTENTICAÇÃO E PAPÉIS
+    // 1. PRIMITIVAS GLOBAIS DE IDENTIDADE, PATH E PAYLOAD
     // -------------------------------------------------------------------------
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string &&
+        id.size() >= 1 &&
+        id.size() <= 128 &&
+        id.matches('^[a-zA-Z0-9_.\\-]+$') &&
+        !id.matches('.*\\.\\..*');
+    }
 
     function isSignedIn() {
       return request.auth != null;
     }
 
-    function getUserDoc() {
+    function isAuthenticatedUser() {
+      return isSignedIn() &&
+        request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function isVerifiedEmail() {
+      return isAuthenticatedUser() &&
+        request.auth.token.email_verified == true;
+    }
+
+    function hasServerUserDoc() {
+      return exists(/databases/$(database)/documents/usuarios_autorizados/$(request.auth.uid));
+    }
+
+    function getServerUserDoc() {
       return get(/databases/$(database)/documents/usuarios_autorizados/$(request.auth.uid)).data;
     }
 
-    function isAuthorizedUser(filialId) {
-      return isSignedIn() &&
-        exists(/databases/$(database)/documents/usuarios_autorizados/$(request.auth.uid)) &&
-        getUserDoc().ativo == true &&
-        getUserDoc().filialId == filialId;
+    function isBootstrappedGerenteAdmin(filialId) {
+      return filialId == '172' &&
+        isVerifiedEmail() &&
+        request.auth.token.email == 'jottarms@gmail.com';
+    }
+
+    function isDbGerenteAdmin(filialId) {
+      return filialId == '172' &&
+        isVerifiedEmail() &&
+        hasServerUserDoc() &&
+        getServerUserDoc().ativo == true &&
+        getServerUserDoc().filialId == filialId &&
+        getServerUserDoc().papel == 'GERENCIA_ADMIN';
     }
 
     function isGerenteAdmin(filialId) {
-      return isAuthorizedUser(filialId) &&
-        getUserDoc().papel == 'GERENCIA_ADMIN';
+      return isBootstrappedGerenteAdmin(filialId) || isDbGerenteAdmin(filialId);
     }
 
     // -------------------------------------------------------------------------
-    // VALIDAÇÃO ESTRUTURAL DE LOTES DE VENCIMENTO (PÚBLICO SEM LOGIN)
+    // 2. VALIDAÇÃO ESTRUTURAL DE LOTES DE VENCIMENTO (OPERAÇÃO DE LOJA)
     // -------------------------------------------------------------------------
 
     function isAllowedLoteKeys(data) {
@@ -64,60 +101,103 @@ service cloud.firestore {
       ]);
     }
 
-    function isValidLoteCreate(filialId) {
-      let data = request.resource.data;
-      return isAllowedLoteKeys(data) &&
-        data.filialId == filialId &&
-        filialId == '172' &&
-        // Código do produto obrigatório (string alfanumérica de 1 a 20 chars)
-        ((data.codigoInterno is string && data.codigoInterno.size() >= 1 && data.codigoInterno.size() <= 20) ||
-         (data.codigo_interno is string && data.codigo_interno.size() >= 1 && data.codigo_interno.size() <= 20)) &&
-        // Data canônica de validade no formato YYYY-MM-DD (10 chars)
-        ((data.dataVencimento is string && data.dataVencimento.size() == 10) ||
-         (data.data_validade is string && data.data_validade.size() == 10)) &&
-        // Quantidade numérica válida (limites operacionais: 0 a 100.000 unidades)
-        ((data.quantidade is number && data.quantidade >= 0 && data.quantidade <= 100000) ||
-         (data.quantidade_total_unidades is number && data.quantidade_total_unidades >= 0 && data.quantidade_total_unidades <= 100000)) &&
-        // Preços opcionais não-negativos
+    function isValidLoteFieldTypes(data) {
+      return (!('id' in data) || (data.id is string && data.id.size() >= 1 && data.id.size() <= 128)) &&
+        (!('vencimentoId' in data) || (data.vencimentoId is string && data.vencimentoId.size() >= 1 && data.vencimentoId.size() <= 128)) &&
+        (!('codigoInterno' in data) || (data.codigoInterno is string && data.codigoInterno.size() >= 1 && data.codigoInterno.size() <= 20)) &&
+        (!('codigo_interno' in data) || (data.codigo_interno is string && data.codigo_interno.size() >= 1 && data.codigo_interno.size() <= 20)) &&
+        (!('digito' in data) || (data.digito is string && data.digito.size() <= 10)) &&
+        (!('codigo_exibicao' in data) || (data.codigo_exibicao is string && data.codigo_exibicao.size() <= 40)) &&
+        (!('descricao_produto' in data) || (data.descricao_produto is string && data.descricao_produto.size() <= 200)) &&
+        (!('descricao' in data) || (data.descricao is string && data.descricao.size() <= 200)) &&
+        (!('embalagem' in data) || (data.embalagem is string && data.embalagem.size() <= 40)) &&
+        (!('dataVencimento' in data) || (data.dataVencimento is string && data.dataVencimento.size() == 10)) &&
+        (!('data_validade' in data) || (data.data_validade is string && data.data_validade.size() == 10)) &&
+        (!('quantidade' in data) || (data.quantidade is number && data.quantidade >= 0 && data.quantidade <= 100000)) &&
+        (!('quantidade_total_unidades' in data) || (data.quantidade_total_unidades is number && data.quantidade_total_unidades >= 0 && data.quantidade_total_unidades <= 100000)) &&
         (!('precoNormal' in data) || data.precoNormal == null || (data.precoNormal is number && data.precoNormal >= 0 && data.precoNormal <= 100000)) &&
         (!('preco_normal' in data) || data.preco_normal == null || (data.preco_normal is number && data.preco_normal >= 0 && data.preco_normal <= 100000)) &&
         (!('precoTrabalhado' in data) || data.precoTrabalhado == null || (data.precoTrabalhado is number && data.precoTrabalhado >= 0 && data.precoTrabalhado <= 100000)) &&
         (!('preco_trabalhado' in data) || data.preco_trabalhado == null || (data.preco_trabalhado is number && data.preco_trabalhado >= 0 && data.preco_trabalhado <= 100000)) &&
         (!('observacao' in data) || data.observacao == null || (data.observacao is string && data.observacao.size() <= 500)) &&
-        (!('isDeleted' in data) || data.isDeleted == false);
+        (!('status' in data) || data.status == null || (data.status is string && data.status.size() <= 40)) &&
+        (!('status_customizado' in data) || data.status_customizado == null || (data.status_customizado is string && data.status_customizado.size() <= 40)) &&
+        (!('lote_identificador' in data) || data.lote_identificador == null || (data.lote_identificador is string && data.lote_identificador.size() <= 80)) &&
+        (!('origem' in data) || data.origem == null || (data.origem is string && data.origem.size() <= 60)) &&
+        (!('arquivo_origem' in data) || data.arquivo_origem == null || (data.arquivo_origem is string && data.arquivo_origem.size() <= 150)) &&
+        (!('saeou060_id' in data) || data.saeou060_id == null || (data.saeou060_id is string && data.saeou060_id.size() <= 128)) &&
+        (!('criadoPor' in data) || data.criadoPor == null || (data.criadoPor is string && data.criadoPor.size() <= 120)) &&
+        (!('atualizadoPor' in data) || data.atualizadoPor == null || (data.atualizadoPor is string && data.atualizadoPor.size() <= 120)) &&
+        (!('deviceId' in data) || data.deviceId == null || (data.deviceId is string && data.deviceId.size() <= 128)) &&
+        (!('operationId' in data) || data.operationId == null || (data.operationId is string && data.operationId.size() <= 128)) &&
+        (!('motivoExclusao' in data) || data.motivoExclusao == null || (data.motivoExclusao is string && data.motivoExclusao.size() <= 200)) &&
+        (!('usuarioExclusao' in data) || data.usuarioExclusao == null || (data.usuarioExclusao is string && data.usuarioExclusao.size() <= 120)) &&
+        (!('papelExclusao' in data) || data.papelExclusao == null || (data.papelExclusao is string && data.papelExclusao.size() <= 40));
+    }
+
+    function isValidLoteCreate(filialId) {
+      let data = incoming();
+      let hasCodigo = ('codigoInterno' in data && data.codigoInterno is string && data.codigoInterno.size() >= 1) ||
+                      ('codigo_interno' in data && data.codigo_interno is string && data.codigo_interno.size() >= 1);
+      let hasDataVal = ('dataVencimento' in data && data.dataVencimento is string && data.dataVencimento.size() == 10) ||
+                       ('data_validade' in data && data.data_validade is string && data.data_validade.size() == 10);
+      let hasQtde = ('quantidade' in data && data.quantidade is number) ||
+                    ('quantidade_total_unidades' in data && data.quantidade_total_unidades is number);
+      let isTombstoneByAdmin = data.isDeleted == true &&
+                               isGerenteAdmin(filialId) &&
+                               data.motivoExclusao is string &&
+                               data.motivoExclusao.size() >= 3 &&
+                               data.motivoExclusao.size() <= 200;
+      let isActiveLoteCreate = (!('isDeleted' in data) || data.isDeleted == false) && hasCodigo && hasDataVal && hasQtde;
+      return isAllowedLoteKeys(data) &&
+        isValidLoteFieldTypes(data) &&
+        data.filialId == filialId &&
+        filialId == '172' &&
+        (isActiveLoteCreate || isTombstoneByAdmin);
+    }
+
+    function isValidLoteImmutableFields(data, ex) {
+      return data.filialId == ex.filialId &&
+        (!('id' in ex) || !('id' in data) || data.id == ex.id) &&
+        (!('vencimentoId' in ex) || !('vencimentoId' in data) || data.vencimentoId == ex.vencimentoId) &&
+        (!('codigo_interno' in ex) || !('codigo_interno' in data) || data.codigo_interno == ex.codigo_interno) &&
+        (!('codigoInterno' in ex) || !('codigoInterno' in data) || data.codigoInterno == ex.codigoInterno) &&
+        (!('digito' in ex) || !('digito' in data) || data.digito == ex.digito) &&
+        (!('codigo_exibicao' in ex) || !('codigo_exibicao' in data) || data.codigo_exibicao == ex.codigo_exibicao) &&
+        (!('origem' in ex) || !('origem' in data) || data.origem == ex.origem) &&
+        (!('saeou060_id' in ex) || !('saeou060_id' in data) || data.saeou060_id == ex.saeou060_id) &&
+        (!('arquivo_origem' in ex) || !('arquivo_origem' in data) || data.arquivo_origem == ex.arquivo_origem) &&
+        (!('criado_em' in ex) || !('criado_em' in data) || data.criado_em == ex.criado_em) &&
+        (!('criadoEm' in ex) || !('criadoEm' in data) || data.criadoEm == ex.criadoEm) &&
+        (!('createdAt' in ex) || !('createdAt' in data) || data.createdAt == ex.createdAt) &&
+        (!('criadoPor' in ex) || !('criadoPor' in data) || data.criadoPor == ex.criadoPor) &&
+        (!('criadoPorMatricula' in ex) || !('criadoPorMatricula' in data) || data.criadoPorMatricula == ex.criadoPorMatricula) &&
+        (!('criadoPorPapel' in ex) || !('criadoPorPapel' in data) || data.criadoPorPapel == ex.criadoPorPapel);
     }
 
     function isValidLoteUpdate(filialId) {
-      let data = request.resource.data;
-      let existing = resource.data;
+      let data = incoming();
+      let ex = existing();
       return isAllowedLoteKeys(data) &&
-        // 1. Filial é rigorosamente IMUTÁVEL
-        data.filialId == existing.filialId &&
+        isValidLoteFieldTypes(data) &&
         data.filialId == filialId &&
         filialId == '172' &&
-        // 2. Identificadores primários são rigorosamente IMUTÁVEIS
-        (!('id' in existing) || !('id' in data) || data.id == existing.id) &&
-        (!('vencimentoId' in existing) || !('vencimentoId' in data) || data.vencimentoId == existing.vencimentoId) &&
-        // 3. Vínculo do lote com o produto é rigorosamente IMUTÁVEL (impede reatribuição a outro SKU)
-        (!('codigo_interno' in existing) || !('codigo_interno' in data) || data.codigo_interno == existing.codigo_interno) &&
-        (!('codigoInterno' in existing) || !('codigoInterno' in data) || data.codigoInterno == existing.codigoInterno) &&
-        (!('digito' in existing) || !('digito' in data) || data.digito == existing.digito) &&
-        (!('codigo_exibicao' in existing) || !('codigo_exibicao' in data) || data.codigo_exibicao == existing.codigo_exibicao) &&
-        // 4. Origem do lote é rigorosamente IMUTÁVEL
-        (!('origem' in existing) || !('origem' in data) || data.origem == existing.origem) &&
-        (!('saeou060_id' in existing) || !('saeou060_id' in data) || data.saeou060_id == existing.saeou060_id) &&
-        (!('arquivo_origem' in existing) || !('arquivo_origem' in data) || data.arquivo_origem == existing.arquivo_origem) &&
-        // 5. Metadados de criação originais são rigorosamente IMUTÁVEIS
-        (!('criado_em' in existing) || !('criado_em' in data) || data.criado_em == existing.criado_em) &&
-        (!('criadoEm' in existing) || !('criadoEm' in data) || data.criadoEm == existing.criadoEm) &&
-        (!('createdAt' in existing) || !('createdAt' in data) || data.createdAt == existing.createdAt) &&
-        (!('criadoPor' in existing) || !('criadoPor' in data) || data.criadoPor == existing.criadoPor) &&
-        (!('criadoPorMatricula' in existing) || !('criadoPorMatricula' in data) || data.criadoPorMatricula == existing.criadoPorMatricula) &&
-        (!('criadoPorPapel' in existing) || !('criadoPorPapel' in data) || data.criadoPorPapel == existing.criadoPorPapel) &&
-        // 6. Limites numéricos de quantidade
-        ((!('quantidade' in data)) || (data.quantidade is number && data.quantidade >= 0 && data.quantidade <= 100000)) &&
-        ((!('quantidade_total_unidades' in data)) || (data.quantidade_total_unidades is number && data.quantidade_total_unidades >= 0 && data.quantidade_total_unidades <= 100000)) &&
-        // 7. Soft-delete exige justificativa documental válida
+        isValidLoteImmutableFields(data, ex) &&
+        data.diff(ex).affectedKeys().hasOnly([
+          'descricao_produto', 'descricao', 'embalagem', 'fator_embalagem',
+          'data_validade', 'dataVencimento',
+          'quantidade_total_unidades', 'quantidade',
+          'observacao', 'lote_identificador',
+          'status_customizado', 'status',
+          'enviar_ao_comprador', 'enviarParaComprador',
+          'preco_normal', 'precoNormal', 'preco_trabalhado', 'precoTrabalhado',
+          'data_preco',
+          'atualizado_em', 'atualizadoEm', 'updatedAt',
+          'atualizadoPor', 'atualizadoPorMatricula', 'atualizadoPorPapel',
+          'deviceId', 'operationId',
+          'isDeleted', 'deletedAt', 'motivoExclusao', 'usuarioExclusao', 'papelExclusao',
+          '_versaoLocal', '_serverVersion', '_syncedAt'
+        ]) &&
         (
           (!('isDeleted' in data) || data.isDeleted == false) ||
           (data.isDeleted == true && data.motivoExclusao is string && data.motivoExclusao.size() >= 3 && data.motivoExclusao.size() <= 200)
@@ -125,7 +205,7 @@ service cloud.firestore {
     }
 
     // -------------------------------------------------------------------------
-    // VALIDAÇÃO DE DIVERGÊNCIAS (ALERTAS OPERACIONAIS)
+    // 3. VALIDAÇÃO DE DIVERGÊNCIAS (ALERTAS OPERACIONAIS)
     // -------------------------------------------------------------------------
 
     function isValidDivergenciaKeys(data) {
@@ -136,27 +216,178 @@ service cloud.firestore {
       ]);
     }
 
-    function isValidDivergenciaCreate() {
-      let data = request.resource.data;
-      return isValidDivergenciaKeys(data) &&
+    function isValidDivergenciaTypes(data) {
+      return (!('id' in data) || (data.id is string && data.id.size() <= 128)) &&
         data.tipo is string && data.tipo.size() >= 3 && data.tipo.size() <= 60 &&
-        data.data_registro is string && data.data_registro.size() >= 10 &&
+        (!('origem' in data) || (data.origem is string && data.origem.size() <= 60)) &&
+        (!('codigo_interno' in data) || (data.codigo_interno is string && data.codigo_interno.size() <= 20)) &&
+        (!('identificador' in data) || (data.identificador is string && data.identificador.size() <= 80)) &&
+        (!('descricao' in data) || (data.descricao is string && data.descricao.size() <= 300)) &&
+        (!('descricao_problema' in data) || (data.descricao_problema is string && data.descricao_problema.size() <= 500)) &&
+        (!('detalhes' in data) || (data.detalhes is string && data.detalhes.size() <= 1000)) &&
         (!('status' in data) || data.status in ['ABERTA', 'RESOLVIDA']) &&
-        (!('impacto' in data) || data.impacto in ['BAIXO', 'MEDIO', 'ALTO']);
+        (!('impacto' in data) || data.impacto in ['BAIXO', 'MEDIO', 'ALTO']) &&
+        (!('data_registro' in data) || (data.data_registro is string && data.data_registro.size() >= 10 && data.data_registro.size() <= 60));
+    }
+
+    function isValidDivergenciaCreate() {
+      let data = incoming();
+      return isValidDivergenciaKeys(data) &&
+        data.keys().hasAll(['tipo', 'data_registro']) &&
+        isValidDivergenciaTypes(data);
     }
 
     function isValidDivergenciaUpdate() {
-      let data = request.resource.data;
-      let existing = resource.data;
+      let data = incoming();
+      let ex = existing();
       return isValidDivergenciaKeys(data) &&
-        (!('id' in existing) || !('id' in data) || data.id == existing.id) &&
-        (!('tipo' in existing) || !('tipo' in data) || data.tipo == existing.tipo) &&
-        (!('status' in data) || data.status in ['ABERTA', 'RESOLVIDA']);
+        isValidDivergenciaTypes(data) &&
+        (!('id' in ex) || !('id' in data) || data.id == ex.id) &&
+        (!('tipo' in ex) || !('tipo' in data) || data.tipo == ex.tipo) &&
+        data.diff(ex).affectedKeys().hasOnly([
+          'status', 'impacto', 'descricao', 'descricao_problema', 'detalhes', 'origem'
+        ]);
     }
 
     // -------------------------------------------------------------------------
-    // VALIDAÇÃO DAS OPERAÇÕES PÚBLICAS DE PROMOTORES
+    // 4. VALIDAÇÃO DE PROMOTORES, AGÊNCIAS E VÍNCULOS COMERCIAIS (GERÊNCIA)
     // -------------------------------------------------------------------------
+
+    function isValidPromotor(data) {
+      return data.keys().hasAll(['promotorId', 'nome', 'filialId']) &&
+        data.keys().hasOnly([
+          'promotorId', 'nome', 'agenciaId', 'agenciaNome', 'matricula',
+          'filialId', 'filialNome', 'setores', 'setorId', 'setorNome',
+          'status', 'permissoes', 'dispositivoVinculado',
+          'dataCadastro', 'dataVinculo', 'ultimoAcesso', 'ultimaSincronizacao',
+          'inativadoEm', 'reativadoEm', 'motivoInativacao',
+          'substituidoPorPromotorId', 'substituidoPorPromotorNome',
+          'criadoPor', 'atualizadoPor', 'atualizadoEm'
+        ]) &&
+        data.promotorId is string && data.promotorId.size() >= 1 && data.promotorId.size() <= 128 &&
+        data.nome is string && data.nome.size() >= 2 && data.nome.size() <= 150 &&
+        data.filialId == '172' &&
+        (!('agenciaId' in data) || data.agenciaId == null || (data.agenciaId is string && data.agenciaId.size() <= 128)) &&
+        (!('agenciaNome' in data) || data.agenciaNome == null || (data.agenciaNome is string && data.agenciaNome.size() <= 150)) &&
+        (!('matricula' in data) || data.matricula == null || (data.matricula is string && data.matricula.size() <= 40)) &&
+        (!('filialNome' in data) || data.filialNome == null || (data.filialNome is string && data.filialNome.size() <= 80)) &&
+        (!('motivoInativacao' in data) || data.motivoInativacao == null || (data.motivoInativacao is string && data.motivoInativacao.size() <= 300)) &&
+        (!('substituidoPorPromotorId' in data) || data.substituidoPorPromotorId == null || (data.substituidoPorPromotorId is string && data.substituidoPorPromotorId.size() <= 128)) &&
+        (!('substituidoPorPromotorNome' in data) || data.substituidoPorPromotorNome == null || (data.substituidoPorPromotorNome is string && data.substituidoPorPromotorNome.size() <= 150)) &&
+        (!('criadoPor' in data) || data.criadoPor == null || (data.criadoPor is string && data.criadoPor.size() <= 120)) &&
+        (!('atualizadoPor' in data) || data.atualizadoPor == null || (data.atualizadoPor is string && data.atualizadoPor.size() <= 120)) &&
+        (!('atualizadoEm' in data) || data.atualizadoEm == null || (data.atualizadoEm is string && data.atualizadoEm.size() <= 60)) &&
+        (!('setores' in data) || (data.setores is list && data.setores.size() <= 10 && (data.setores.size() == 0 || data.setores[0] is string))) &&
+        (!('status' in data) || data.status in ['ATIVO', 'BLOQUEADO', 'DESVINCULADO', 'PENDENTE_VINCULO', 'INATIVO']);
+    }
+
+    function isValidAgencia(data) {
+      return data.keys().hasAll(['agenciaId', 'nome', 'filialId']) &&
+        data.keys().hasOnly([
+          'agenciaId', 'nome', 'nomeNormalizado', 'filialId', 'ativo',
+          'cnpj', 'telefone', 'contato', 'observacoes',
+          'criadoEm', 'atualizadoEm',
+          'totalPromotores', 'totalPromotoresAtivos', 'totalIndustrias'
+        ]) &&
+        data.agenciaId is string && data.agenciaId.size() >= 1 && data.agenciaId.size() <= 128 &&
+        data.nome is string && data.nome.size() >= 2 && data.nome.size() <= 150 &&
+        data.filialId == '172' &&
+        (!('ativo' in data) || data.ativo is bool) &&
+        (!('cnpj' in data) || data.cnpj == null || (data.cnpj is string && data.cnpj.size() <= 30)) &&
+        (!('telefone' in data) || data.telefone == null || (data.telefone is string && data.telefone.size() <= 40)) &&
+        (!('contato' in data) || data.contato == null || (data.contato is string && data.contato.size() <= 150)) &&
+        (!('observacoes' in data) || data.observacoes == null || (data.observacoes is string && data.observacoes.size() <= 500));
+    }
+
+    function isValidVinculoComercial(data) {
+      return data.keys().hasAll(['filialId']) &&
+        data.keys().hasOnly([
+          'id', 'vinculoId', 'promotorId', 'promotorNome',
+          'agenciaId', 'agenciaNome', 'industriaId', 'cnpj',
+          'cnpjFormatado', 'industriaRazaoSocial', 'filialId',
+          'ativo', 'criadoEm', 'atualizadoEm', 'criadoPor', 'atualizadoPor'
+        ]) &&
+        data.filialId == '172' &&
+        (!('id' in data) || (data.id is string && data.id.size() >= 1 && data.id.size() <= 128)) &&
+        (!('promotorId' in data) || (data.promotorId is string && data.promotorId.size() >= 1 && data.promotorId.size() <= 128)) &&
+        (!('promotorNome' in data) || (data.promotorNome is string && data.promotorNome.size() <= 150)) &&
+        (!('agenciaId' in data) || data.agenciaId == null || (data.agenciaId is string && data.agenciaId.size() >= 1 && data.agenciaId.size() <= 128)) &&
+        (!('agenciaNome' in data) || data.agenciaNome == null || (data.agenciaNome is string && data.agenciaNome.size() <= 150)) &&
+        (!('industriaId' in data) || data.industriaId == null || (data.industriaId is string && data.industriaId.size() >= 1 && data.industriaId.size() <= 128)) &&
+        (!('industriaRazaoSocial' in data) || data.industriaRazaoSocial == null || (data.industriaRazaoSocial is string && data.industriaRazaoSocial.size() <= 200));
+    }
+
+    function isValidMovimentacaoComercial(data) {
+      return data.keys().hasAll(['id', 'filialId', 'tipo', 'dataHora', 'detalhes', 'realizadoPor']) &&
+        data.keys().hasOnly([
+          'id', 'filialId', 'tipo', 'dataHora', 'atualizadoEm',
+          'promotorId', 'promotorNome', 'promotorSubstitutoId', 'promotorSubstitutoNome',
+          'agenciaId', 'agenciaNome', 'agenciaAnteriorId', 'agenciaAnteriorNome',
+          'cnpjsTransferidos', 'industriasTransferidas', 'cnpjsOrigemAntes',
+          'cnpjsIgnoradosDuplicidade', 'modoTransferencia', 'inativacaoOrigem',
+          'motivo', 'detalhes', 'realizadoPor'
+        ]) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        data.filialId == '172' &&
+        data.tipo is string && data.tipo.size() >= 3 && data.tipo.size() <= 60 &&
+        data.dataHora is string && data.dataHora.size() >= 10 && data.dataHora.size() <= 60 &&
+        (!('atualizadoEm' in data) || data.atualizadoEm == null || (data.atualizadoEm is string && data.atualizadoEm.size() <= 60)) &&
+        data.detalhes is string && data.detalhes.size() <= 1000 &&
+        data.realizadoPor is string && data.realizadoPor.size() <= 120 &&
+        (!('motivo' in data) || data.motivo == null || (data.motivo is string && data.motivo.size() <= 500)) &&
+        (!('promotorId' in data) || data.promotorId == null || (data.promotorId is string && data.promotorId.size() <= 128)) &&
+        (!('promotorNome' in data) || data.promotorNome == null || (data.promotorNome is string && data.promotorNome.size() <= 150)) &&
+        (!('promotorSubstitutoId' in data) || data.promotorSubstitutoId == null || (data.promotorSubstitutoId is string && data.promotorSubstitutoId.size() <= 128)) &&
+        (!('promotorSubstitutoNome' in data) || data.promotorSubstitutoNome == null || (data.promotorSubstitutoNome is string && data.promotorSubstitutoNome.size() <= 150)) &&
+        (!('agenciaId' in data) || data.agenciaId == null || (data.agenciaId is string && data.agenciaId.size() <= 128)) &&
+        (!('agenciaNome' in data) || data.agenciaNome == null || (data.agenciaNome is string && data.agenciaNome.size() <= 150)) &&
+        (!('agenciaAnteriorId' in data) || data.agenciaAnteriorId == null || (data.agenciaAnteriorId is string && data.agenciaAnteriorId.size() <= 128)) &&
+        (!('agenciaAnteriorNome' in data) || data.agenciaAnteriorNome == null || (data.agenciaAnteriorNome is string && data.agenciaAnteriorNome.size() <= 150)) &&
+        (!('inativacaoOrigem' in data) || data.inativacaoOrigem is bool) &&
+        (!('modoTransferencia' in data) || data.modoTransferencia in ['TODAS', 'MANUAL', 'NENHUMA']) &&
+        (!('cnpjsTransferidos' in data) || (data.cnpjsTransferidos is list && data.cnpjsTransferidos.size() <= 500)) &&
+        (!('industriasTransferidas' in data) || (data.industriasTransferidas is list && data.industriasTransferidas.size() <= 500)) &&
+        (!('cnpjsOrigemAntes' in data) || (data.cnpjsOrigemAntes is list && data.cnpjsOrigemAntes.size() <= 500)) &&
+        (!('cnpjsIgnoradosDuplicidade' in data) || (data.cnpjsIgnoradosDuplicidade is list && data.cnpjsIgnoradosDuplicidade.size() <= 500));
+    }
+
+    // -------------------------------------------------------------------------
+    // 5. VALIDAÇÃO DE VÍNCULOS DE DISPOSITIVOS & SOLICITAÇÕES DE PROMOTORES
+    // -------------------------------------------------------------------------
+
+    function isValidVinculoDoc(data) {
+      return data.keys().hasAll(['vinculoId', 'promotorId', 'codigoVinculo', 'status']) &&
+        data.keys().hasOnly([
+          'vinculoId', 'promotorId', 'promotorNome', 'agenciaNome',
+          'filialId', 'filialNome', 'setores', 'setorId', 'setorNome',
+          'permissoes', 'codigoVinculo', 'tokenVinculo',
+          'dataCriacao', 'dataExpiracao', 'status',
+          'dispositivoId', 'dispositivoNome', 'dataUtilizacao', 'atualizadoEm'
+        ]) &&
+        data.vinculoId is string && data.vinculoId.size() >= 1 && data.vinculoId.size() <= 128 &&
+        data.promotorId is string && data.promotorId.size() >= 1 && data.promotorId.size() <= 128 &&
+        data.codigoVinculo is string && data.codigoVinculo.size() >= 4 && data.codigoVinculo.size() <= 20 &&
+        (!('tokenVinculo' in data) || data.tokenVinculo == null || (data.tokenVinculo is string && data.tokenVinculo.size() <= 128)) &&
+        (!('dispositivoId' in data) || data.dispositivoId == null || (data.dispositivoId is string && data.dispositivoId.size() <= 128)) &&
+        (!('dispositivoNome' in data) || data.dispositivoNome == null || (data.dispositivoNome is string && data.dispositivoNome.size() <= 150)) &&
+        (!('filialId' in data) || data.filialId == '172') &&
+        (!('setores' in data) || (data.setores is list && data.setores.size() <= 10 && (data.setores.size() == 0 || data.setores[0] is string))) &&
+        data.status in ['AGUARDANDO', 'UTILIZADO', 'EXPIRADO', 'CANCELADO'];
+    }
+
+    function isValidVinculoDeviceActivation() {
+      let data = incoming();
+      let ex = existing();
+      return ex.status == 'AGUARDANDO' &&
+        data.status == 'UTILIZADO' &&
+        data.vinculoId == ex.vinculoId &&
+        data.promotorId == ex.promotorId &&
+        data.codigoVinculo == ex.codigoVinculo &&
+        (!('tokenVinculo' in ex) || data.tokenVinculo == ex.tokenVinculo) &&
+        (!('filialId' in ex) || data.filialId == ex.filialId) &&
+        data.dispositivoId is string && data.dispositivoId.size() >= 3 && data.dispositivoId.size() <= 128 &&
+        data.diff(ex).affectedKeys().hasOnly(['status', 'dispositivoId', 'dispositivoNome', 'dataUtilizacao', 'atualizadoEm']);
+    }
 
     function isValidSolicitacaoPromotorKeys(data) {
       return data.keys().hasOnly([
@@ -177,218 +408,357 @@ service cloud.firestore {
       ]);
     }
 
+    function isValidSolicitacaoPromotorTypes(data) {
+      return data.filialId == '172' &&
+        data.promotorId is string && data.promotorId.size() >= 1 && data.promotorId.size() <= 128 &&
+        data.codigoInterno is string && data.codigoInterno.size() >= 1 && data.codigoInterno.size() <= 20 &&
+        data.status in ['PENDENTE_ANALISE', 'APROVADO', 'RECUSADO'] &&
+        (!('descricao' in data) || (data.descricao is string && data.descricao.size() <= 200)) &&
+        (!('dataValidade' in data) || (data.dataValidade is string && data.dataValidade.size() <= 20)) &&
+        (!('motivoRecusa' in data) || (data.motivoRecusa is string && data.motivoRecusa.size() <= 300)) &&
+        (!('eans' in data) || (data.eans is list && data.eans.size() <= 30 && (data.eans.size() == 0 || data.eans[0] is string))) &&
+        (!('inconsistencias' in data) || (data.inconsistencias is list && data.inconsistencias.size() <= 20 && (data.inconsistencias.size() == 0 || data.inconsistencias[0] is string)));
+    }
+
     function isValidSolicitacaoPromotorCreate() {
-      let data = request.resource.data;
+      let data = incoming();
       return isValidSolicitacaoPromotorKeys(data) &&
-        data.filialId == '172' &&
-        data.promotorId is string && data.promotorId.size() >= 1 &&
-        data.codigoInterno is string && data.codigoInterno.size() >= 1 &&
+        data.keys().hasAll(['filialId', 'promotorId', 'codigoInterno', 'status']) &&
+        isValidSolicitacaoPromotorTypes(data) &&
         data.status == 'PENDENTE_ANALISE' &&
         ((data.quantidadeTotalUnidades is number && data.quantidadeTotalUnidades >= 0 && data.quantidadeTotalUnidades <= 100000) ||
          (data.quantidadeInformada is number && data.quantidadeInformada >= 0 && data.quantidadeInformada <= 100000));
     }
 
     function isValidSolicitacaoPromotorUpdate() {
-      let data = request.resource.data;
-      let existing = resource.data;
+      let data = incoming();
+      let ex = existing();
+      let isAdminOverride = isGerenteAdmin('172');
+      let isPromotorPendingEdit = ex.status == 'PENDENTE_ANALISE' &&
+        data.status == 'PENDENTE_ANALISE' &&
+        data.filialId == ex.filialId &&
+        data.promotorId == ex.promotorId &&
+        data.codigoInterno == ex.codigoInterno &&
+        data.diff(ex).affectedKeys().hasOnly([
+          'quantidadeTotalUnidades', 'quantidadeInformada', 'quantidadeInformadaOriginal',
+          'quantidadeCaixas', 'quantidadeUnidades', 'quantidadeEmb1', 'quantidadeEmb9',
+          'quantidadeTexto', 'dataValidade', 'dataVencimento', 'validade', 'isDataValida',
+          'atualizadoEm', 'enviadoEm', 'inconsistencias'
+        ]);
       return isValidSolicitacaoPromotorKeys(data) &&
-        (isGerenteAdmin('172') || (
-          // Promotor só pode alterar solicitações enquanto pendentes
-          existing.status == 'PENDENTE_ANALISE' &&
-          data.status == 'PENDENTE_ANALISE' &&
-          data.filialId == existing.filialId &&
-          data.promotorId == existing.promotorId &&
-          data.codigoInterno == existing.codigoInterno
-        ));
+        isValidSolicitacaoPromotorTypes(data) &&
+        (isAdminOverride || isPromotorPendingEdit);
     }
 
-    function isValidVinculoUpdate() {
-      let data = request.resource.data;
-      let existing = resource.data;
-      return isGerenteAdmin('172') || (
-        // Ativação legítima de vínculo pelo promotor no app móvel
-        existing.status == 'AGUARDANDO' &&
-        data.status == 'UTILIZADO' &&
-        data.vinculoId == existing.vinculoId &&
-        data.promotorId == existing.promotorId &&
-        data.codigoVinculo == existing.codigoVinculo &&
-        data.dispositivoId is string && data.dispositivoId.size() >= 3
-      );
+    // -------------------------------------------------------------------------
+    // 6. VALIDAÇÃO DE AUDITORIA E OPERAÇÕES (APPEND-ONLY / IDEMPOTÊNCIA)
+    // -------------------------------------------------------------------------
+
+    function isValidAuditoriaCreate() {
+      let data = incoming();
+      return data.keys().hasAll(['filialId', 'tipoAcao', 'dataHora']) &&
+        data.keys().hasOnly([
+          'auditoriaId', 'promotorId', 'promotorNome', 'agenciaNome',
+          'filialId', 'setores', 'setorId', 'setor', 'tipoAcao',
+          'produtoId', 'codigoInterno', 'digito', 'descricao',
+          'valorAnterior', 'valorNovo', 'dataHora', 'dispositivoId',
+          'statusSincronizacao', 'operationId', 'usuario', 'detalhes'
+        ]) &&
+        data.filialId == '172' &&
+        data.tipoAcao is string && data.tipoAcao.size() >= 2 && data.tipoAcao.size() <= 80 &&
+        data.dataHora is string && data.dataHora.size() >= 10 && data.dataHora.size() <= 60 &&
+        (!('setores' in data) || (data.setores is list && data.setores.size() <= 10 && (data.setores.size() == 0 || data.setores[0] is string))) &&
+        (!('descricao' in data) || (data.descricao is string && data.descricao.size() <= 500)) &&
+        (!('valorAnterior' in data) || (data.valorAnterior is string && data.valorAnterior.size() <= 1000)) &&
+        (!('valorNovo' in data) || (data.valorNovo is string && data.valorNovo.size() <= 4000));
+    }
+
+    function isValidOperacaoPromotor(data) {
+      return data.keys().hasAll(['operationId', 'promotorId', 'tipoAcao']) &&
+        data.keys().hasOnly([
+          'operationId', 'promotorId', 'tipoAcao', 'payload',
+          'dataHora', 'processado', 'processadoEm', 'status', 'mensagemErro'
+        ]) &&
+        data.operationId is string && data.operationId.size() >= 1 && data.operationId.size() <= 128 &&
+        data.promotorId is string && data.promotorId.size() >= 1 && data.promotorId.size() <= 128 &&
+        data.tipoAcao is string && data.tipoAcao.size() >= 2 && data.tipoAcao.size() <= 80 &&
+        (!('processado' in data) || data.processado is bool) &&
+        (!('mensagemErro' in data) || (data.mensagemErro is string && data.mensagemErro.size() <= 500));
     }
 
     // =========================================================================
-    // 1. USUÁRIOS AUTORIZADOS (GESTÃO E PROVISIONAMENTO DE PRIVILÉGIOS)
+    // COLEÇÕES RAIZ E SUBCOLEÇÕES PROTEGIDAS
     // =========================================================================
+
+    // -------------------------------------------------------------------------
+    // A. USUÁRIOS AUTORIZADOS (ISOLAMENTO PII + PROIBIÇÃO DE AUTOESCALONAMENTO)
+    // -------------------------------------------------------------------------
     match /usuarios_autorizados/{userId} {
-      allow get: if isSignedIn() && (request.auth.uid == userId || isGerenteAdmin(resource.data.filialId));
-      allow list: if isSignedIn();
-
-      // Bloqueio de autoatribuição no client Web (exclusivo para Firebase Admin SDK / Console)
+      allow get: if isValidId(userId) &&
+        isAuthenticatedUser() &&
+        (request.auth.uid == userId || isGerenteAdmin('172'));
+      allow list: if isGerenteAdmin('172') && resource.data.filialId == '172';
       allow create, update, delete: if false;
     }
 
-    // =========================================================================
-    // 2. ISOLAMENTO POR FILIAL (FILIAL 172 — CASCAVEL)
-    // =========================================================================
+    // -------------------------------------------------------------------------
+    // B. SONDA READ-ONLY DE CONECTIVIDADE (testConnection)
+    // -------------------------------------------------------------------------
+    match /test/{docId} {
+      allow get: if docId == 'connection';
+      allow list, create, update, delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // C. ISOLAMENTO POR FILIAL (/filiais/{filialId}/...)
+    // -------------------------------------------------------------------------
     match /filiais/{filialId} {
 
-      // 2.1 BASE RUB MESTRE (Catálogo de 36 colunas com custos e vendas)
-      // Conforme decisão definitiva: todos os 36 campos permanecem com leitura pública.
-      // Publicação, substituição e comutação restritas exclusivamente à Gerência.
+      // BASE RUB MESTRE (36 colunas — leitura operacional, escrita apenas Gerência)
       match /catalogo_rub_versoes/{versaoId} {
-        allow read: if true;
-        allow write: if isGerenteAdmin(filialId);
+        allow get: if isValidId(versaoId);
+        allow list: if true;
+        allow create, update, delete: if isValidId(versaoId) && isGerenteAdmin(filialId);
 
         match /chunks/{chunkId} {
-          allow read: if true;
-          allow write: if isGerenteAdmin(filialId);
+          allow get: if isValidId(chunkId);
+          allow list: if true;
+          allow create, update, delete: if isValidId(chunkId) && isGerenteAdmin(filialId);
         }
       }
 
-      // 2.2 SPCOI007 (Fornecedores e Indústrias)
+      // SPCOI007 (Fornecedores e Indústrias — escrita exclusiva Gerência)
       match /spcoi_versoes/{versaoId} {
-        allow read: if true;
-        allow write: if isGerenteAdmin(filialId);
+        allow get: if isValidId(versaoId);
+        allow list: if true;
+        allow create, update, delete: if isValidId(versaoId) && isGerenteAdmin(filialId);
 
         match /chunks/{chunkId} {
-          allow read: if true;
-          allow write: if isGerenteAdmin(filialId);
+          allow get: if isValidId(chunkId);
+          allow list: if true;
+          allow create, update, delete: if isValidId(chunkId) && isGerenteAdmin(filialId);
         }
       }
 
-      // 2.3 SAEOU060 (Lotes de Vencimento de Promotores)
+      // SAEOU060 (Lotes de entrada — escrita exclusiva Gerência)
       match /saeou_versoes/{versaoId} {
-        allow read: if true;
-        allow write: if isGerenteAdmin(filialId);
+        allow get: if isValidId(versaoId);
+        allow list: if true;
+        allow create, update, delete: if isValidId(versaoId) && isGerenteAdmin(filialId);
 
         match /chunks/{chunkId} {
-          allow read: if true;
-          allow write: if isGerenteAdmin(filialId);
+          allow get: if isValidId(chunkId);
+          allow list: if true;
+          allow create, update, delete: if isValidId(chunkId) && isGerenteAdmin(filialId);
         }
       }
 
-      // 2.4 PONTEIROS DE VERSÃO ATIVA DA FILIAL (/config/*)
+      // PONTEIROS OFICIAIS DE VERSÃO ATIVA
       match /config/{configDoc} {
-        allow read: if true;
-        allow write: if isGerenteAdmin(filialId);
+        allow get: if isValidId(configDoc);
+        allow list: if true;
+        allow create, update, delete: if isValidId(configDoc) && isGerenteAdmin(filialId);
       }
 
-      // 2.5 VENCIMENTOS DA FILIAL (/filiais/172/vencimentos/{vencimentoId})
-      // Leitura pública, cadastro e edição sem login (com validação estrita de schema e campos protegidos)
+      // VENCIMENTOS DA FILIAL (operação de loja sem login; hard-delete bloqueado)
       match /vencimentos/{vencimentoId} {
-        allow read: if true;
-        allow create: if isValidLoteCreate(filialId);
-        allow update: if isValidLoteUpdate(filialId);
-        allow delete: if false; // Hard-delete permanentemente bloqueado
+        allow get: if isValidId(vencimentoId);
+        allow list: if true;
+        allow create: if isValidId(vencimentoId) && isValidLoteCreate(filialId);
+        allow update: if isValidId(vencimentoId) && isValidLoteUpdate(filialId);
+        allow delete: if false;
       }
 
-      // 2.6 AUDITORIA DA FILIAL (/filiais/172/auditoria/{auditId})
-      // Append-only imutável
+      // AUDITORIA DA FILIAL (append-only com validação estrita)
       match /auditoria/{auditId} {
-        allow read, create: if true;
+        allow get: if isValidId(auditId);
+        allow list: if true;
+        allow create: if isValidId(auditId) && isValidAuditoriaCreate();
         allow update, delete: if false;
       }
     }
 
-    // =========================================================================
-    // 3. COLEÇÕES GLOBAIS E SINCRONIZAÇÃO COMPATÍVEL
-    // =========================================================================
+    // -------------------------------------------------------------------------
+    // D. COLEÇÕES GLOBAIS OPERACIONAIS
+    // -------------------------------------------------------------------------
 
-    // Coleção global de vencimentos (compatibilidade com NuvemSyncEngine e tombstoning)
     match /vencimentos/{vencimentoId} {
-      allow read: if true;
-      allow create: if isValidLoteCreate('172');
-      allow update: if isValidLoteUpdate('172');
+      allow get: if isValidId(vencimentoId);
+      allow list: if true;
+      allow create: if isValidId(vencimentoId) && isValidLoteCreate('172');
+      allow update: if isValidId(vencimentoId) && isValidLoteUpdate('172');
       allow delete: if false;
     }
 
-    // Catálogo de Produtos e Vínculos EAN
     match /produtos/{produtoId} {
-      allow read: if true;
-      allow write: if isGerenteAdmin('172');
+      allow get: if isValidId(produtoId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(produtoId) && isGerenteAdmin('172');
     }
 
     match /vinculosEAN/{vinculoEanId} {
-      allow read: if true;
-      allow write: if isGerenteAdmin('172');
+      allow get: if isValidId(vinculoEanId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(vinculoEanId) && isGerenteAdmin('172');
     }
 
-    // Alertas de Divergências (Escrita e exclusão indiscriminadas eliminadas)
     match /divergencias/{divId} {
-      allow read: if true;
-      allow create: if isValidDivergenciaCreate();
-      allow update: if isValidDivergenciaUpdate();
-      allow delete: if isGerenteAdmin('172');
+      allow get: if isValidId(divId);
+      allow list: if true;
+      allow create: if isValidId(divId) && isValidDivergenciaCreate();
+      allow update: if isValidId(divId) && isValidDivergenciaUpdate();
+      allow delete: if isValidId(divId) && isGerenteAdmin('172');
     }
 
-    // Módulo de Promotores
+    // -------------------------------------------------------------------------
+    // E. MÓDULO DE PROMOTORES, AGÊNCIAS E VÍNCULOS COMERCIAIS
+    // -------------------------------------------------------------------------
+
     match /promotores/{promotorId} {
-      allow read: if true;
-      allow write: if isGerenteAdmin('172');
+      allow get: if isValidId(promotorId);
+      allow list: if true;
+      allow create: if isValidId(promotorId) && isGerenteAdmin('172') && isValidPromotor(incoming());
+      allow update: if isValidId(promotorId) && isGerenteAdmin('172') && isValidPromotor(incoming()) &&
+        incoming().promotorId == existing().promotorId;
+      allow delete: if isValidId(promotorId) && isGerenteAdmin('172');
     }
 
+    match /agencias/{agenciaId} {
+      allow get: if isValidId(agenciaId);
+      allow list: if true;
+      allow create: if isValidId(agenciaId) && isGerenteAdmin('172') && isValidAgencia(incoming());
+      allow update: if isValidId(agenciaId) && isGerenteAdmin('172') && isValidAgencia(incoming()) &&
+        incoming().agenciaId == existing().agenciaId;
+      allow delete: if isValidId(agenciaId) && isGerenteAdmin('172');
+    }
+
+    match /vinculos_promotor_industria/{vinculoId} {
+      allow get: if isValidId(vinculoId);
+      allow list: if true;
+      allow create, update: if isValidId(vinculoId) && isGerenteAdmin('172') && isValidVinculoComercial(incoming());
+      allow delete: if isValidId(vinculoId) && isGerenteAdmin('172');
+    }
+
+    match /vinculosPromotorIndustria/{vinculoId} {
+      allow get: if isValidId(vinculoId);
+      allow list: if true;
+      allow create, update: if isValidId(vinculoId) && isGerenteAdmin('172') && isValidVinculoComercial(incoming());
+      allow delete: if isValidId(vinculoId) && isGerenteAdmin('172');
+    }
+
+    match /vinculosPromotorAgencia/{vinculoId} {
+      allow get: if isValidId(vinculoId);
+      allow list: if true;
+      allow create, update: if isValidId(vinculoId) && isGerenteAdmin('172') && isValidVinculoComercial(incoming());
+      allow delete: if isValidId(vinculoId) && isGerenteAdmin('172');
+    }
+
+    match /vinculos_comerciais/{vinculoId} {
+      allow get: if isValidId(vinculoId);
+      allow list: if true;
+      allow create, update: if isValidId(vinculoId) && isGerenteAdmin('172') && isValidVinculoComercial(incoming());
+      allow delete: if isValidId(vinculoId) && isGerenteAdmin('172');
+    }
+
+    match /movimentacoes_comerciais/{movId} {
+      allow get: if isValidId(movId);
+      allow list: if true;
+      allow create: if isValidId(movId) && isGerenteAdmin('172') && isValidMovimentacaoComercial(incoming());
+      allow update, delete: if false;
+    }
+
+    // TOKENS E CÓDIGOS DE VINCULAÇÃO DE DISPOSITIVOS — PROTEGIDOS CONTRA CONSULTAS NÃO AUTORIZADAS
     match /vinculosPromotor/{vinculoId} {
-      allow read: if true;
-      allow create: if isGerenteAdmin('172');
-      allow update: if isValidVinculoUpdate();
-      allow delete: if isGerenteAdmin('172');
+      allow get: if isValidId(vinculoId) && isGerenteAdmin('172');
+      allow list: if isGerenteAdmin('172');
+      allow create: if isValidId(vinculoId) && isGerenteAdmin('172') && isValidVinculoDoc(incoming());
+      allow update: if isValidId(vinculoId) &&
+        isValidVinculoDoc(incoming()) &&
+        (isGerenteAdmin('172') || isValidVinculoDeviceActivation());
+      allow delete: if isValidId(vinculoId) && isGerenteAdmin('172');
     }
 
     match /vinculos_promotores/{vinculoId} {
-      allow read: if true;
-      allow create: if isGerenteAdmin('172');
-      allow update: if isValidVinculoUpdate();
-      allow delete: if isGerenteAdmin('172');
+      allow get: if isValidId(vinculoId) && isGerenteAdmin('172');
+      allow list: if isGerenteAdmin('172');
+      allow create: if isValidId(vinculoId) && isGerenteAdmin('172') && isValidVinculoDoc(incoming());
+      allow update: if isValidId(vinculoId) &&
+        isValidVinculoDoc(incoming()) &&
+        (isGerenteAdmin('172') || isValidVinculoDeviceActivation());
+      allow delete: if isValidId(vinculoId) && isGerenteAdmin('172');
     }
 
+    // SOLICITAÇÕES DE VENCIMENTO DE PROMOTORES (BLOQUEIO PÓS-ESTADO TERMINAL)
     match /solicitacoesVencimentoPromotor/{solicitacaoId} {
-      allow read: if true;
-      allow create: if isValidSolicitacaoPromotorCreate();
-      allow update: if isValidSolicitacaoPromotorUpdate();
+      allow get: if isValidId(solicitacaoId);
+      allow list: if true;
+      allow create: if isValidId(solicitacaoId) && isValidSolicitacaoPromotorCreate();
+      allow update: if isValidId(solicitacaoId) && isValidSolicitacaoPromotorUpdate();
       allow delete: if false;
     }
 
-    // Auditoria Global (Append-only imutável)
+    // -------------------------------------------------------------------------
+    // F. AUDITORIA, OPERAÇÕES IDEMPOTENTES E CHUNKS LEGADOS
+    // -------------------------------------------------------------------------
+
     match /auditoria/{auditoriaId} {
-      allow read, create: if true;
+      allow get: if isValidId(auditoriaId);
+      allow list: if true;
+      allow create: if isValidId(auditoriaId) && isValidAuditoriaCreate();
       allow update, delete: if false;
     }
 
     match /auditoria_promotores/{auditoriaId} {
-      allow read, create: if true;
+      allow get: if isValidId(auditoriaId);
+      allow list: if true;
+      allow create: if isValidId(auditoriaId) && isValidAuditoriaCreate();
       allow update, delete: if false;
     }
 
     match /operacoes_promotores/{operationId} {
-      allow read, create: if true;
-      allow update: if isGerenteAdmin('172') || (request.resource.data.processado == true);
+      allow get: if isValidId(operationId);
+      allow list: if true;
+      allow create: if isValidId(operationId) && isValidOperacaoPromotor(incoming());
+      allow update: if isValidId(operationId) &&
+        isValidOperacaoPromotor(incoming()) &&
+        (isGerenteAdmin('172') || (
+          incoming().operationId == existing().operationId &&
+          incoming().promotorId == existing().promotorId &&
+          incoming().tipoAcao == existing().tipoAcao &&
+          incoming().processado == true &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['processado', 'processadoEm', 'status', 'mensagemErro'])
+        ));
       allow delete: if false;
     }
 
-    // Metadados Centrais e Chunks de Sincronização
     match /metadados/{docId} {
-      allow read: if true;
-      allow write: if isGerenteAdmin('172');
+      allow get: if isValidId(docId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(docId) && isGerenteAdmin('172');
     }
 
     match /catalogo_chunks/{chunkId} {
-      allow read: if true;
-      allow write: if isGerenteAdmin('172');
+      allow get: if isValidId(chunkId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(chunkId) && isGerenteAdmin('172');
     }
 
     match /vinculos_chunks/{chunkId} {
-      allow read: if true;
-      allow write: if isGerenteAdmin('172');
+      allow get: if isValidId(chunkId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(chunkId) && isGerenteAdmin('172');
     }
 
     match /saeou060_chunks/{chunkId} {
-      allow read: if true;
-      allow write: if isGerenteAdmin('172');
+      allow get: if isValidId(chunkId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(chunkId) && isGerenteAdmin('172');
     }
 
     match /historico_importacoes/{histId} {
-      allow read: if true;
-      allow write: if isGerenteAdmin('172');
+      allow get: if isValidId(histId);
+      allow list: if true;
+      allow create, update, delete: if isValidId(histId) && isGerenteAdmin('172');
     }
   }
 }
