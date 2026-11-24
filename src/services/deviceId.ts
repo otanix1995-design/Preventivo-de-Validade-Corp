@@ -236,7 +236,118 @@ export function normalizeVencimentoRecord(raw: any): LoteVencimento {
 }
 
 /**
- * Converte um LoteVencimento no payload exato esperado pela coleção central 'vencimentos' do Firestore
+ * Chaves permitidas pelas regras de segurança do Firestore (`isAllowedLoteKeys` em firestore.rules).
+ * Qualquer chave fora desta lista (ex.: `version`, `criadoPorTipo`, `criadoPorId`,
+ * `atualizadoPorTipo`, `atualizadoPorId`) causa `Missing or insufficient permissions`.
+ */
+export const ALLOWED_LOTE_KEYS_CREATE = new Set<string>([
+  'id', 'vencimentoId', 'filialId', 'filial_id',
+  'codigo_interno', 'codigoInterno', 'digito', 'codigo_exibicao',
+  'descricao_produto', 'descricao', 'embalagem', 'fator_embalagem',
+  'data_validade', 'dataVencimento',
+  'quantidade_total_unidades', 'quantidade',
+  'observacao', 'lote_identificador',
+  'status_customizado', 'status',
+  'enviar_ao_comprador', 'enviarParaComprador',
+  'origem', 'preco_normal', 'precoNormal', 'preco_trabalhado', 'precoTrabalhado',
+  'data_preco', 'saeou060_id', 'arquivo_origem',
+  'criado_em', 'criadoEm', 'atualizado_em', 'atualizadoEm', 'updatedAt', 'createdAt',
+  'criadoPor', 'criadoPorMatricula', 'criadoPorPapel',
+  'atualizadoPor', 'atualizadoPorMatricula', 'atualizadoPorPapel',
+  'deviceId', 'operationId',
+  'isDeleted', 'deletedAt', 'motivoExclusao', 'usuarioExclusao', 'papelExclusao',
+  '_versaoLocal', '_serverVersion', '_syncedAt',
+]);
+
+/**
+ * Chaves mutáveis permitidas em atualizações de lotes já existentes (`isValidLoteUpdate.affectedKeys()`).
+ */
+export const ALLOWED_LOTE_KEYS_UPDATE = new Set<string>([
+  'filialId',
+  'descricao_produto', 'descricao', 'embalagem', 'fator_embalagem',
+  'data_validade', 'dataVencimento',
+  'quantidade_total_unidades', 'quantidade',
+  'observacao', 'lote_identificador',
+  'status_customizado', 'status',
+  'enviar_ao_comprador', 'enviarParaComprador',
+  'preco_normal', 'precoNormal', 'preco_trabalhado', 'precoTrabalhado',
+  'data_preco',
+  'atualizado_em', 'atualizadoEm', 'updatedAt',
+  'atualizadoPor', 'atualizadoPorMatricula', 'atualizadoPorPapel',
+  'deviceId', 'operationId',
+  'isDeleted', 'deletedAt', 'motivoExclusao', 'usuarioExclusao', 'papelExclusao',
+  '_versaoLocal', '_serverVersion', '_syncedAt',
+]);
+
+const IMMUTABLE_LOTE_KEYS = [
+  'id',
+  'vencimentoId',
+  'codigo_interno',
+  'codigoInterno',
+  'digito',
+  'codigo_exibicao',
+  'origem',
+  'saeou060_id',
+  'arquivo_origem',
+  'criado_em',
+  'criadoEm',
+  'createdAt',
+  'criadoPor',
+  'criadoPorMatricula',
+  'criadoPorPapel',
+];
+
+/**
+ * Sanitiza um payload de vencimento contra as regras do Firestore (`isAllowedLoteKeys` / `isValidLoteUpdate`).
+ * - Remove sempre campos proibidos (`version`, `criadoPorTipo`, `criadoPorId`, `atualizadoPorTipo`, `atualizadoPorId`).
+ * - Quando `isUpdate` é true, mantém apenas chaves mutáveis permitidas e preserva `filialId`/campos imutáveis de `remoteData`.
+ */
+export function sanitizeLoteForFirestore(
+  rawPayload: Record<string, any>,
+  options?: { isUpdate?: boolean; remoteData?: Record<string, any> }
+): Record<string, any> {
+  const isUpdate = Boolean(options?.isUpdate);
+  const allowedSet = isUpdate ? ALLOWED_LOTE_KEYS_UPDATE : ALLOWED_LOTE_KEYS_CREATE;
+  const sanitized: Record<string, any> = {};
+
+  for (const [k, v] of Object.entries(rawPayload || {})) {
+    if (v === undefined) continue;
+    if (!allowedSet.has(k)) continue;
+    sanitized[k] = v;
+  }
+
+  sanitized.filialId = String(
+    options?.remoteData?.filialId || sanitized.filialId || rawPayload?.filialId || FILIAL_PADRAO
+  ).trim() || FILIAL_PADRAO;
+
+  if (typeof sanitized.dataVencimento === 'string') {
+    sanitized.dataVencimento = sanitized.dataVencimento.slice(0, 10);
+  }
+  if (typeof sanitized.data_validade === 'string') {
+    sanitized.data_validade = sanitized.data_validade.slice(0, 10);
+  }
+  if (typeof sanitized.motivoExclusao === 'string') {
+    sanitized.motivoExclusao = sanitized.motivoExclusao.trim().slice(0, 200);
+  }
+  if (typeof sanitized.codigoInterno === 'string') {
+    sanitized.codigoInterno = sanitized.codigoInterno.slice(0, 20);
+  }
+  if (typeof sanitized.codigo_interno === 'string') {
+    sanitized.codigo_interno = sanitized.codigo_interno.slice(0, 20);
+  }
+
+  if (isUpdate && options?.remoteData) {
+    // Caso o documento remoto exista, garante que nenhum campo imutável seja alterado ou inserido fora de affectedKeys
+    for (const immKey of IMMUTABLE_LOTE_KEYS) {
+      delete sanitized[immKey];
+    }
+  }
+
+  return cleanForFirestore(sanitized);
+}
+
+/**
+ * Converte um LoteVencimento no payload exato esperado pelas coleções 'vencimentos' e 'filiais/172/vencimentos' do Firestore
  */
 export function buildVencimentoCentralPayload(lote: LoteVencimento, operationId?: string): Record<string, any> {
   const norm = normalizeVencimentoRecord(lote);
@@ -277,7 +388,6 @@ export function buildVencimentoCentralPayload(lote: LoteVencimento, operationId?
     motivoExclusao: norm.motivoExclusao || undefined,
     usuarioExclusao: norm.usuarioExclusao || undefined,
     papelExclusao: norm.papelExclusao || undefined,
-    version: Number(norm.version || 1),
     criadoPor: norm.criadoPor,
     atualizadoPor: norm.atualizadoPor,
     deviceId: devId,
@@ -287,8 +397,7 @@ export function buildVencimentoCentralPayload(lote: LoteVencimento, operationId?
     lote_identificador: norm.lote_identificador || null,
   };
 
-  // Remove undefined
-  return cleanForFirestore(payload);
+  return sanitizeLoteForFirestore(payload);
 }
 
 /**

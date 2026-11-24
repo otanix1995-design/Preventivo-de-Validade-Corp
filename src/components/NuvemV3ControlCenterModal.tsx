@@ -44,6 +44,7 @@ import {
   ResultadoLimpezaBases,
 } from '../services/limpezaTresBasesService';
 import { STORES } from '../services/db';
+import { isModoAtualizacaoLocalAtivo } from '../services/localPackageMode';
 
 const TOTAL_TABELAS_INDEXEDDB = Object.values(STORES).length;
 
@@ -92,6 +93,7 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
   // Sync action states
   const [isForcingSync, setIsForcingSync] = useState(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
+  const [rubToast, setRubToast] = useState<string | null>(null);
 
   // Server Auth states
   const [authServidor, setAuthServidor] = useState<EstadoAuthServidor>(() => firebaseAuthService.getEstado());
@@ -290,56 +292,52 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
   };
 
   const handlePublicarBaseRub = async () => {
+    if (isModoAtualizacaoLocalAtivo()) {
+      setRubToast(
+        'Arquitetura Híbrida V1.0 ativa: a BASE RUB opera exclusivamente no IndexedDB local com atualização manual via .zip e não é enviada ao Firestore.'
+      );
+      return;
+    }
+
     const produtos = productRepository.getProdutos();
     const meta = productRepository.getMetadados();
 
     if (produtos.length === 0) {
-      alert('Não há produtos na BASE RUB carregados para publicar.');
+      setRubToast('Não há produtos na BASE RUB carregados para publicar.');
       return;
     }
 
-    const confirma = window.confirm(
-      `Confirma a publicação oficial da BASE RUB para a Filial 172 com ${produtos.length} produtos? O sistema executará validação de concorrência e upload em chunks seguros.`
-    );
-    if (!confirma) return;
-
     const res = await rubSyncService.publicarBaseRubCentral(produtos, meta, '172');
-    if (res.sucesso) {
-      alert(res.mensagem);
-    } else {
-      alert(`Erro na publicação: ${res.mensagem}`);
-    }
+    setRubToast(res.sucesso ? res.mensagem : `Erro na publicação: ${res.mensagem}`);
   };
 
   const handleBaixarBaseRub = async () => {
-    const confirma = window.confirm(
-      'Deseja atualizar a BASE RUB local a partir da versão mestre oficial da nuvem? Os produtos atuais serão atualizados de forma atômica.'
-    );
-    if (!confirma) return;
+    if (isModoAtualizacaoLocalAtivo()) {
+      setRubToast(
+        'Arquitetura Híbrida V1.0 ativa: a BASE RUB é atualizada manualmente pelo pacote único (.zip).'
+      );
+      return;
+    }
 
     const res = await rubSyncService.baixarBaseRubAtivaParaDispositivo('172');
-    if (res.sucesso) {
-      if (res.produtos && res.meta) {
-        await productRepository.importarBaseRubDireto(res.produtos, res.meta);
-      }
-      alert(res.mensagem);
-    } else {
-      alert(res.mensagem);
+    if (res.sucesso && res.produtos && res.meta) {
+      await productRepository.importarBaseRubDireto(res.produtos, res.meta);
     }
+    setRubToast(res.mensagem);
   };
 
   const handleRollbackRub = async () => {
-    if (!versaoAtivaRub?.versaoAnteriorId) {
-      alert('Não há versão anterior registrada para rollback.');
+    if (isModoAtualizacaoLocalAtivo()) {
+      setRubToast('Rollback remoto desativado no modo exclusivo .zip da Arquitetura Híbrida V1.0.');
       return;
     }
-    const confirma = window.confirm(
-      `Confirma o ROLLBACK do ponteiro da BASE RUB para a versão anterior (${versaoAtivaRub.versaoAnteriorId})?`
-    );
-    if (!confirma) return;
+    if (!versaoAtivaRub?.versaoAnteriorId) {
+      setRubToast('Não há versão anterior registrada para rollback.');
+      return;
+    }
 
     const res = await rubSyncService.executarRollbackParaVersaoAnterior('172');
-    alert(res.mensagem);
+    setRubToast(res.mensagem);
   };
 
   const handleGerarBackupCompleto = async () => {
@@ -822,6 +820,23 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
           {/* ================================================================= */}
           {tabAtiva === 'BASE_RUB' && (
             <div className="space-y-4">
+              {isModoAtualizacaoLocalAtivo() && (
+                <div className="p-3.5 bg-amber-50 border border-amber-300 text-amber-950 rounded-xl text-xs font-bold">
+                  Arquitetura Híbrida V1.0 ativa: BASE RUB e SAEOU060 operam exclusivamente no IndexedDB local via atualização manual por .zip (sem envio ao Firestore).
+                </div>
+              )}
+
+              {rubToast && (
+                <div className="p-3 bg-blue-50 border border-blue-200 text-blue-900 rounded-xl text-xs font-bold flex items-center justify-between gap-2">
+                  <span>{rubToast}</span>
+                  <button
+                    onClick={() => setRubToast(null)}
+                    className="text-blue-700 hover:text-blue-950 font-black cursor-pointer"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <div className="bg-orange-50/70 border border-orange-200 rounded-xl p-4">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div>

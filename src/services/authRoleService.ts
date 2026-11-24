@@ -144,6 +144,12 @@ export class AuthRoleService {
     );
   }
 
+  public getEmailServidorVerificado(): string | null {
+    return this._sessaoServidor.autenticado && this._sessaoServidor.verificado
+      ? this._sessaoServidor.email
+      : null;
+  }
+
   /**
    * Chamado exclusivamente pelo FirebaseAuthService após validar o token e o perfil real no servidor.
    */

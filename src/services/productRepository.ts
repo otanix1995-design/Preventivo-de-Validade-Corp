@@ -32,7 +32,9 @@ import {
   normalizeInternalCode
 } from './duplicateValidator';
 import { cloudSyncService } from './cloudSyncService';
-import { centralFirestoreService } from './centralFirestoreService';
+import { spcoiSyncService } from './spcoiSyncService';
+import { comercialSyncService } from './comercialSyncService';
+import { authRoleService } from './authRoleService';
 import { syncQueueService } from './syncQueueService';
 import { nuvemSyncEngine } from './nuvemSyncEngine';
 import { promotorService } from './promotorService';
@@ -302,23 +304,24 @@ class ProductRepository {
           },
         });
 
-        // Registrar callback do RubSyncService para atualização automática da BASE RUB em tempo real
-        rubSyncService.registerCatalogUpdateCallback(async (remoteProdutos, meta) => {
-          this._produtos = remoteProdutos;
-          this._metadados = {
-            ...this._metadados,
-            ...meta,
-            status_base: 'BASE_RUB',
-            total_produtos: remoteProdutos.length,
-          };
-          this.rebuildIndices();
-          this.notify();
-        });
+        // Registrar callbacks do RubSyncService somente fora do modo exclusivo .zip da Arquitetura Híbrida V1.0
+        if (!isModoAtualizacaoLocalAtivo()) {
+          rubSyncService.registerCatalogUpdateCallback(async (remoteProdutos, meta) => {
+            this._produtos = remoteProdutos;
+            this._metadados = {
+              ...this._metadados,
+              ...meta,
+              status_base: 'BASE_RUB',
+              total_produtos: remoteProdutos.length,
+            };
+            this.rebuildIndices();
+            this.notify();
+          });
 
-        // Registrar callback de limpeza centralizada da BASE RUB
-        rubSyncService.registerCatalogClearedCallback(() => {
-          this.redefinirBasesOperacionaisAposLimpeza();
-        });
+          rubSyncService.registerCatalogClearedCallback(() => {
+            this.redefinirBasesOperacionaisAposLimpeza();
+          });
+        }
 
         // Seed cloud sync service with local catalog version timestamp
         const localCatVersion = this._produtos.length > 0 ? (this._metadados.catalogo_version || 1) : 0;
@@ -961,26 +964,7 @@ class ProductRepository {
       );
     }
 
-    // 2. Bloqueio da sincronização legada concorrente (/catalogo_chunks):
-    // Quando a Filial 172 utiliza publicação versionada ou pacote local único,
-    // saveProducts() NÃO deve disparar cloudSyncService.pushCatalogoToCloud() em background.
-    const usaPublicacaoVersionadaRub =
-      isModoAtualizacaoLocalAtivo() ||
-      options?.skipLegacyCloudSync === true ||
-      (meta.filial_numero || '172') === '172' ||
-      meta.status_base === 'BASE_RUB';
-
-    if (
-      !usaPublicacaoVersionadaRub &&
-      !isFirestoreQuotaExceeded() &&
-      typeof navigator !== 'undefined' &&
-      navigator.onLine
-    ) {
-      cloudSyncService.pushCatalogoToCloud(novosProdutos, meta).catch((e) => {
-        console.warn('[ProductRepository] Sincronização em background do catálogo pendente:', e?.message || e);
-      });
-    }
-
+    // Arquitetura Híbrida V1.0: BASE RUB permanece 100% local no IndexedDB e atualizada apenas via .zip.
     return true;
   }
 
@@ -1091,6 +1075,16 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
+    if (
+      authRoleService.isGerenciaAdminVerificadaNoServidor() &&
+      !isFirestoreQuotaExceeded() &&
+      (typeof navigator === 'undefined' || navigator.onLine)
+    ) {
+      cloudSyncService.pushVinculosToCloud(this._vinculos).catch((e) => {
+        console.warn('Erro ao sincronizar vínculos EAN após vínculo manual:', e);
+      });
+    }
+
     this.notify();
     return { success: true, produto: targetProd };
   }
@@ -1122,6 +1116,16 @@ class ProductRepository {
     };
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
+
+    if (
+      authRoleService.isGerenciaAdminVerificadaNoServidor() &&
+      !isFirestoreQuotaExceeded() &&
+      (typeof navigator === 'undefined' || navigator.onLine)
+    ) {
+      cloudSyncService.pushVinculosToCloud(this._vinculos).catch((e) => {
+        console.warn('Erro ao sincronizar vínculos EAN após remoção manual:', e);
+      });
+    }
 
     this.notify();
     return true;
@@ -1746,17 +1750,7 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    // 5. Sincronização legada apenas fora do fluxo versionado V3 / pacote local da Filial 172
-    const usaPublicacaoVersionadaSaeou =
-      isModoAtualizacaoLocalAtivo() ||
-      options?.skipLegacyCloudSync === true ||
-      (this._metadados?.filial_numero || '172') === '172';
-
-    if (!usaPublicacaoVersionadaSaeou) {
-      cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
-        console.warn('Erro ao sincronizar SAEOU060 limpo na nuvem:', e);
-      });
-    }
+    // Arquitetura Híbrida V1.0: SAEOU060 permanece 100% local no IndexedDB e atualizada apenas via .zip.
 
     if (!options?.skipLegacyCloudSync) {
       notificarAlteracaoParaPacoteLocal(
@@ -1854,10 +1848,7 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    // Sincronizar na nuvem legada apenas fora do fluxo versionado V3 da Filial 172
-    if ((this._metadados?.filial_numero || '172') !== '172' && !isFirestoreQuotaExceeded()) {
-      await cloudSyncService.pushSaeou060ToCloud(this._saeou060);
-    }
+    // Arquitetura Híbrida V1.0: SAEOU060 permanece 100% local no IndexedDB e atualizada apenas via .zip.
 
     this.notify();
     return {
@@ -1883,11 +1874,7 @@ class ProductRepository {
     this._metadados = meta;
     await dbSetMeta('metadados_gerais', meta);
 
-    if ((this._metadados?.filial_numero || '172') !== '172' && !isFirestoreQuotaExceeded()) {
-      cloudSyncService.pushSaeou060ToCloud(this._saeou060).catch((e) => {
-        console.warn('Erro ao sincronizar SAEOU060 na nuvem:', e);
-      });
-    }
+    // Arquitetura Híbrida V1.0: SAEOU060 permanece 100% local no IndexedDB.
 
     this.notify();
   }
@@ -2323,37 +2310,53 @@ class ProductRepository {
       };
     }
 
+    const filialPadrao = this._metadados?.filial_numero || '172';
+    const mensagensErro: string[] = [];
+
+    // 1. Vencimentos e Vínculos EAN (nunca envia BASE RUB nem SAEOU060)
     const cloudRes = await cloudSyncService.syncFull(
-      this._produtos,
+      [],
       this._metadados,
       this._vinculos,
-      this._saeou060,
+      [],
       this._vencimentos
     );
+    if (!cloudRes.success) {
+      mensagensErro.push(cloudRes.message);
+    }
 
     if (isFirestoreQuotaExceeded()) {
       return cloudRes;
     }
 
-    // Na Filial 172 / BASE RUB, a BASE RUB já é versionada via rubSyncService.
-    // Evitar reescrever ~11.700+ documentos individuais na coleção raiz 'produtos' para preservar a cota gratuita Spark.
-    const filialPadrao = this._metadados?.filial_numero || '172';
-    const usaCatalogoVersionadoV3 = filialPadrao === '172' || this._metadados?.status_base === 'BASE_RUB';
-
+    // 2. SPCOI007 compactado e versionado
     try {
-      await centralFirestoreService.sincronizarBaseComNuvem({
-        produtos: usaCatalogoVersionadoV3 ? [] : this._produtos,
-        vinculos: this._vinculos,
-        vencimentos: [], // já sincronizado via cloudSyncService.syncFull sem duplicar escritas
-        promotores: promotorService.getPromotores(),
-        vinculosPromotores: promotorService.getVinculos(),
-        filialPadrao,
-      });
-    } catch (e) {
-      console.warn('[ProductRepository] Sincronização central em segundo plano:', e);
+      await spcoiSyncService.verificarSincronizacaoComRemoto(filialPadrao);
+    } catch (e: any) {
+      mensagensErro.push(`[SPCOI007 • Coleção: filiais/${filialPadrao}/config/versao_ativa_spcoi] ${e?.message || e}`);
     }
 
-    return cloudRes;
+    // 3. Comercial (Promotores, Agências e Vínculos)
+    try {
+      const comRes = await comercialSyncService.sincronizarAgora();
+      if (!comRes.sucesso && comRes.mensagem) {
+        mensagensErro.push(`[Comercial • Coleção: promotores / agencias / vinculos] ${comRes.mensagem}`);
+      }
+    } catch (e: any) {
+      mensagensErro.push(`[Comercial • Coleção: promotores / agencias / vinculos] ${e?.message || e}`);
+    }
+
+    if (mensagensErro.length > 0) {
+      return {
+        success: false,
+        message: mensagensErro.join(' | '),
+      };
+    }
+
+    return {
+      success: cloudRes.success,
+      message: cloudRes.message,
+    };
   }
 
   public getMetadados(): MetadadosBase {

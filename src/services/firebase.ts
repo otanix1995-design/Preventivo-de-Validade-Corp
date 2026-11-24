@@ -424,6 +424,95 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+export interface SyncServiceErrorDetail {
+  servico: string;
+  colecao: string;
+  operacao: OperationType;
+  codigoErro: string;
+  exigeGerenciaAdmin: boolean;
+  isCotaExcedida: boolean;
+  mensagemOriginal: string;
+  mensagemUsuario: string;
+}
+
+/**
+ * Formata erros do Firebase Firestore preservando serviço, coleção e operação exatos.
+ * Nunca mascara erros de permissão (`permission-denied`) ou cota (`resource-exhausted`).
+ */
+export function formatarErroSyncPorServico(
+  error: unknown,
+  servico: string,
+  colecao: string,
+  operacao: OperationType = OperationType.WRITE
+): SyncServiceErrorDetail {
+  const rawCode = String((error as any)?.code || '').trim();
+  const rawMessage = error instanceof Error ? error.message : String(error || 'Erro desconhecido');
+  const lowerCode = rawCode.toLowerCase();
+  const lowerMsg = rawMessage.toLowerCase();
+
+  const isCota = isQuotaError(error);
+  if (isCota) {
+    markQuotaExceeded(rawMessage, detectQuotaResourceType(error));
+  }
+
+  const isPermission =
+    lowerCode.includes('permission') ||
+    lowerMsg.includes('permission-denied') ||
+    lowerMsg.includes('missing or insufficient permissions');
+
+  const currentUser = auth?.currentUser;
+  if (isPermission) {
+    const errInfo: FirestoreErrorInfo = {
+      error: rawMessage,
+      authInfo: {
+        userId: currentUser?.uid,
+        email: currentUser?.email,
+        emailVerified: currentUser?.emailVerified,
+        isAnonymous: currentUser?.isAnonymous,
+        tenantId: currentUser?.tenantId,
+        providerInfo:
+          currentUser?.providerData.map((provider) => ({
+            providerId: provider.providerId,
+            displayName: provider.displayName,
+            email: provider.email,
+            photoUrl: provider.photoURL,
+          })) || [],
+      },
+      operationType: operacao,
+      path: colecao,
+    };
+    console.error('Firestore Error: ', JSON.stringify(errInfo));
+  }
+
+  let codigoErro = rawCode || 'unknown';
+  if (isPermission) codigoErro = 'permission-denied';
+  else if (isCota) codigoErro = 'resource-exhausted';
+  else if (lowerCode === 'unavailable' || lowerMsg.includes('offline')) codigoErro = 'unavailable';
+
+  let mensagemUsuario: string;
+  if (isPermission) {
+    const motivoAuth = !currentUser || currentUser.isAnonymous
+      ? 'dispositivo sem login Google verificado da Gerência (GERENCIA_ADMIN)'
+      : 'usuário autenticado não autorizado ou payload incompatível com as regras da coleção';
+    mensagemUsuario = `[${servico} • Coleção: ${colecao}] Permissão recusada no Firestore (${codigoErro}): ${motivoAuth}. Detalhe: ${rawMessage}`;
+  } else if (isCota) {
+    mensagemUsuario = `[${servico} • Coleção: ${colecao}] Cota diária gratuita do Firebase Spark atingida (${codigoErro}). Dados locais no IndexedDB preservados.`;
+  } else {
+    mensagemUsuario = `[${servico} • Coleção: ${colecao}] Falha na operação "${operacao}" (${codigoErro}): ${rawMessage}`;
+  }
+
+  return {
+    servico,
+    colecao,
+    operacao,
+    codigoErro,
+    exigeGerenciaAdmin: isPermission,
+    isCotaExcedida: isCota,
+    mensagemOriginal: rawMessage,
+    mensagemUsuario,
+  };
+}
+
 export async function testConnection(): Promise<boolean> {
   if (!db || isFirestoreQuotaExceeded()) return false;
   try {

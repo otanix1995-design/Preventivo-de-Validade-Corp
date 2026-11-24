@@ -9,11 +9,9 @@
 
 import {
   collection,
-  deleteDoc,
   doc,
   getDoc,
   getDocs,
-  limit,
   onSnapshot,
   query,
   setDoc,
@@ -33,20 +31,23 @@ import {
   db,
   detectQuotaResourceType,
   ensureAuth,
+  formatarErroSyncPorServico,
   isFirestoreQuotaExceeded,
   isQuotaError,
   logFirestoreRead,
   markQuotaExceeded,
+  OperationType,
   subscribeQuotaStatus,
+  SyncServiceErrorDetail,
 } from './firebase';
 import {
-  normalizeVencimentoRecord,
   buildVencimentoCentralPayload,
   getDeviceId,
-  cleanForFirestore as cleanCentralForFirestore,
+  normalizeVencimentoRecord,
+  sanitizeLoteForFirestore,
 } from './deviceId';
+import { authRoleService } from './authRoleService';
 import { nuvemSyncEngine } from './nuvemSyncEngine';
-import { isModoAtualizacaoLocalAtivo } from './localPackageMode';
 
 export type SyncState = 'connecting' | 'connected' | 'syncing' | 'offline' | 'error';
 
@@ -326,6 +327,7 @@ class CloudSyncService {
 
   /**
    * Checks if remote Firestore has data that local device doesn't have yet.
+   * Arquitetura Híbrida V1.0: verifica apenas Vínculos EAN (BASE RUB e SAEOU060 são exclusivos locais via .zip).
    */
   public async pullLatestIfOutdated(): Promise<void> {
     if (isFirestoreQuotaExceeded()) return;
@@ -340,18 +342,10 @@ class CloudSyncService {
       if (!metaSnap.exists()) return;
 
       const data = metaSnap.data();
-      // Na Filial 172, a BASE RUB e o SAEOU060 oficiais são distribuídos localmente por pacote único (.zip)
-      const isBaseRubAtiva =
-        isModoAtualizacaoLocalAtivo() || data.status_base === 'BASE_RUB' || data.filial_numero === '172';
       this._usaVersionadoFilial172 = (data.filial_numero || '172') === '172';
-      if (!isBaseRubAtiva && (data.catalogo_version || 0) > this._localCatalogoVersion && data.total_produtos > 0) {
-        await this.pullCatalogoFromCloud(data.catalogo_version);
-      }
+
       if ((data.vinculos_version || 0) > this._localVinculosVersion && data.total_eans > 0) {
         await this.pullVinculosFromCloud(data.vinculos_version);
-      }
-      if (!isBaseRubAtiva && (data.saeou060_version || 0) > this._localSaeou060Version && data.total_saeou060 > 0) {
-        await this.pullSaeou060FromCloud(data.saeou060_version);
       }
     } catch (err: any) {
       if (isQuotaError(err)) {
@@ -363,37 +357,37 @@ class CloudSyncService {
         });
         return;
       }
-      console.warn('[CloudSync] Pull check failed:', err?.message || err);
+      const detail = formatarErroSyncPorServico(err, 'Vínculos EAN', 'metadados/geral', OperationType.GET);
+      console.warn('[CloudSync] Pull check failed:', detail.mensagemUsuario);
     }
   }
 
   /**
-   * Comprehensive two-way sync for manual button press:
-   * - Connects to cloud
-   * - Pulls if cloud is newer or local is empty
-   * - Pushes local if cloud is empty or local has newer data
-   * - Syncs expiration lots
+   * Sincronização preservada da Arquitetura Híbrida V1.0:
+   * - NÃO envia nem baixa BASE RUB ou SAEOU060 (exclusivos locais via .zip / IndexedDB)
+   * - Sincroniza Vencimentos (fila transacional + pull paginado + lotes locais)
+   * - Sincroniza Vínculos EAN (respeitando permissão GERENCIA_ADMIN para escrita em vinculos_chunks / metadados/geral)
    */
   public async syncFull(
-    localProdutos: ProdutoSMG[],
-    localMeta: MetadadosBase,
+    _localProdutos: ProdutoSMG[],
+    _localMeta: MetadadosBase,
     localVinculos: VinculoEan[],
-    localSaeou: RegistroSaeou060[],
+    _localSaeou: RegistroSaeou060[],
     localVencimentos: LoteVencimento[]
-  ): Promise<{ success: boolean; message: string }> {
+  ): Promise<{ success: boolean; message: string; detalhesErros?: SyncServiceErrorDetail[] }> {
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       this.updateStatus({ state: 'offline', message: 'Dispositivo sem internet' });
       return { success: false, message: 'Dispositivo sem conexão à internet.' };
     }
 
-    // Se a cota estiver excedida, manter modo offline seguro com IndexedDB
     if (isFirestoreQuotaExceeded()) {
       const msg = 'Modo local offline ativo. Cota da nuvem temporariamente indisponível. Operação normal mantida com segurança no IndexedDB.';
       this.updateStatus({ state: 'connected', message: msg });
       return { success: true, message: msg };
     }
 
-    this.updateStatus({ state: 'syncing', message: 'Sincronizando com a Nuvem...' });
+    this.updateStatus({ state: 'syncing', message: 'Sincronizando Vencimentos e Vínculos EAN com a Nuvem...' });
+    const detalhesErros: SyncServiceErrorDetail[] = [];
 
     try {
       await ensureAuth().catch(() => null);
@@ -402,97 +396,34 @@ class CloudSyncService {
         await this.init();
       }
 
-      const metaDocRef = doc(db, 'metadados', 'geral');
-      const metaSnap = await getDoc(metaDocRef);
-      logFirestoreRead('verificarMetadados', 'metadados/geral', metaSnap.exists() ? 1 : 0);
       const nowStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      const isAdmin = authRoleService.isGerenciaAdminVerificadaNoServidor();
+      this._usaVersionadoFilial172 = true;
 
-      const usaVersionadoFilial172 = isModoAtualizacaoLocalAtivo() || (localMeta.filial_numero || '172') === '172';
-      this._usaVersionadoFilial172 = usaVersionadoFilial172;
-      const isBaseRubLocal = localMeta.status_base === 'BASE_RUB' || (localProdutos.length > 0 && localMeta.status_base !== 'SMGOI013');
-
-      if (!metaSnap.exists()) {
-        // Cloud has no documents yet
-        if (localProdutos.length > 0) {
-          if (!usaVersionadoFilial172 && !isBaseRubLocal) {
-            await this.pushCatalogoToCloud(localProdutos, localMeta);
+      // 1. VENCIMENTOS: processar pendências da fila V3 + buscar atualizações paginadas
+      try {
+        const resFila = await nuvemSyncEngine.processarFila();
+        if (resFila.erros > 0) {
+          const opsErro = nuvemSyncEngine.getFila().filter((o) => o.status === 'ERRO' && o.erroMensagem);
+          if (opsErro[0]?.erroMensagem) {
+            detalhesErros.push({
+              servico: 'Vencimentos (Fila)',
+              colecao: 'vencimentos / filiais/172/vencimentos',
+              operacao: OperationType.WRITE,
+              codigoErro: 'sync-error',
+              exigeGerenciaAdmin: opsErro[0].erroMensagem.includes('permission'),
+              isCotaExcedida: false,
+              mensagemOriginal: opsErro[0].erroMensagem,
+              mensagemUsuario: opsErro[0].erroMensagem,
+            });
           }
-          if (localVinculos.length > 0) await this.pushVinculosToCloud(localVinculos);
-          if (localSaeou.length > 0 && !usaVersionadoFilial172) await this.pushSaeou060ToCloud(localSaeou);
-          if (localVencimentos.length > 0) await this.pushAllLotesToCloud(localVencimentos);
-
-          this.updateStatus({
-            state: 'connected',
-            lastSyncTime: nowStr,
-            message: `Sincronização concluída (${localVencimentos.length} lotes e ${localVinculos.length} vínculos verificados).`,
-          });
-          return {
-            success: true,
-            message: `Nuvem conectada! Vínculos e vencimentos sincronizados com segurança.`,
-          };
-        } else {
-          // Initialize empty metadata document in cloud
-          await setDoc(metaDocRef, {
-            filial_numero: localMeta.filial_numero || '172',
-            filial_nome: localMeta.filial_nome || 'CASCAVEL',
-            status_base: 'VAZIA',
-            total_produtos: 0,
-            catalogo_version: 0,
-            updatedAt: new Date().toISOString(),
-          }, { merge: true });
-
-          this.updateStatus({
-            state: 'connected',
-            lastSyncTime: nowStr,
-            message: 'Conectado à Nuvem (pronto para importação)',
-          });
-          return { success: true, message: 'Conectado à nuvem com sucesso! Pronto para sincronizar.' };
         }
+      } catch (e: any) {
+        detalhesErros.push(
+          formatarErroSyncPorServico(e, 'Vencimentos (Fila)', 'vencimentos / filiais/172/vencimentos', OperationType.WRITE)
+        );
       }
 
-      // Cloud metadata exists
-      const data = metaSnap.data();
-      const remoteCatVersion = data.catalogo_version || 0;
-      const remoteTotal = data.total_produtos || 0;
-
-      let msg = 'Conectado à nuvem. Dados já estão em dia.';
-
-      // BASE RUB é soberana: se a base local já possui produtos ou status BASE_RUB, não puxar nem empurrar catálogo legado
-      const localCatVersion = localMeta.catalogo_version || this._localCatalogoVersion || 0;
-
-      if (!usaVersionadoFilial172 && !isBaseRubLocal && remoteTotal > 0 && (remoteCatVersion > localCatVersion || localProdutos.length === 0)) {
-        // Apenas puxar catálogo se local estiver completamente vazio e não for BASE RUB
-        await this.pullCatalogoFromCloud(remoteCatVersion);
-        msg = `Catálogo atualizado da nuvem (${remoteTotal} produtos).`;
-      } else if (!usaVersionadoFilial172 && !isBaseRubLocal && localProdutos.length > 0 && (remoteTotal === 0 || localCatVersion > remoteCatVersion)) {
-        // Se a cota permitir, atualizar nuvem
-        if (!isFirestoreQuotaExceeded()) {
-          await this.pushCatalogoToCloud(localProdutos, localMeta);
-          msg = `Catálogo local (${localProdutos.length} produtos) enviado para a nuvem.`;
-        }
-      }
-
-      // Sync vínculos
-      const remoteVincVersion = data.vinculos_version || 0;
-      const localVincVersion = localMeta.vinculos_version || this._localVinculosVersion || 0;
-      if (remoteVincVersion > localVincVersion || (localVinculos.length === 0 && (data.total_eans || 0) > 0)) {
-        await this.pullVinculosFromCloud(remoteVincVersion);
-      } else if (localVinculos.length > 0 && ((data.total_eans || 0) === 0 || localVincVersion > remoteVincVersion)) {
-        await this.pushVinculosToCloud(localVinculos);
-      }
-
-      // Sync SAEOU060 legado apenas quando não utiliza publicação versionada V3 da Filial 172
-      const remoteSaeouVersion = data.saeou060_version || 0;
-      const localSaeouVersion = localMeta.saeou060_version || this._localSaeou060Version || 0;
-      if (!usaVersionadoFilial172) {
-        if (remoteSaeouVersion > localSaeouVersion || (localSaeou.length === 0 && (data.total_saeou060 || 0) > 0)) {
-          await this.pullSaeou060FromCloud(remoteSaeouVersion);
-        } else if (localSaeou.length > 0 && ((data.total_saeou060 || 0) === 0 || localSaeouVersion > remoteSaeouVersion)) {
-          await this.pushSaeou060ToCloud(localSaeou);
-        }
-      }
-
-      // Sync vencimentos: bidirectional merge paginado sem truncamento de 250
       try {
         const remoteLotes = await nuvemSyncEngine.carregarTodosVencimentosPaginados('172');
         logFirestoreRead('syncFullVencimentosPaginado', 'vencimentos', remoteLotes.length);
@@ -503,21 +434,71 @@ class CloudSyncService {
         if (isQuotaError(e)) {
           markQuotaExceeded();
         } else {
-          console.warn('Could not read remote lotes paginados:', e?.message || e);
+          detalhesErros.push(
+            formatarErroSyncPorServico(e, 'Vencimentos (Leitura)', 'vencimentos', OperationType.LIST)
+          );
         }
       }
 
       if (localVencimentos.length > 0 && !isFirestoreQuotaExceeded()) {
-        await this.sincronizarVencimentosExistentes(localVencimentos);
+        const resVenc = await this.sincronizarVencimentosExistentesDetailed(localVencimentos);
+        if (resVenc.erroDetalhe) {
+          detalhesErros.push(resVenc.erroDetalhe);
+        }
       }
 
+      // 2. VÍNCULOS EAN (metadados/geral e vinculos_chunks)
+      if (!isFirestoreQuotaExceeded()) {
+        try {
+          const metaDocRef = doc(db, 'metadados', 'geral');
+          const metaSnap = await getDoc(metaDocRef);
+          logFirestoreRead('verificarMetadadosEan', 'metadados/geral', metaSnap.exists() ? 1 : 0);
+
+          if (metaSnap.exists()) {
+            const data = metaSnap.data();
+            const remoteVincVersion = data.vinculos_version || 0;
+            const localVincVersion = _localMeta?.vinculos_version || this._localVinculosVersion || 0;
+
+            if (remoteVincVersion > localVincVersion || (localVinculos.length === 0 && (data.total_eans || 0) > 0)) {
+              const pullRes = await this.pullVinculosFromCloudDetailed(remoteVincVersion);
+              if (!pullRes.sucesso && pullRes.erroDetalhe) {
+                detalhesErros.push(pullRes.erroDetalhe);
+              }
+            } else if (
+              localVinculos.length > 0 &&
+              isAdmin &&
+              ((data.total_eans || 0) === 0 || localVincVersion > remoteVincVersion)
+            ) {
+              const pushRes = await this.pushVinculosToCloudDetailed(localVinculos);
+              if (!pushRes.sucesso && pushRes.erroDetalhe) {
+                detalhesErros.push(pushRes.erroDetalhe);
+              }
+            }
+          } else if (localVinculos.length > 0 && isAdmin) {
+            const pushRes = await this.pushVinculosToCloudDetailed(localVinculos);
+            if (!pushRes.sucesso && pushRes.erroDetalhe) {
+              detalhesErros.push(pushRes.erroDetalhe);
+            }
+          }
+        } catch (errEan: any) {
+          detalhesErros.push(
+            formatarErroSyncPorServico(errEan, 'Vínculos EAN', 'metadados/geral', OperationType.GET)
+          );
+        }
+      }
+
+      const temErro = detalhesErros.length > 0;
+      const msg = temErro
+        ? detalhesErros.map((d) => d.mensagemUsuario).join(' | ')
+        : `Vencimentos e Vínculos EAN sincronizados com sucesso! (BASE RUB e SAEOU060 mantidos localmente via .zip).`;
+
       this.updateStatus({
-        state: 'connected',
+        state: temErro ? 'error' : 'connected',
         lastSyncTime: nowStr,
-        message: 'Nuvem Conectada e Sincronizada',
+        message: temErro ? detalhesErros[0].mensagemUsuario : 'Nuvem Conectada e Sincronizada (Híbrida V1.0)',
       });
 
-      return { success: true, message: msg };
+      return { success: !temErro, message: msg, detalhesErros };
     } catch (err: any) {
       if (isQuotaError(err)) {
         markQuotaExceeded();
@@ -529,102 +510,34 @@ class CloudSyncService {
         });
         return { success: true, message: quotaMsg };
       }
-      console.error('[CloudSync] Error in syncFull:', err);
+      const detail = formatarErroSyncPorServico(err, 'CloudSyncService', 'vencimentos / metadados/geral', OperationType.WRITE);
+      console.error('[CloudSync] Error in syncFull:', detail.mensagemUsuario);
       this.updateStatus({
         state: 'error',
-        message: err?.message || 'Erro ao sincronizar',
+        message: detail.mensagemUsuario,
       });
-      return { success: false, message: `Erro ao conectar com a nuvem: ${err?.message || 'Falha de comunicação'}` };
+      return { success: false, message: detail.mensagemUsuario, detalhesErros: [detail] };
     }
   }
 
   // ==========================================
-  // PULL METHODS (RECEIVING FROM CLOUD)
+  // MÉTODOS LEGADOS BASE RUB / SAEOU060 PERMANENTEMENTE DESATIVADOS
+  // (Arquitetura Híbrida V1.0: BASE RUB e SAEOU060 exclusivos locais via .zip)
   // ==========================================
 
-  public async pullCatalogoFromCloud(version?: number): Promise<boolean> {
-    if (this._isSyncing) return false;
-    if (isFirestoreQuotaExceeded()) return false;
-    this._isSyncing = true;
-    this.updateStatus({ state: 'syncing', message: 'Verificando catálogo na nuvem...' });
-
-    try {
-      await ensureAuth();
-      const metaSnap = await getDoc(doc(db, 'metadados', 'geral'));
-      if (!metaSnap.exists()) {
-        this.updateStatus({ state: 'connected' });
-        this._isSyncing = false;
-        return false;
-      }
-
-      const meta = metaSnap.data() as MetadadosBase & { catalogo_version?: number; total_chunks?: number };
-      if (meta.status_base === 'BASE_RUB' || meta.filial_numero === '172') {
-        // Filial 172 utiliza o rubSyncService (/filiais/172/catalogo_rub_versoes)
-        this.updateStatus({ state: 'connected' });
-        this._isSyncing = false;
-        return false;
-      }
-
-      const totalChunks = meta.total_chunks || 1;
-      const chunkDocs: { index: number; items: ProdutoSMG[] }[] = [];
-
-      // Carregamento seguro por ID para evitar ultrapassar o limite de 128 MiB de varredura do Firestore
-      for (let i = 0; i < Math.min(totalChunks, 50); i++) {
-        const chunkId = `chunk_${String(i).padStart(3, '0')}`;
-        const chunkSnap = await getDoc(doc(db, 'catalogo_chunks', chunkId));
-        if (chunkSnap.exists()) {
-          const d = chunkSnap.data();
-          if (d.items && Array.isArray(d.items)) {
-            chunkDocs.push({ index: d.index ?? i, items: d.items });
-          }
-        }
-      }
-
-      const allProducts: ProdutoSMG[] = [];
-      chunkDocs.forEach((c) => allProducts.push(...c.items));
-
-      if (allProducts.length > 0 && this._onRemoteCatalogoReceived) {
-        await this._onRemoteCatalogoReceived(allProducts, {
-          filial_numero: meta.filial_numero || '172',
-          filial_nome: meta.filial_nome || 'CASCAVEL',
-          status_base: meta.status_base || 'BASE_RUB',
-          total_produtos: allProducts.length,
-          total_vencimentos: meta.total_vencimentos || 0,
-          total_eans: meta.total_eans || 0,
-          total_saeou060: meta.total_saeou060 || 0,
-          ultima_atualizacao_smgoi013: meta.ultima_atualizacao_smgoi013,
-        });
-
-        this._localCatalogoVersion = version || meta.catalogo_version || Date.now();
-      }
-
-      this.updateStatus({
-        state: 'connected',
-        lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-        message: `Catálogo sincronizado (${allProducts.length} produtos)`,
-      });
-      this._isSyncing = false;
-      return true;
-    } catch (err: any) {
-      this._isSyncing = false;
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-        this.destroy();
-        this.updateStatus({
-          state: 'connected',
-          message: 'Modo local offline ativo (Cota da nuvem atingida — IndexedDB 100% seguro)',
-        });
-        console.warn('[CloudSync] Cota do Firestore atingida no catálogo. Modo offline mantido.');
-        return false;
-      }
-      console.warn('[CloudSync] Aviso ao baixar catálogo da nuvem:', err?.message || err);
-      this.updateStatus({ state: 'error', message: 'Erro ao baixar catálogo' });
-      return false;
-    }
+  public async pullCatalogoFromCloud(_version?: number): Promise<boolean> {
+    console.info('[CloudSync] pullCatalogoFromCloud desativado permanentemente pela Arquitetura Híbrida V1.0 (BASE RUB local via .zip).');
+    return false;
   }
 
-  public async pullVinculosFromCloud(version?: number): Promise<boolean> {
-    if (isFirestoreQuotaExceeded()) return false;
+  public async pullVinculosFromCloudDetailed(version?: number): Promise<{
+    sucesso: boolean;
+    total: number;
+    erroDetalhe?: SyncServiceErrorDetail;
+  }> {
+    if (isFirestoreQuotaExceeded()) {
+      return { sucesso: false, total: 0 };
+    }
     try {
       await ensureAuth();
       const chunksSnap = await getDocs(collection(db, 'vinculos_chunks'));
@@ -644,167 +557,64 @@ class CloudSyncService {
         await this._onRemoteVinculosReceived(allVinculos);
         this._localVinculosVersion = version || Date.now();
       }
-      return true;
+      return { sucesso: true, total: allVinculos.length };
     } catch (err: any) {
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-        return false;
-      }
-      console.warn('[CloudSync] Error pulling vinculos:', err?.message || err);
-      return false;
+      const detail = formatarErroSyncPorServico(err, 'Vínculos EAN', 'vinculos_chunks', OperationType.LIST);
+      console.warn('[CloudSync] Error pulling vinculos:', detail.mensagemUsuario);
+      return { sucesso: false, total: 0, erroDetalhe: detail };
     }
   }
 
-  public async pullSaeou060FromCloud(version?: number): Promise<boolean> {
-    if (isFirestoreQuotaExceeded()) return false;
-    try {
-      await ensureAuth();
-      const chunksSnap = await getDocs(collection(db, 'saeou060_chunks'));
-      const chunkDocs: { index: number; items: RegistroSaeou060[] }[] = [];
-      chunksSnap.forEach((docSnap) => {
-        const d = docSnap.data();
-        if (d.items && Array.isArray(d.items)) {
-          chunkDocs.push({ index: d.index ?? 0, items: d.items });
-        }
-      });
-      chunkDocs.sort((a, b) => a.index - b.index);
+  public async pullVinculosFromCloud(version?: number): Promise<boolean> {
+    const res = await this.pullVinculosFromCloudDetailed(version);
+    return res.sucesso;
+  }
 
-      const allSaeou: RegistroSaeou060[] = [];
-      chunkDocs.forEach((c) => allSaeou.push(...c.items));
-
-      if (allSaeou.length > 0 && this._onRemoteSaeou060Received) {
-        await this._onRemoteSaeou060Received(allSaeou);
-        this._localSaeou060Version = version || Date.now();
-      }
-      return true;
-    } catch (err: any) {
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-        return false;
-      }
-      console.warn('[CloudSync] Error pulling SAEOU060:', err?.message || err);
-      return false;
-    }
+  public async pullSaeou060FromCloud(_version?: number): Promise<boolean> {
+    console.info('[CloudSync] pullSaeou060FromCloud desativado permanentemente pela Arquitetura Híbrida V1.0 (SAEOU060 local via .zip).');
+    return false;
   }
 
   // ==========================================
   // PUSH METHODS (TRANSMITTING TO CLOUD)
   // ==========================================
 
-  /**
-   * Pushes the entire SMGOI013 catalog to Firestore in clean chunks of 300 items.
-   * Chunks are sanitized and null-safe to guarantee Firestore compatibility.
-   */
   public async pushCatalogoToCloud(
-    produtos: ProdutoSMG[],
-    meta: MetadadosBase,
-    onProgress?: (pct: number, msg: string) => void
+    _produtos: ProdutoSMG[],
+    _meta: MetadadosBase,
+    _onProgress?: (pct: number, msg: string) => void
   ): Promise<boolean> {
-    if (isFirestoreQuotaExceeded()) return false;
-    if ((meta?.filial_numero || '172') === '172' || meta?.status_base === 'BASE_RUB') {
-      // Na Filial 172 / BASE RUB, a publicação central é exclusiva do rubSyncService V3.
-      return false;
-    }
-    this.updateStatus({ state: 'syncing', message: 'Enviando catálogo para a nuvem...' });
-
-    try {
-      await ensureAuth();
-      const CHUNK_SIZE = 300;
-      const totalChunks = Math.max(1, Math.ceil(produtos.length / CHUNK_SIZE));
-      const newVersion = Date.now();
-
-      onProgress?.(10, `Preparando envio em ${totalChunks} lotes para a nuvem...`);
-
-      // Write each chunk to Firestore
-      for (let i = 0; i < totalChunks; i++) {
-        const chunkItems = produtos.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        const chunkDocRef = doc(db, 'catalogo_chunks', `chunk_${String(i).padStart(3, '0')}`);
-
-        // Strip heavy run-time precomputed strings to save bandwidth and sanitize
-        const cleanItems = chunkItems.map((p) =>
-          cleanForFirestore({
-            codigo_interno: p.codigo_interno || '',
-            digito: p.digito || '',
-            descricao: p.descricao || '',
-            embalagem: p.embalagem || '',
-            fator_embalagem: p.fator_embalagem ?? null,
-            unidade_medida: p.unidade_medida ?? null,
-            estoque_emb1: p.estoque_emb1 ?? 0,
-            estoque_emb9: p.estoque_emb9 ?? 0,
-            estoque_total: p.estoque_total ?? 0,
-            vendas_qtde_30d: p.vendas_qtde_30d ?? 0,
-            vendas_preco: p.vendas_preco ?? null,
-            custo_medio: p.custo_medio ?? null,
-            valor_estoque_planilha: p.valor_estoque_planilha ?? null,
-            data_ultima_entrada: p.data_ultima_entrada ?? null,
-            qtde_ultima_entrada: p.qtde_ultima_entrada ?? null,
-            dias_sem_venda: p.dias_sem_venda ?? null,
-            idade: p.idade ?? null,
-            qtde_ideal: p.qtde_ideal ?? null,
-            comprador_filial: p.comprador_filial ?? null,
-            comprador_matriz: p.comprador_matriz ?? null,
-            setor_fisico: p.setor_fisico ?? null,
-            setor_balanco: p.setor_balanco ?? null,
-            pedidos_pendentes: p.pedidos_pendentes ?? null,
-            codigo_exibicao: p.codigo_exibicao || `${p.codigo_interno}${p.digito ? '-' + p.digito : ''}`,
-            eans: p.eans || [],
-            is_demo: false,
-          })
-        );
-
-        await setDoc(chunkDocRef, cleanForFirestore({
-          index: i,
-          total: totalChunks,
-          count: cleanItems.length,
-          items: cleanItems,
-          updatedAt: new Date().toISOString(),
-        }));
-
-        const pct = Math.round(10 + ((i + 1) / totalChunks) * 80);
-        onProgress?.(pct, `Sincronizando lote ${i + 1} de ${totalChunks} na nuvem...`);
-      }
-
-      // Update metadata version document to signal all other connected devices
-      const metaDocRef = doc(db, 'metadados', 'geral');
-      await setDoc(metaDocRef, cleanForFirestore({
-        filial_numero: meta.filial_numero || '172',
-        filial_nome: meta.filial_nome || 'CASCAVEL',
-        status_base: meta.status_base || 'BASE_RUB',
-        total_produtos: produtos.length,
-        total_chunks: totalChunks,
-        catalogo_version: newVersion,
-        ultima_atualizacao_smgoi013: meta.ultima_atualizacao_smgoi013 || new Date().toLocaleString('pt-BR'),
-        updatedAt: new Date().toISOString(),
-      }), { merge: true });
-
-      this._localCatalogoVersion = newVersion;
-
-      this.updateStatus({
-        state: 'connected',
-        lastSyncTime: new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
-        message: `Catálogo sincronizado na nuvem (${produtos.length} produtos)`,
-      });
-      onProgress?.(100, 'Catálogo 100% sincronizado com a nuvem!');
-      return true;
-    } catch (err: any) {
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-        this.destroy();
-        this.updateStatus({
-          state: 'connected',
-          message: 'Modo local offline ativo (Cota da nuvem atingida — IndexedDB 100% seguro)',
-        });
-        console.warn('[CloudSync] Cota do Firestore atingida no envio do catálogo. Modo offline mantido.');
-        return false;
-      }
-      console.error('[CloudSync] Error pushing catalog to cloud:', err);
-      this.updateStatus({ state: 'error', message: 'Erro ao enviar catálogo para nuvem' });
-      return false;
-    }
+    console.warn('[CloudSync] pushCatalogoToCloud bloqueado permanentemente pela Arquitetura Híbrida V1.0 (BASE RUB exclusiva local via .zip / IndexedDB).');
+    return false;
   }
 
-  public async pushVinculosToCloud(vinculos: VinculoEan[]): Promise<boolean> {
-    if (isFirestoreQuotaExceeded()) return false;
+  public async pushVinculosToCloudDetailed(vinculos: VinculoEan[]): Promise<{
+    sucesso: boolean;
+    total: number;
+    erroDetalhe?: SyncServiceErrorDetail;
+  }> {
+    if (isFirestoreQuotaExceeded()) {
+      return { sucesso: false, total: 0 };
+    }
+    if (!authRoleService.isGerenciaAdminVerificadaNoServidor()) {
+      const msg =
+        '[Vínculos EAN • Coleção: vinculos_chunks / metadados/geral] Escrita na nuvem exige login Google verificado da Gerência (GERENCIA_ADMIN). Dados salvos localmente no IndexedDB.';
+      return {
+        sucesso: false,
+        total: 0,
+        erroDetalhe: {
+          servico: 'Vínculos EAN',
+          colecao: 'vinculos_chunks / metadados/geral',
+          operacao: OperationType.WRITE,
+          codigoErro: 'permission-denied',
+          exigeGerenciaAdmin: true,
+          isCotaExcedida: false,
+          mensagemOriginal: 'GERENCIA_ADMIN não autenticado',
+          mensagemUsuario: msg,
+        },
+      };
+    }
+
     try {
       await ensureAuth();
       const CHUNK_SIZE = 500;
@@ -814,98 +624,49 @@ class CloudSyncService {
       for (let i = 0; i < totalChunks; i++) {
         const chunkItems = vinculos.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
         const chunkDocRef = doc(db, 'vinculos_chunks', `chunk_${String(i).padStart(3, '0')}`);
-        await setDoc(chunkDocRef, cleanForFirestore({
-          index: i,
-          total: totalChunks,
-          items: chunkItems,
-          updatedAt: new Date().toISOString(),
-        }));
+        await setDoc(
+          chunkDocRef,
+          cleanForFirestore({
+            index: i,
+            total: totalChunks,
+            items: chunkItems,
+            updatedAt: new Date().toISOString(),
+          })
+        );
       }
 
-      await setDoc(doc(db, 'metadados', 'geral'), cleanForFirestore({
-        total_eans: vinculos.length,
-        vinculos_version: newVersion,
-        updatedAt: new Date().toISOString(),
-      }), { merge: true });
+      await setDoc(
+        doc(db, 'metadados', 'geral'),
+        cleanForFirestore({
+          total_eans: vinculos.length,
+          vinculos_version: newVersion,
+          updatedAt: new Date().toISOString(),
+        }),
+        { merge: true }
+      );
 
       this._localVinculosVersion = newVersion;
-      return true;
+      return { sucesso: true, total: vinculos.length };
     } catch (err: any) {
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-        return false;
-      }
-      console.warn('[CloudSync] Error pushing vinculos:', err?.message || err);
-      return false;
+      const detail = formatarErroSyncPorServico(
+        err,
+        'Vínculos EAN',
+        'vinculos_chunks / metadados/geral',
+        OperationType.WRITE
+      );
+      console.warn('[CloudSync] Error pushing vinculos:', detail.mensagemUsuario);
+      return { sucesso: false, total: 0, erroDetalhe: detail };
     }
   }
 
-  public async pushSaeou060ToCloud(registros: RegistroSaeou060[]): Promise<boolean> {
-    if (isFirestoreQuotaExceeded()) return false;
-    if (this._usaVersionadoFilial172) {
-      // Na Filial 172, o SAEOU060 é publicado exclusivamente via saeouSyncService V3.
-      return false;
-    }
-    try {
-      await ensureAuth();
-      const CHUNK_SIZE = 400;
-      const totalChunks = Math.max(1, Math.ceil(registros.length / CHUNK_SIZE));
-      const newVersion = Date.now();
+  public async pushVinculosToCloud(vinculos: VinculoEan[]): Promise<boolean> {
+    const res = await this.pushVinculosToCloudDetailed(vinculos);
+    return res.sucesso;
+  }
 
-      // 1. Gravar os novos chunks
-      for (let i = 0; i < totalChunks; i++) {
-        const chunkItems = registros.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        const chunkDocRef = doc(db, 'saeou060_chunks', `chunk_${String(i).padStart(3, '0')}`);
-        await setDoc(chunkDocRef, cleanForFirestore({
-          index: i,
-          total: totalChunks,
-          items: chunkItems,
-          updatedAt: new Date().toISOString(),
-        }));
-      }
-
-      // 2. Regra 14: Remover com segurança chunks excedentes/obsoletos no Firestore
-      try {
-        const existingChunksSnap = await getDocs(collection(db, 'saeou060_chunks'));
-        const deletePromises: Promise<void>[] = [];
-
-        existingChunksSnap.forEach((docSnap) => {
-          const docId = docSnap.id;
-          const match = docId.match(/^chunk_(\d+)$/);
-          if (match) {
-            const idx = parseInt(match[1], 10);
-            if (idx >= totalChunks) {
-              deletePromises.push(deleteDoc(docSnap.ref));
-            }
-          }
-        });
-
-        if (deletePromises.length > 0) {
-          await Promise.all(deletePromises);
-          console.log(`[CloudSync] ${deletePromises.length} chunks obsoletos do SAEOU060 removidos com sucesso.`);
-        }
-      } catch (errClean) {
-        console.warn('[CloudSync] Aviso ao limpar chunks antigos excedentes:', errClean);
-      }
-
-      // 3. Atualizar metadados globais
-      await setDoc(doc(db, 'metadados', 'geral'), cleanForFirestore({
-        total_saeou060: registros.length,
-        total_saeou_chunks: totalChunks,
-        saeou060_version: newVersion,
-        updatedAt: new Date().toISOString(),
-      }), { merge: true });
-
-      this._localSaeou060Version = newVersion;
-      return true;
-    } catch (err: any) {
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-        return false;
-      }
-      console.warn('[CloudSync] Error pushing SAEOU060:', err?.message || err);
-      return false;
-    }
+  public async pushSaeou060ToCloud(_registros: RegistroSaeou060[]): Promise<boolean> {
+    console.warn('[CloudSync] pushSaeou060ToCloud bloqueado permanentemente pela Arquitetura Híbrida V1.0 (SAEOU060 exclusivo local via .zip / IndexedDB).');
+    return false;
   }
 
   // ==========================================
@@ -919,7 +680,6 @@ class CloudSyncService {
     }
     try {
       await ensureAuth().catch(() => null);
-      // Nuvem V3: Consulta paginada com cursores sem truncamento em 250 registros
       const lotes = await nuvemSyncEngine.carregarTodosVencimentosPaginados('172');
       logFirestoreRead('pullVencimentosPaginado', 'vencimentos', lotes.length);
 
@@ -928,12 +688,12 @@ class CloudSyncService {
       }
       return lotes;
     } catch (err: any) {
-      console.warn('[CloudSync] Erro ao buscar vencimentos da nuvem:', err?.message);
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
+      const detail = formatarErroSyncPorServico(err, 'Vencimentos', 'vencimentos', OperationType.LIST);
+      console.warn('[CloudSync] Erro ao buscar vencimentos da nuvem:', detail.mensagemUsuario);
+      if (detail.isCotaExcedida) {
         this.updateStatus({
           state: 'error',
-          message: 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.',
+          message: detail.mensagemUsuario,
         });
       }
       return [];
@@ -942,16 +702,21 @@ class CloudSyncService {
 
   public async pushLoteToCloud(lote: LoteVencimento): Promise<void> {
     if (isFirestoreQuotaExceeded()) return;
+    const rawPayload = buildVencimentoCentralPayload(lote);
+    const docId = rawPayload.vencimentoId || lote.id;
+    const docPath = `vencimentos/${docId}`;
     try {
       await ensureAuth().catch(() => null);
-      const payload = buildVencimentoCentralPayload(lote);
-      const loteDocRef = doc(db, 'vencimentos', payload.vencimentoId || lote.id);
+      const loteDocRef = doc(db, 'vencimentos', docId);
+      const snap = await getDoc(loteDocRef);
+      const payload = sanitizeLoteForFirestore(rawPayload, {
+        isUpdate: snap.exists(),
+        remoteData: snap.exists() ? snap.data() : undefined,
+      });
       await setDoc(loteDocRef, payload, { merge: true });
     } catch (err: any) {
-      console.warn('[CloudSync] Error saving lote to cloud:', err?.message);
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-      }
+      const detail = formatarErroSyncPorServico(err, 'Vencimentos', docPath, OperationType.WRITE);
+      console.warn('[CloudSync] Error saving lote to cloud:', detail.mensagemUsuario);
     }
   }
 
@@ -965,32 +730,36 @@ class CloudSyncService {
         const slice = lotes.slice(i, i + batchSize);
         slice.forEach((lote) => {
           if (lote.isDeleted) return;
-          const payload = buildVencimentoCentralPayload(lote);
-          const docRef = doc(db, 'vencimentos', payload.vencimentoId || lote.id);
+          const rawPayload = buildVencimentoCentralPayload(lote);
+          const isExistingSynced = Boolean((lote as any)._serverVersion);
+          const payload = sanitizeLoteForFirestore(rawPayload, { isUpdate: isExistingSynced });
+          const docRef = doc(db, 'vencimentos', rawPayload.vencimentoId || lote.id);
           batch.set(docRef, payload, { merge: true });
         });
         await batch.commit();
       }
     } catch (err: any) {
-      console.warn('[CloudSync] Error batch saving lotes to cloud:', err?.message);
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-      }
+      const detail = formatarErroSyncPorServico(err, 'Vencimentos', 'vencimentos', OperationType.WRITE);
+      console.warn('[CloudSync] Error batch saving lotes to cloud:', detail.mensagemUsuario);
     }
   }
 
   public async deleteLoteFromCloud(loteId: string, motivoExclusao = 'Exclusão lógica local'): Promise<void> {
     if (isFirestoreQuotaExceeded()) return;
+    const docPath = `vencimentos/${loteId}`;
     try {
       await ensureAuth().catch(() => null);
       const loteDocRef = doc(db, 'vencimentos', loteId);
+      const snap = await getDoc(loteDocRef);
+      if (!snap.exists() && !authRoleService.isGerenciaAdminVerificadaNoServidor()) {
+        return;
+      }
       const agora = new Date().toISOString();
       const motivoSeguro =
         motivoExclusao && motivoExclusao.trim().length >= 3
           ? motivoExclusao.trim().slice(0, 200)
           : 'Exclusão lógica local';
-      await setDoc(
-        loteDocRef,
+      const payload = sanitizeLoteForFirestore(
         {
           vencimentoId: loteId,
           id: loteId,
@@ -1001,23 +770,21 @@ class CloudSyncService {
           updatedAt: agora,
           deviceId: getDeviceId(),
         },
-        { merge: true }
+        {
+          isUpdate: snap.exists(),
+          remoteData: snap.exists() ? snap.data() : undefined,
+        }
       );
+      await setDoc(loteDocRef, payload, { merge: true });
     } catch (err: any) {
-      console.warn('[CloudSync] Error deleting lote from cloud:', err?.message);
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-      }
+      const detail = formatarErroSyncPorServico(err, 'Vencimentos', docPath, OperationType.UPDATE);
+      console.warn('[CloudSync] Error deleting lote from cloud:', detail.mensagemUsuario);
     }
   }
 
-  /**
-   * Sincronização segura de vencimentos existentes locais com a nuvem (Requisito 20)
-   * Requisito 11 e 12: Gravação direta em lote sem pré-leitura getDocs da coleção inteira.
-   */
-  public async sincronizarVencimentosExistentes(
+  public async sincronizarVencimentosExistentesDetailed(
     locais: LoteVencimento[]
-  ): Promise<{ enviados: number; ignorados: number }> {
+  ): Promise<{ enviados: number; ignorados: number; erroDetalhe?: SyncServiceErrorDetail }> {
     if (!db) return { enviados: 0, ignorados: 0 };
     if (isFirestoreQuotaExceeded()) {
       return { enviados: 0, ignorados: 0 };
@@ -1026,7 +793,7 @@ class CloudSyncService {
       await ensureAuth().catch(() => null);
       let enviados = 0;
       let ignorados = 0;
-      const batch = writeBatch(db);
+      let batch = writeBatch(db);
       let countInBatch = 0;
 
       for (const lote of locais) {
@@ -1035,14 +802,17 @@ class CloudSyncService {
           continue;
         }
 
-        const payload = buildVencimentoCentralPayload(lote);
-        const docRef = doc(db, 'vencimentos', payload.vencimentoId || lote.id);
+        const rawPayload = buildVencimentoCentralPayload(lote);
+        const isExistingSynced = Boolean((lote as any)._serverVersion);
+        const payload = sanitizeLoteForFirestore(rawPayload, { isUpdate: isExistingSynced });
+        const docRef = doc(db, 'vencimentos', rawPayload.vencimentoId || lote.id);
         batch.set(docRef, payload, { merge: true });
         enviados++;
         countInBatch++;
 
         if (countInBatch >= 300) {
           await batch.commit();
+          batch = writeBatch(db);
           countInBatch = 0;
         }
       }
@@ -1053,25 +823,30 @@ class CloudSyncService {
 
       return { enviados, ignorados };
     } catch (err: any) {
-      console.warn('[CloudSync] Erro na sincronização de vencimentos existentes:', err?.message);
-      if (isQuotaError(err)) {
-        markQuotaExceeded();
-      }
-      return { enviados: 0, ignorados: 0 };
+      const detail = formatarErroSyncPorServico(err, 'Vencimentos', 'vencimentos', OperationType.WRITE);
+      console.warn('[CloudSync] Erro na sincronização de vencimentos existentes:', detail.mensagemUsuario);
+      return { enviados: 0, ignorados: 0, erroDetalhe: detail };
     }
+  }
+
+  public async sincronizarVencimentosExistentes(
+    locais: LoteVencimento[]
+  ): Promise<{ enviados: number; ignorados: number }> {
+    const res = await this.sincronizarVencimentosExistentesDetailed(locais);
+    return { enviados: res.enviados, ignorados: res.ignorados };
   }
 
   public async pushHistoricoToCloud(hist: ResumoImportacao): Promise<void> {
     if (isFirestoreQuotaExceeded()) return;
+    // Regra de segurança exige GERENCIA_ADMIN para /historico_importacoes
+    if (!authRoleService.isGerenciaAdminVerificadaNoServidor()) return;
     try {
       await ensureAuth();
       const histDocRef = doc(db, 'historico_importacoes', hist.id || `hist-${Date.now()}`);
       await setDoc(histDocRef, cleanForFirestore(hist));
     } catch (err: any) {
-      if (isQuotaError(err)) {
-        markQuotaExceeded(err?.message, detectQuotaResourceType(err));
-      }
-      console.warn('[CloudSync] Error saving historico to cloud:', err);
+      const detail = formatarErroSyncPorServico(err, 'Histórico Importações', 'historico_importacoes', OperationType.WRITE);
+      console.warn('[CloudSync] Error saving historico to cloud:', detail.mensagemUsuario);
     }
   }
 

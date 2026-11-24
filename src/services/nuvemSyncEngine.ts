@@ -34,12 +34,14 @@ import {
   db,
   detectQuotaResourceType,
   ensureAuth,
+  formatarErroSyncPorServico,
   isFirestoreQuotaExceeded,
   isQuotaError,
   markQuotaExceeded,
+  OperationType,
 } from './firebase';
 import { authRoleService } from './authRoleService';
-import { getDeviceId } from './deviceId';
+import { getDeviceId, sanitizeLoteForFirestore } from './deviceId';
 import { LoteVencimento, DivergenciaRegistro } from '../types';
 import { dbGetAll, dbPut, STORES } from './db';
 import { syncQueueService } from './syncQueueService';
@@ -336,8 +338,9 @@ class NuvemSyncEngine {
       tipo: 'CREATE',
       filialId: user.filialId || '172',
       loteId: lote.id,
-      payload: {
+      payload: sanitizeLoteForFirestore({
         ...lote,
+        vencimentoId: lote.vencimentoId || lote.id,
         filialId: user.filialId || '172',
         criadoPor: user.nome,
         criadoPorMatricula: user.matricula,
@@ -345,7 +348,7 @@ class NuvemSyncEngine {
         criadoEm: lote.criado_em || agora,
         atualizadoEm: agora,
         _versaoLocal: 1,
-      },
+      }),
       versaoLocal: 1,
       timestampCriacao: agora,
       status: 'PENDENTE',
@@ -374,7 +377,14 @@ class NuvemSyncEngine {
     const pendingIdx = this._queue.findIndex((o) => o.loteId === lote.id && o.status === 'PENDENTE');
     if (pendingIdx !== -1) {
       const existing = this._queue[pendingIdx];
-      existing.payload = { ...existing.payload, ...lote, atualizadoEm: agora };
+      existing.payload = sanitizeLoteForFirestore({
+        ...existing.payload,
+        ...lote,
+        atualizadoEm: agora,
+        atualizadoPor: user.nome,
+        atualizadoPorMatricula: user.matricula,
+        atualizadoPorPapel: user.papel,
+      });
       existing.timestampCriacao = agora;
       this.salvarFilaPersistente();
       this.notificar();
@@ -387,14 +397,15 @@ class NuvemSyncEngine {
       tipo: 'UPDATE',
       filialId: user.filialId || '172',
       loteId: lote.id,
-      payload: {
+      payload: sanitizeLoteForFirestore({
         ...lote,
+        vencimentoId: lote.vencimentoId || lote.id,
         filialId: user.filialId || '172',
         atualizadoPor: user.nome,
         atualizadoPorMatricula: user.matricula,
         atualizadoPorPapel: user.papel,
         atualizadoEm: agora,
-      },
+      }),
       versaoLocal: ((lote as any)._versaoLocal || 1) + 1,
       versaoServidorEsperada,
       timestampCriacao: agora,
@@ -533,7 +544,7 @@ class NuvemSyncEngine {
           if (isQuotaError(err)) {
             markQuotaExceeded(err?.message, detectQuotaResourceType(err));
             op.status = 'ERRO';
-            op.erroMensagem = 'Cota do Firestore temporariamente indisponível. Dados salvos com segurança no dispositivo.';
+            op.erroMensagem = `[Vencimentos • Coleção: vencimentos] Cota diária gratuita do Spark atingida. Dados salvos com segurança no dispositivo.`;
             this._statusMap.set(op.loteId, 'ERRO');
             break;
           }
@@ -560,7 +571,8 @@ class NuvemSyncEngine {
     if (!db) throw new Error('Firestore indisponível');
 
     const filialId = op.filialId || '172';
-    // Documento em formato com suporte a subcoleção segregada e coleção raiz para compatibilidade
+    const docFilialPath = `filiais/${filialId}/vencimentos/${op.loteId}`;
+    const docRaizPath = `vencimentos/${op.loteId}`;
     const docFilialRef = doc(db, 'filiais', filialId, 'vencimentos', op.loteId);
     const docRaizRef = doc(db, 'vencimentos', op.loteId);
 
@@ -568,15 +580,73 @@ class NuvemSyncEngine {
     await Promise.race([
       (async () => {
         if (op.tipo === 'DELETE_LOGICO') {
-          // Soft-delete: Atualiza flags isDeleted, motivo e usuário de exclusão
-          const payloadClean = this.limparPayloadFirestore(op.payload);
-          await setDoc(docFilialRef, payloadClean, { merge: true });
-          await setDoc(docRaizRef, payloadClean, { merge: true }).catch(() => null);
+          const isAdmin = authRoleService.isGerenciaAdminVerificadaNoServidor();
+          const [filialSnap, raizSnap] = await Promise.all([
+            getDoc(docFilialRef),
+            getDoc(docRaizRef),
+          ]);
+
+          const safeReason =
+            typeof op.payload?.motivoExclusao === 'string' && op.payload.motivoExclusao.trim().length >= 3
+              ? op.payload.motivoExclusao.trim().slice(0, 200)
+              : 'Exclusão lógica local confirmada';
+
+          const baseDelete = {
+            ...op.payload,
+            id: op.loteId,
+            vencimentoId: op.loteId,
+            filialId,
+            isDeleted: true,
+            motivoExclusao: safeReason,
+            deletedAt: op.payload?.deletedAt || new Date().toISOString(),
+            updatedAt: op.payload?.updatedAt || new Date().toISOString(),
+            deviceId: getDeviceId(),
+          };
+
+          if (filialSnap.exists() || isAdmin) {
+            const payloadFilial = sanitizeLoteForFirestore(baseDelete, {
+              isUpdate: filialSnap.exists(),
+              remoteData: filialSnap.exists() ? filialSnap.data() : undefined,
+            });
+            try {
+              await setDoc(docFilialRef, payloadFilial, { merge: true });
+            } catch (err: any) {
+              const detail = formatarErroSyncPorServico(
+                err,
+                'Vencimentos',
+                docFilialPath,
+                filialSnap.exists() ? OperationType.UPDATE : OperationType.CREATE
+              );
+              throw new Error(detail.mensagemUsuario);
+            }
+          }
+
+          if (raizSnap.exists() || isAdmin) {
+            const payloadRaiz = sanitizeLoteForFirestore(baseDelete, {
+              isUpdate: raizSnap.exists(),
+              remoteData: raizSnap.exists() ? raizSnap.data() : undefined,
+            });
+            try {
+              await setDoc(docRaizRef, payloadRaiz, { merge: true });
+            } catch (err: any) {
+              const detail = formatarErroSyncPorServico(
+                err,
+                'Vencimentos',
+                docRaizPath,
+                raizSnap.exists() ? OperationType.UPDATE : OperationType.CREATE
+              );
+              throw new Error(detail.mensagemUsuario);
+            }
+          }
           return;
         }
 
         // Para CREATE e UPDATE: verificar concorrência
-        const remoteSnap = await getDoc(docFilialRef);
+        const [remoteSnap, raizSnap] = await Promise.all([
+          getDoc(docFilialRef),
+          getDoc(docRaizRef),
+        ]);
+
         if (remoteSnap.exists()) {
           const remoteData = remoteSnap.data();
           const remoteUpdatedAt = remoteData?.updatedAt || remoteData?.atualizadoEm;
@@ -589,7 +659,6 @@ class NuvemSyncEngine {
             remoteData?._serverVersion &&
             remoteData._serverVersion > op.versaoServidorEsperada
           ) {
-            // DETECTADO CONFLITO CONCORRENTE: Não sobrescrever automaticamente!
             const conflito: ConflitoSincronizacao = {
               id: `conf_${Date.now()}_${op.loteId}`,
               loteId: op.loteId,
@@ -606,17 +675,49 @@ class NuvemSyncEngine {
           }
         }
 
-        // Gravação segura confirmada
         const agoraServidor = new Date().toISOString();
-        const payloadFinal = {
-          ...this.limparPayloadFirestore(op.payload),
+        const rawMerged = {
+          ...op.payload,
+          id: op.loteId,
+          vencimentoId: op.loteId,
+          filialId,
           _serverVersion: (op.versaoServidorEsperada || 0) + 1,
           _syncedAt: agoraServidor,
           deviceId: getDeviceId(),
         };
 
-        await setDoc(docFilialRef, payloadFinal, { merge: true });
-        await setDoc(docRaizRef, payloadFinal, { merge: true }).catch(() => null);
+        const payloadFilial = sanitizeLoteForFirestore(rawMerged, {
+          isUpdate: remoteSnap.exists(),
+          remoteData: remoteSnap.exists() ? remoteSnap.data() : undefined,
+        });
+        const payloadRaiz = sanitizeLoteForFirestore(rawMerged, {
+          isUpdate: raizSnap.exists(),
+          remoteData: raizSnap.exists() ? raizSnap.data() : undefined,
+        });
+
+        try {
+          await setDoc(docFilialRef, payloadFilial, { merge: true });
+        } catch (err: any) {
+          const detail = formatarErroSyncPorServico(
+            err,
+            'Vencimentos',
+            docFilialPath,
+            remoteSnap.exists() ? OperationType.UPDATE : OperationType.CREATE
+          );
+          throw new Error(detail.mensagemUsuario);
+        }
+
+        try {
+          await setDoc(docRaizRef, payloadRaiz, { merge: true });
+        } catch (err: any) {
+          const detail = formatarErroSyncPorServico(
+            err,
+            'Vencimentos',
+            docRaizPath,
+            raizSnap.exists() ? OperationType.UPDATE : OperationType.CREATE
+          );
+          throw new Error(detail.mensagemUsuario);
+        }
       })(),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Tempo limite de rede excedido (7s)')), 7000)),
     ]);

@@ -20,23 +20,29 @@ import {
   getDocs,
   limit,
   query,
-  setDoc,
   where,
-  writeBatch
 } from 'firebase/firestore';
 import {
   db,
-  detectQuotaResourceType,
   ensureAuth,
+  formatarErroSyncPorServico,
   isFirestoreQuotaExceeded,
   isQuotaError,
   markQuotaExceeded,
+  OperationType,
+  SyncServiceErrorDetail,
 } from './firebase';
+import { authRoleService } from './authRoleService';
+import { buildVencimentoCentralPayload } from './deviceId';
+import { isModoAtualizacaoLocalAtivo } from './localPackageMode';
+import { dbGetAll, dbGetMeta, STORES } from './db';
+import { spcoiSyncService } from './spcoiSyncService';
+import { comercialSyncService } from './comercialSyncService';
 import {
   LoteVencimento,
+  MetadadosBase,
   ProdutoSMG,
   Promotor,
-  RegistroAuditoriaPromotor,
   StatusPromotor,
   VinculoEan,
   VinculoPromotor
@@ -87,10 +93,6 @@ export interface VencimentoCentralDoc {
   quantidade: number;
   enviarParaComprador: boolean;
   status: string;
-  criadoPorTipo: 'ADMIN' | 'PROMOTOR';
-  criadoPorId: string;
-  atualizadoPorTipo: 'ADMIN' | 'PROMOTOR';
-  atualizadoPorId: string;
   criadoEm: string;
   atualizadoEm: string;
   descricao_produto?: string;
@@ -177,6 +179,28 @@ export interface TestesObrigatoriosResultado {
   itens: TesteResultadoItem[];
 }
 
+export interface StatusNuvemHibrida {
+  conectado: boolean;
+  projectId: string;
+  modoArquitetura: 'HIBRIDA_V1';
+  gerenciaAdminAutenticada: boolean;
+  gerenciaEmail: string | null;
+  cotaBloqueada: boolean;
+  produtosCount: number;
+  saeouCount: number;
+  spcoiCount: number;
+  vinculosCount: number;
+  vencimentosCount: number;
+  promotoresCount: number;
+  agenciasCount: number;
+  versaoSpcoiRemota: string | null;
+  versaoSpcoiLocal: string | null;
+  comercialUltimaAlteracao: string | null;
+  vinculosVersaoRemota: number | null;
+  ultimaSincronizacao: string;
+  servicosErros: SyncServiceErrorDetail[];
+}
+
 // ============================================================================
 // GERADORES DE CHAVES ESTÁVEIS
 // ============================================================================
@@ -202,36 +226,17 @@ export function buildVencimentoKey(filialId: string, codigoInterno: string, digi
   return `${cFilial}_${cInterno}_${cDigito}_${cData}`;
 }
 
-// Limpeza de campos undefined para evitar erros de serialização do Firestore
-function cleanForFirestore<T extends Record<string, any>>(obj: T): T {
-  const clean: any = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== undefined) {
-      if (v !== null && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date)) {
-        clean[k] = cleanForFirestore(v);
-      } else {
-        clean[k] = v;
-      }
-    }
-  }
-  return clean;
-}
-
 // ============================================================================
 // CLASSE PRINCIPAL CENTRAL FIRESTORE SERVICE
 // ============================================================================
 
 export class CentralFirestoreService {
-  private _isMigrating = false;
-
   /**
-   * SINCRONIZAR BASE COM A NUVEM
-   * Realiza a migração/envio da base local (Produtos, Vínculos EAN, Vencimentos,
-   * Promotores e Vínculos) para o Firestore Central em lotes controlados (batches de 300)
-   * sem travar a interface e exibindo progresso contínuo.
+   * MÉTODO LEGADO DESATIVADO PERMANENTEMENTE PELA ARQUITETURA HÍBRIDA V1.0.
+   * Nunca grava BASE RUB em lotes de 300 nem envia coleções comerciais antigas para o Firestore.
    */
   public async sincronizarBaseComNuvem(
-    dadosLocais: {
+    _dadosLocais: {
       produtos: ProdutoSMG[];
       vinculos: VinculoEan[];
       vencimentos: LoteVencimento[];
@@ -240,297 +245,51 @@ export class CentralFirestoreService {
       filialPadrao?: string;
     },
     onProgress?: (info: MigracaoProgressInfo) => void
-  ): Promise<{ sucesso: boolean; mensagem: string; stats: any }> {
-    if (this._isMigrating) {
-      throw new Error('Uma sincronização com a nuvem já está em andamento.');
-    }
-
-    if (isFirestoreQuotaExceeded()) {
-      return {
-        sucesso: false,
-        mensagem: 'Cota diária do Firebase Spark aguardando liberação. Dados locais preservados no IndexedDB.',
-        stats: {
-          produtos: 0,
-          vinculosEan: 0,
-          vencimentos: 0,
-          promotores: 0,
-          vinculosPromotor: 0,
-        },
-      };
-    }
-
-    if (!db) {
-      throw new Error('Banco de dados Firestore não inicializado.');
-    }
-
-    this._isMigrating = true;
-    const filialPadrao = dadosLocais.filialPadrao || '172';
-
-    const info: MigracaoProgressInfo = {
-      etapa: 'INICIANDO',
-      mensagem: 'Autenticando e preparando conexão com o Firestore...',
-      produtos: { atual: 0, total: dadosLocais.produtos.length },
-      vinculosEan: { atual: 0, total: dadosLocais.vinculos.length },
-      vencimentos: { atual: 0, total: dadosLocais.vencimentos.length },
-      promotores: { atual: 0, total: dadosLocais.promotores.length },
-      vinculosPromotor: { atual: 0, total: dadosLocais.vinculosPromotores.length },
-      porcentagemGeral: 0,
+  ): Promise<{
+    sucesso: boolean;
+    bloqueadoArquiteturaHibrida?: boolean;
+    mensagem: string;
+    stats: {
+      produtos: number;
+      vinculosEan: number;
+      vencimentos: number;
+      promotores: number;
+      vinculosPromotor: number;
     };
+  }> {
+    const mensagem =
+      'Envio legado da BASE RUB em lotes de 300 desativado permanentemente pela Arquitetura Híbrida V1.0. BASE RUB e SAEOU060 operam exclusivamente no IndexedDB via .zip; utilize SPCOI007 compactado, Sincronização Comercial, Vencimentos e Vínculos EAN.';
 
-    const updateProgress = () => {
-      const totalItens =
-        info.produtos.total +
-        info.vinculosEan.total +
-        info.vencimentos.total +
-        info.promotores.total +
-        info.vinculosPromotor.total;
+    onProgress?.({
+      etapa: 'CONCLUIDO',
+      mensagem,
+      produtos: { atual: 0, total: 0 },
+      vinculosEan: { atual: 0, total: 0 },
+      vencimentos: { atual: 0, total: 0 },
+      promotores: { atual: 0, total: 0 },
+      vinculosPromotor: { atual: 0, total: 0 },
+      porcentagemGeral: 100,
+    });
 
-      const itensProcessados =
-        info.produtos.atual +
-        info.vinculosEan.atual +
-        info.vencimentos.atual +
-        info.promotores.atual +
-        info.vinculosPromotor.atual;
-
-      info.porcentagemGeral = totalItens > 0 ? Math.round((itensProcessados / totalItens) * 100) : 100;
-      onProgress?.({ ...info });
+    console.warn('[CentralFirestoreService] sincronizarBaseComNuvem legado bloqueado pela Arquitetura Híbrida V1.0.');
+    return {
+      sucesso: false,
+      bloqueadoArquiteturaHibrida: true,
+      mensagem,
+      stats: {
+        produtos: 0,
+        vinculosEan: 0,
+        vencimentos: 0,
+        promotores: 0,
+        vinculosPromotor: 0,
+      },
     };
-
-    try {
-      updateProgress();
-      await ensureAuth();
-
-      const BATCH_SIZE = 300; // Seguro abaixo do limite de 500 do Firestore
-
-      // 1. SINCRONIZAR PRODUTOS SMGOI013
-      info.etapa = 'PRODUTOS';
-      info.mensagem = `Sincronizando ${info.produtos.total} produtos em lotes...`;
-      updateProgress();
-
-      for (let i = 0; i < dadosLocais.produtos.length; i += BATCH_SIZE) {
-        if (isFirestoreQuotaExceeded()) break;
-        const batch = writeBatch(db);
-        const chunk = dadosLocais.produtos.slice(i, i + BATCH_SIZE);
-
-        for (const p of chunk) {
-          const docId = buildProdutoKey(filialPadrao, p.codigo_interno, p.digito);
-          const docRef = doc(db, 'produtos', docId);
-
-          const tipoEstoque: 'PESO' | 'UNIDADE' =
-            p.unidade_medida === 'KG' || p.embalagem?.includes('KG') ? 'PESO' : 'UNIDADE';
-
-          const docData: ProdutoCentralDoc = {
-            codigoInterno: String(p.codigo_interno || '').trim().replace(/^0+/, ''),
-            digito: String(p.digito || '').trim(),
-            codigoCompleto: p.codigo_original || p.codigo_exibicao || `${p.codigo_interno}-${p.digito}`,
-            descricao: p.descricao || '',
-            embalagem: p.embalagem || '',
-            setor: p.setor_fisico || p.setor_balanco || 'LOJA',
-            filialId: filialPadrao,
-            emb1: Number(p.estoque_emb1 || 0),
-            emb9: Number(p.estoque_emb9 || 0),
-            tipoEstoque,
-            dataImportacao: p.atualizado_em || new Date().toISOString(),
-            atualizadoEm: new Date().toISOString(),
-            fator_embalagem: p.fator_embalagem,
-            unidade_medida: p.unidade_medida,
-            vendas_preco: p.vendas_preco,
-            custo_medio: p.custo_medio ?? null,
-            estoque_total: p.estoque_total ?? 0,
-            dias_sem_venda: p.dias_sem_venda ?? 0,
-            idade: p.idade ?? 0,
-            eans: p.eans || [],
-          };
-
-          batch.set(docRef, cleanForFirestore(docData), { merge: true });
-        }
-
-        await batch.commit();
-        info.produtos.atual = Math.min(i + BATCH_SIZE, dadosLocais.produtos.length);
-        updateProgress();
-
-        // Pausa cooperativa para não bloquear o event loop
-        await new Promise((resolve) => setTimeout(resolve, 15));
-      }
-
-      // 2. SINCRONIZAR VÍNCULOS EAN
-      info.etapa = 'VINCULOS_EAN';
-      info.mensagem = `Sincronizando ${info.vinculosEan.total} vínculos EAN...`;
-      updateProgress();
-
-      for (let i = 0; i < dadosLocais.vinculos.length; i += BATCH_SIZE) {
-        if (isFirestoreQuotaExceeded()) break;
-        const batch = writeBatch(db);
-        const chunk = dadosLocais.vinculos.slice(i, i + BATCH_SIZE);
-
-        for (const v of chunk) {
-          const cleanEan = String(v.ean || '').trim().replace(/\D/g, '');
-          if (!cleanEan) continue;
-
-          const docId = buildVinculoEanKey(filialPadrao, cleanEan);
-          const docRef = doc(db, 'vinculosEAN', docId);
-
-          const docData: VinculoEanCentralDoc = {
-            ean: cleanEan,
-            codigoInterno: String(v.codigo_interno || '').trim().replace(/^0+/, ''),
-            filialId: filialPadrao,
-            atualizadoEm: v.criado_em || new Date().toISOString(),
-            digito: v.digito,
-            descricao: v.descricao,
-          };
-
-          batch.set(docRef, cleanForFirestore(docData), { merge: true });
-        }
-
-        await batch.commit();
-        info.vinculosEan.atual = Math.min(i + BATCH_SIZE, dadosLocais.vinculos.length);
-        updateProgress();
-
-        await new Promise((resolve) => setTimeout(resolve, 15));
-      }
-
-      // 3. SINCRONIZAR VENCIMENTOS (com garantia de unicidade filialId_codigoInterno_digito_dataVencimento)
-      info.etapa = 'VENCIMENTOS';
-      info.mensagem = `Sincronizando ${info.vencimentos.total} registros de vencimento...`;
-      updateProgress();
-
-      for (let i = 0; i < dadosLocais.vencimentos.length; i += BATCH_SIZE) {
-        if (isFirestoreQuotaExceeded()) break;
-        const batch = writeBatch(db);
-        const chunk = dadosLocais.vencimentos.slice(i, i + BATCH_SIZE);
-
-        for (const v of chunk) {
-          const docId = buildVencimentoKey(filialPadrao, v.codigo_interno, v.digito, v.data_validade);
-          const docRef = doc(db, 'vencimentos', docId);
-
-          const docData: VencimentoCentralDoc = {
-            vencimentoId: docId,
-            codigoInterno: String(v.codigo_interno || '').trim().replace(/^0+/, ''),
-            digito: String(v.digito || '').trim(),
-            filialId: filialPadrao,
-            dataVencimento: v.data_validade?.slice(0, 10) || '',
-            quantidade: Number(v.quantidade_total_unidades || 0),
-            enviarParaComprador: Boolean(v.enviar_ao_comprador),
-            status: v.status_customizado || 'PENDENTE',
-            criadoPorTipo: (v.atualizadoPorTipo as any) || 'ADMIN',
-            criadoPorId: v.atualizadoPorId || 'SISTEMA_PRINCIPAL',
-            atualizadoPorTipo: (v.atualizadoPorTipo as any) || 'ADMIN',
-            atualizadoPorId: v.atualizadoPorId || 'SISTEMA_PRINCIPAL',
-            criadoEm: v.criado_em || new Date().toISOString(),
-            atualizadoEm: v.atualizado_em || new Date().toISOString(),
-            descricao_produto: v.descricao_produto,
-            embalagem: v.embalagem,
-            precoNormal: v.precoNormal ?? v.preco_normal ?? null,
-            preco_normal: v.preco_normal ?? v.precoNormal ?? null,
-            precoTrabalhado: v.precoTrabalhado ?? v.preco_trabalhado ?? null,
-            preco_trabalhado: v.preco_trabalhado ?? v.precoTrabalhado ?? null,
-          };
-
-          batch.set(docRef, cleanForFirestore(docData), { merge: true });
-        }
-
-        await batch.commit();
-        info.vencimentos.atual = Math.min(i + BATCH_SIZE, dadosLocais.vencimentos.length);
-        updateProgress();
-
-        await new Promise((resolve) => setTimeout(resolve, 15));
-      }
-
-      // 4. SINCRONIZAR PROMOTORES
-      info.etapa = 'PROMOTORES';
-      info.mensagem = `Sincronizando promotores...`;
-      updateProgress();
-
-      if (dadosLocais.promotores.length > 0) {
-        const batch = writeBatch(db);
-        for (const p of dadosLocais.promotores) {
-          const docRef = doc(db, 'promotores', p.promotorId);
-          const docData: PromotorCentralDoc = {
-            promotorId: p.promotorId,
-            nome: p.nome,
-            agenciaNome: p.agenciaNome,
-            filialId: p.filialId || filialPadrao,
-            setores: p.setores || ['LOJA'],
-            permissoes: (p.permissoes as unknown as Record<string, boolean>) || {},
-            status: p.status,
-            dispositivoVinculado: p.dispositivoVinculado || null,
-            ultimoAcesso: p.ultimoAcesso || null,
-            ultimaSincronizacao: p.ultimaSincronizacao || null,
-          };
-          batch.set(docRef, cleanForFirestore(docData), { merge: true });
-        }
-        await batch.commit();
-        info.promotores.atual = dadosLocais.promotores.length;
-        updateProgress();
-      }
-
-      // 5. SINCRONIZAR VÍNCULOS DE PROMOTOR (coleção vinculosPromotor)
-      info.etapa = 'VINCULOS_PROMOTOR';
-      info.mensagem = `Sincronizando códigos de vínculo...`;
-      updateProgress();
-
-      if (dadosLocais.vinculosPromotores.length > 0) {
-        const batch = writeBatch(db);
-        for (const v of dadosLocais.vinculosPromotores) {
-          const docRef = doc(db, 'vinculosPromotor', v.vinculoId);
-          const docData: VinculoPromotorCentralDoc = {
-            vinculoId: v.vinculoId,
-            promotorId: v.promotorId,
-            codigoVinculo: v.codigoVinculo,
-            tokenVinculo: v.tokenVinculo,
-            filialId: v.filialId || filialPadrao,
-            setores: v.setores || [],
-            status: v.status,
-            dataCriacao: v.dataCriacao,
-            dataExpiracao: v.dataExpiracao,
-            dataUtilizacao: v.dataUtilizacao,
-            dispositivoId: v.dispositivoId,
-          };
-          batch.set(docRef, cleanForFirestore(docData), { merge: true });
-        }
-        await batch.commit();
-        info.vinculosPromotor.atual = dadosLocais.vinculosPromotores.length;
-        updateProgress();
-      }
-
-      info.etapa = 'CONCLUIDO';
-      info.mensagem = 'Sincronização com o Firestore Central concluída com sucesso!';
-      info.porcentagemGeral = 100;
-      updateProgress();
-
-      return {
-        sucesso: true,
-        mensagem: 'Base centralizada no Firestore com sucesso.',
-        stats: {
-          produtos: info.produtos.atual,
-          vinculosEan: info.vinculosEan.atual,
-          vencimentos: info.vencimentos.atual,
-          promotores: info.promotores.atual,
-          vinculosPromotor: info.vinculosPromotor.atual,
-        },
-      };
-    } catch (err: any) {
-      if (isQuotaError(err)) {
-        markQuotaExceeded(err?.message, detectQuotaResourceType(err));
-      }
-      info.etapa = 'ERRO';
-      info.mensagem = `Erro na sincronização: ${err.message || err}`;
-      updateProgress();
-      throw err;
-    } finally {
-      this._isMigrating = false;
-    }
   }
 
   // ============================================================================
-  // CONSULTAS DIRETAS E EFICIENTES (SEM BAIXAR TODA A BASE)
+  // CONSULTAS DIRETAS (SOMENTE LEITURA PARA DIAGNÓSTICO)
   // ============================================================================
 
-  /**
-   * FLUXO CENTRAL EAN:
-   * EAN -> vinculosEAN -> codigoInterno -> produtos -> mercadoria
-   * Exemplo: 7891515546660 -> 54666 -> Produto correspondente
-   */
   public async consultarProdutoPorEan(
     ean: string,
     filialId: string = '172'
@@ -545,40 +304,39 @@ export class CentralFirestoreService {
     const cleanEan = String(ean || '').trim().replace(/\D/g, '');
     if (!cleanEan) return { sucesso: false, origem: 'DIRETO_FIRESTORE' };
 
-    // 1. Buscar na coleção vinculosEAN por chave direta
-    const docId = buildVinculoEanKey(filialId, cleanEan);
-    let vinculoSnap = await getDoc(doc(db, 'vinculosEAN', docId));
+    try {
+      const docId = buildVinculoEanKey(filialId, cleanEan);
+      const vinculoSnap = await getDoc(doc(db, 'vinculosEAN', docId));
 
-    let codigoInterno: string | null = null;
-    if (vinculoSnap.exists()) {
-      codigoInterno = vinculoSnap.data()?.codigoInterno;
-    } else {
-      // Fallback de consulta pelo campo 'ean' caso a filial seja diferente
-      const q = query(collection(db, 'vinculosEAN'), where('ean', '==', cleanEan), limit(1));
-      const qSnap = await getDocs(q);
-      if (!qSnap.empty) {
-        codigoInterno = qSnap.docs[0].data()?.codigoInterno;
+      let codigoInterno: string | null = null;
+      if (vinculoSnap.exists()) {
+        codigoInterno = vinculoSnap.data()?.codigoInterno;
+      } else {
+        const q = query(collection(db, 'vinculosEAN'), where('ean', '==', cleanEan), limit(1));
+        const qSnap = await getDocs(q);
+        if (!qSnap.empty) {
+          codigoInterno = qSnap.docs[0].data()?.codigoInterno;
+        }
       }
-    }
 
-    if (!codigoInterno) {
-      return { sucesso: false, ean: cleanEan, origem: 'DIRETO_FIRESTORE' };
-    }
+      if (!codigoInterno) {
+        return { sucesso: false, ean: cleanEan, origem: 'DIRETO_FIRESTORE' };
+      }
 
-    // 2. Com o codigoInterno, consultar a mercadoria em 'produtos'
-    const resProduto = await this.consultarProdutoPorCodigo(codigoInterno, undefined, filialId);
-    return {
-      sucesso: Boolean(resProduto),
-      produto: resProduto || undefined,
-      codigoInterno,
-      ean: cleanEan,
-      origem: 'DIRETO_FIRESTORE',
-    };
+      const resProduto = await this.consultarProdutoPorCodigo(codigoInterno, undefined, filialId);
+      return {
+        sucesso: Boolean(resProduto),
+        produto: resProduto || undefined,
+        codigoInterno,
+        ean: cleanEan,
+        origem: 'DIRETO_FIRESTORE',
+      };
+    } catch (err: any) {
+      const detail = formatarErroSyncPorServico(err, 'Consulta EAN', 'vinculosEAN', OperationType.GET);
+      throw new Error(detail.mensagemUsuario);
+    }
   }
 
-  /**
-   * Consulta produto por codigoInterno e opcionalmente digito diretamente no Firestore
-   */
   public async consultarProdutoPorCodigo(
     codigoInterno: string,
     digito?: string,
@@ -588,33 +346,33 @@ export class CentralFirestoreService {
     const cleanCode = String(codigoInterno || '').trim().replace(/^0+/, '');
     if (!cleanCode) return null;
 
-    // Se tiver dígito, busca por chave direta O(1)
-    if (digito !== undefined && digito !== '') {
-      const docId = buildProdutoKey(filialId, cleanCode, digito);
-      const snap = await getDoc(doc(db, 'produtos', docId));
-      if (snap.exists()) {
-        return snap.data() as ProdutoCentralDoc;
+    try {
+      if (digito !== undefined && digito !== '') {
+        const docId = buildProdutoKey(filialId, cleanCode, digito);
+        const snap = await getDoc(doc(db, 'produtos', docId));
+        if (snap.exists()) {
+          return snap.data() as ProdutoCentralDoc;
+        }
       }
-    }
 
-    // Consulta indexada pelo codigoInterno e filialId
-    const q = query(
-      collection(db, 'produtos'),
-      where('codigoInterno', '==', cleanCode),
-      where('filialId', '==', filialId),
-      limit(1)
-    );
-    const snap = await getDocs(q);
-    if (!snap.empty) {
-      return snap.docs[0].data() as ProdutoCentralDoc;
-    }
+      const q = query(
+        collection(db, 'produtos'),
+        where('codigoInterno', '==', cleanCode),
+        where('filialId', '==', filialId),
+        limit(1)
+      );
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        return snap.docs[0].data() as ProdutoCentralDoc;
+      }
 
-    return null;
+      return null;
+    } catch (err: any) {
+      const detail = formatarErroSyncPorServico(err, 'Consulta Produto Central', 'produtos', OperationType.GET);
+      throw new Error(detail.mensagemUsuario);
+    }
   }
 
-  /**
-   * Consulta vencimento existente pela chave única estável
-   */
   public async consultarVencimentoPorChave(
     filialId: string,
     codigoInterno: string,
@@ -630,20 +388,15 @@ export class CentralFirestoreService {
     return null;
   }
 
-  /**
-   * Consulta promotor por ID ou nome
-   */
   public async consultarPromotor(idOuNome: string): Promise<PromotorCentralDoc | null> {
     if (!db) return null;
     const termo = idOuNome.trim();
 
-    // 1. Tentar busca direta por ID
     const snap = await getDoc(doc(db, 'promotores', termo));
     if (snap.exists()) {
       return snap.data() as PromotorCentralDoc;
     }
 
-    // 2. Tentar busca por nome exato ou maiúsculo
     const q = query(
       collection(db, 'promotores'),
       where('nome', '==', termo.toUpperCase()),
@@ -654,7 +407,6 @@ export class CentralFirestoreService {
       return qSnap.docs[0].data() as PromotorCentralDoc;
     }
 
-    // 3. Fallback: procurar com limit de segurança
     const allSnap = await getDocs(query(collection(db, 'promotores'), limit(30)));
     for (const d of allSnap.docs) {
       const data = d.data() as PromotorCentralDoc;
@@ -667,296 +419,371 @@ export class CentralFirestoreService {
   }
 
   /**
-   * Obtém status real da conexão e contagens centrais no Firestore
+   * Obtém o estado REAL da Arquitetura Híbrida V1.0 combinando IndexedDB local e ponteiros do Firestore.
+   * Nunca retorna números falsos/hardcoded.
    */
-  public async obterStatusNuvem(): Promise<{
-    conectado: boolean;
-    projectId: string;
-    produtosCount: number;
-    vinculosCount: number;
-    vencimentosCount: number;
-    promotoresCount: number;
-    ultimaSincronizacao: string;
-  }> {
-    if (!db) {
-      return {
-        conectado: false,
-        projectId: 'gen-lang-client-0352860977',
-        produtosCount: 0,
-        vinculosCount: 0,
-        vencimentosCount: 0,
-        promotoresCount: 0,
-        ultimaSincronizacao: '',
-      };
+  public async obterStatusNuvem(locaisOverride?: {
+    produtosCount?: number;
+    saeouCount?: number;
+    spcoiCount?: number;
+    vinculosCount?: number;
+    vencimentosCount?: number;
+    promotoresCount?: number;
+    agenciasCount?: number;
+  }): Promise<StatusNuvemHibrida> {
+    const servicosErros: SyncServiceErrorDetail[] = [];
+    const cotaBloqueada = isFirestoreQuotaExceeded();
+    const isAdmin = authRoleService.isGerenciaAdminVerificadaNoServidor();
+    const gerenciaEmail = authRoleService.getEmailServidorVerificado();
+
+    const [
+      produtosDb,
+      saeouDb,
+      spcoiDb,
+      vinculosDb,
+      vencimentosDb,
+      promotoresDb,
+      agenciasDb,
+      metaGeralLocal,
+    ] = await Promise.all([
+      locaisOverride?.produtosCount !== undefined ? Promise.resolve([]) : dbGetAll(STORES.PRODUTOS).catch(() => []),
+      locaisOverride?.saeouCount !== undefined ? Promise.resolve([]) : dbGetAll(STORES.SAEOU060).catch(() => []),
+      locaisOverride?.spcoiCount !== undefined ? Promise.resolve([]) : dbGetAll(STORES.SPCOI007_FORNECEDORES).catch(() => []),
+      locaisOverride?.vinculosCount !== undefined ? Promise.resolve([]) : dbGetAll(STORES.VINCULOS_EAN).catch(() => []),
+      locaisOverride?.vencimentosCount !== undefined ? Promise.resolve([]) : dbGetAll(STORES.VENCIMENTOS).catch(() => []),
+      locaisOverride?.promotoresCount !== undefined ? Promise.resolve([]) : dbGetAll(STORES.PROMOTORES).catch(() => []),
+      locaisOverride?.agenciasCount !== undefined ? Promise.resolve([]) : dbGetAll(STORES.AGENCIAS).catch(() => []),
+      dbGetMeta<MetadadosBase | null>('metadados_gerais', null).catch(() => null),
+    ]);
+
+    const produtosCount = locaisOverride?.produtosCount ?? produtosDb.length;
+    const saeouCount = locaisOverride?.saeouCount ?? saeouDb.length;
+    const spcoiCount = locaisOverride?.spcoiCount ?? spcoiDb.length;
+    const vinculosCount = locaisOverride?.vinculosCount ?? vinculosDb.length;
+    const vencimentosCount = locaisOverride?.vencimentosCount ?? vencimentosDb.length;
+    const promotoresCount = locaisOverride?.promotoresCount ?? promotoresDb.length;
+    const agenciasCount = locaisOverride?.agenciasCount ?? agenciasDb.length;
+
+    let versaoSpcoiRemota: string | null = spcoiSyncService.getVersaoAtivaRemota()?.versaoId || null;
+    const versaoSpcoiLocal: string | null = spcoiSyncService.getVersaoLocalId();
+    let comercialUltimaAlteracao: string | null = comercialSyncService.getStatus().ultimaSincronizacaoIso;
+    let vinculosVersaoRemota: number | null = null;
+    let conectado = Boolean(db) && !cotaBloqueada && (typeof navigator === 'undefined' || navigator.onLine);
+
+    if (db && !cotaBloqueada && (typeof navigator === 'undefined' || navigator.onLine)) {
+      await ensureAuth().catch(() => null);
+
+      const [spcoiRes, comRes, metaRes] = await Promise.allSettled([
+        getDoc(doc(db, 'filiais', '172', 'config', 'versao_ativa_spcoi')),
+        getDoc(doc(db, 'filiais', '172', 'config', 'sync_comercial_meta')),
+        getDoc(doc(db, 'metadados', 'geral')),
+      ]);
+
+      if (spcoiRes.status === 'fulfilled') {
+        if (spcoiRes.value.exists()) {
+          versaoSpcoiRemota = spcoiRes.value.data()?.versaoId || versaoSpcoiRemota;
+        }
+      } else {
+        servicosErros.push(
+          formatarErroSyncPorServico(spcoiRes.reason, 'SPCOI007', 'filiais/172/config/versao_ativa_spcoi', OperationType.GET)
+        );
+      }
+
+      if (comRes.status === 'fulfilled') {
+        if (comRes.value.exists()) {
+          comercialUltimaAlteracao = comRes.value.data()?.ultimaAlteracaoEm || comercialUltimaAlteracao;
+        }
+      } else {
+        servicosErros.push(
+          formatarErroSyncPorServico(comRes.reason, 'Comercial', 'filiais/172/config/sync_comercial_meta', OperationType.GET)
+        );
+      }
+
+      if (metaRes.status === 'fulfilled') {
+        if (metaRes.value.exists()) {
+          vinculosVersaoRemota = Number(metaRes.value.data()?.vinculos_version || 0) || null;
+        }
+      } else {
+        servicosErros.push(
+          formatarErroSyncPorServico(metaRes.reason, 'Vínculos EAN', 'metadados/geral', OperationType.GET)
+        );
+      }
+
+      if (servicosErros.some((e) => e.isCotaExcedida)) {
+        conectado = false;
+      }
     }
 
-    try {
-      const metaSnap = await getDoc(doc(db, 'metadados', 'central'));
-      const metaData = metaSnap.exists() ? metaSnap.data() : null;
+    const ultimaSincronizacao =
+      comercialUltimaAlteracao ||
+      metaGeralLocal?.ultima_atualizacao_base_rub ||
+      metaGeralLocal?.ultima_atualizacao_eans ||
+      new Date().toLocaleString('pt-BR');
 
-      const produtosCount = Number(metaData?.produtosSincronizados || 11716);
-      const vinculosCount = Number(metaData?.vinculosEanSincronizados || 1251);
-      const vencimentosCount = Number(metaData?.vencimentosSincronizados || 0);
-      const ultimaSincronizacao = metaData?.ultimaSincronizacao
-        ? new Date(metaData.ultimaSincronizacao).toLocaleString('pt-BR')
-        : new Date().toLocaleString('pt-BR');
-
-      return {
-        conectado: true,
-        projectId: 'gen-lang-client-0352860977',
-        produtosCount,
-        vinculosCount,
-        vencimentosCount,
-        promotoresCount: 1,
-        ultimaSincronizacao,
-      };
-    } catch {
-      return {
-        conectado: true,
-        projectId: 'gen-lang-client-0352860977',
-        produtosCount: 11716,
-        vinculosCount: 1251,
-        vencimentosCount: 0,
-        promotoresCount: 1,
-        ultimaSincronizacao: new Date().toLocaleString('pt-BR'),
-      };
-    }
+    return {
+      conectado,
+      projectId: 'gen-lang-client-0352860977',
+      modoArquitetura: 'HIBRIDA_V1',
+      gerenciaAdminAutenticada: isAdmin,
+      gerenciaEmail,
+      cotaBloqueada,
+      produtosCount,
+      saeouCount,
+      spcoiCount,
+      vinculosCount,
+      vencimentosCount,
+      promotoresCount,
+      agenciasCount,
+      versaoSpcoiRemota,
+      versaoSpcoiLocal,
+      comercialUltimaAlteracao,
+      vinculosVersaoRemota,
+      ultimaSincronizacao,
+      servicosErros,
+    };
   }
 
   // ============================================================================
-  // EXECUÇÃO DOS TESTES OBRIGATÓRIOS (TESTE 1 AO TESTE 5)
+  // EXECUÇÃO DOS 5 TESTES SOMENTE LEITURA — ARQUITETURA HÍBRIDA V1.0
   // ============================================================================
 
   /**
-   * Executa os testes de homologação obrigatórios contra o Firebase Firestore REAL:
-   * TESTE 1: Pesquisar 76916-185 (RF.PAO ALHO MEZZANI TRAD., EMB1: 15, EMB9: 4, Total: 184 UN).
-   * TESTE 2: Pesquisar outro código existente na base SMGOI013 (54666 / outro código).
-   * TESTE 3: Pesquisar EAN real vinculado (7896216100909 -> 76916 -> Produto).
-   * TESTE 4: Abrir vencimento existente na coleção central "vencimentos".
-   * TESTE 5: Confirmar promotora MARIA em "promotores" e gerar código em "vinculosPromotor".
+   * Executa 5 validações técnicas somente leitura (ZERO gravações em massa):
+   * TESTE 1: Isolamento BASE RUB & SAEOU060 (.zip / IndexedDB) + bloqueio do legado.
+   * TESTE 2: SPCOI007 Compactado e Versionado (filiais/172/config/versao_ativa_spcoi).
+   * TESTE 3: Sincronização Comercial (sync_comercial_meta, promotores, agencias).
+   * TESTE 4: Vencimentos & Conformidade isAllowedLoteKeys (sem version / *PorTipo).
+   * TESTE 5: Vínculos EAN (metadados/geral) & Regras GERENCIA_ADMIN.
    */
   public async executarTestesObrigatorios(): Promise<TestesObrigatoriosResultado> {
     if (!db) {
       throw new Error('Firestore não está configurado.');
     }
 
-    await ensureAuth();
+    if (isFirestoreQuotaExceeded()) {
+      throw new Error('Cota diária do Firebase Spark aguardando liberação. Testes remotos pausados.');
+    }
+
+    await ensureAuth().catch(() => null);
     const resultados: TesteResultadoItem[] = [];
 
     // ------------------------------------------------------------------------
-    // TESTE 1: Homologação Principal - Código 76916-185
+    // TESTE 1: Isolamento BASE RUB & SAEOU060 + Bloqueio do Legado
     // ------------------------------------------------------------------------
     const t1Inicio = Date.now();
     try {
-      const prod76916 = await this.consultarProdutoPorCodigo('76916', '185', '172');
-      const t1Tempo = Date.now() - t1Inicio;
-
-      if (prod76916) {
-        const totalUnidades = (Number(prod76916.emb1 || 0) * Number(prod76916.fator_embalagem || 12)) + Number(prod76916.emb9 || 0);
-        resultados.push({
-          id: 'TESTE_1',
-          titulo: 'TESTE 1: Homologação Principal — Código 76916-185',
-          descricao: 'Confirmar documento real no Firestore: RF.PAO ALHO MEZZANI TRAD. (EMB1=15, EMB9=4, Total=184 UN)',
-          sucesso: true,
-          tempoMs: t1Tempo,
-          detalhes: `Encontrado no Firestore: ${prod76916.descricao} | Estoque: EMB1=${prod76916.emb1} CX, EMB9=${prod76916.emb9} UN | Total Convertido: ${totalUnidades} UN | Chave: 172_76916_185`,
-          dadosReais: prod76916,
-        });
-      } else {
-        resultados.push({
-          id: 'TESTE_1',
-          titulo: 'TESTE 1: Homologação Principal — Código 76916-185',
-          descricao: 'Confirmar documento real no Firestore: RF.PAO ALHO MEZZANI TRAD. (EMB1=15, EMB9=4, Total=184 UN)',
-          sucesso: false,
-          tempoMs: t1Tempo,
-          detalhes: 'Produto 76916-185 não foi localizado na coleção "produtos" do Firestore.',
-        });
-      }
+      const [produtosLocais, saeouLocais, modoLocal] = await Promise.all([
+        dbGetAll(STORES.PRODUTOS).catch(() => []),
+        dbGetAll(STORES.SAEOU060).catch(() => []),
+        Promise.resolve(isModoAtualizacaoLocalAtivo()),
+      ]);
+      const legadoRes = await this.sincronizarBaseComNuvem({
+        produtos: [],
+        vinculos: [],
+        vencimentos: [],
+        promotores: [],
+        vinculosPromotores: [],
+        filialPadrao: '172',
+      });
+      const legadoBloqueado = Boolean(legadoRes.bloqueadoArquiteturaHibrida) && legadoRes.sucesso === false;
+      resultados.push({
+        id: 'TESTE_1',
+        titulo: 'TESTE 1: Isolamento BASE RUB & SAEOU060 (.zip / IndexedDB)',
+        descricao: 'Confirma que BASE RUB e SAEOU060 são locais via .zip e que o envio em lotes de 300 está desativado.',
+        sucesso: modoLocal && legadoBloqueado,
+        tempoMs: Date.now() - t1Inicio,
+        detalhes: `Modo .zip ativo=${modoLocal} | Envio legado bloqueado=${legadoBloqueado} | IndexedDB: ${produtosLocais.length} produtos BASE RUB, ${saeouLocais.length} registros SAEOU060 (0 escritas no Firestore).`,
+        dadosReais: {
+          modoAtualizacaoLocalAtivo: modoLocal,
+          legadoBloqueado,
+          produtosBaseRubLocal: produtosLocais.length,
+          saeou060Local: saeouLocais.length,
+        },
+      });
     } catch (err: any) {
       resultados.push({
         id: 'TESTE_1',
-        titulo: 'TESTE 1: Homologação Principal — Código 76916-185',
-        descricao: 'Confirmar documento real no Firestore: RF.PAO ALHO MEZZANI TRAD. (EMB1=15, EMB9=4, Total=184 UN)',
+        titulo: 'TESTE 1: Isolamento BASE RUB & SAEOU060 (.zip / IndexedDB)',
+        descricao: 'Confirma isolamento local da BASE RUB e SAEOU060.',
         sucesso: false,
         tempoMs: Date.now() - t1Inicio,
-        detalhes: `Falha: ${err.message}`,
+        detalhes: `Falha: ${err?.message || err}`,
       });
     }
 
     // ------------------------------------------------------------------------
-    // TESTE 2: Segundo Teste — Outro código existente aleatoriamente na SMGOI013
+    // TESTE 2: SPCOI007 Compactado e Versionado
     // ------------------------------------------------------------------------
     const t2Inicio = Date.now();
     try {
-      const prodOutro = await this.consultarProdutoPorCodigo('54666', undefined, '172');
-      const t2Tempo = Date.now() - t2Inicio;
+      const pointerRef = doc(db, 'filiais', '172', 'config', 'versao_ativa_spcoi');
+      const [pointerSnap, fornecedoresLocais] = await Promise.all([
+        getDoc(pointerRef),
+        dbGetAll(STORES.SPCOI007_FORNECEDORES).catch(() => []),
+      ]);
+      const versaoLocal = spcoiSyncService.getVersaoLocalId();
 
-      if (prodOutro) {
+      if (pointerSnap.exists()) {
+        const remote = pointerSnap.data();
         resultados.push({
           id: 'TESTE_2',
-          titulo: 'TESTE 2: Outro Produto Real da SMGOI013 (Cód. 54666)',
-          descricao: 'Confirmar que outros produtos da SMGOI013 existem na coleção central "produtos"',
+          titulo: 'TESTE 2: SPCOI007 Compactado e Versionado (fflate + SHA-256)',
+          descricao: 'Verifica ponteiro filiais/172/config/versao_ativa_spcoi e estado local no IndexedDB.',
           sucesso: true,
-          tempoMs: t2Tempo,
-          detalhes: `Encontrado no Firestore: ${prodOutro.descricao} (Código: ${prodOutro.codigoCompleto}, Setor: ${prodOutro.setor}, Estoque EMB1=${prodOutro.emb1}, EMB9=${prodOutro.emb9})`,
-          dadosReais: prodOutro,
+          tempoMs: Date.now() - t2Inicio,
+          detalhes: `Versão ativa remota: ${remote.versaoId} (${remote.totalFornecedores || 0} fornecedores em ${remote.totalChunks || 0} chunks) | Versão local: ${versaoLocal || 'não baixada'} | IndexedDB local: ${fornecedoresLocais.length} fornecedores.`,
+          dadosReais: remote,
         });
       } else {
         resultados.push({
           id: 'TESTE_2',
-          titulo: 'TESTE 2: Outro Produto Real da SMGOI013 (Cód. 54666)',
-          descricao: 'Confirmar que outros produtos da SMGOI013 existem na coleção central "produtos"',
-          sucesso: false,
-          tempoMs: t2Tempo,
-          detalhes: 'Produto secundário não localizado no Firestore.',
+          titulo: 'TESTE 2: SPCOI007 Compactado e Versionado (fflate + SHA-256)',
+          descricao: 'Verifica ponteiro filiais/172/config/versao_ativa_spcoi.',
+          sucesso: true,
+          tempoMs: Date.now() - t2Inicio,
+          detalhes: `Coleção filiais/172/config/versao_ativa_spcoi acessível (nenhuma versão publicada ainda) | IndexedDB local: ${fornecedoresLocais.length} fornecedores.`,
         });
       }
     } catch (err: any) {
+      if (isQuotaError(err)) markQuotaExceeded(err?.message);
+      const detail = formatarErroSyncPorServico(
+        err,
+        'SPCOI007',
+        'filiais/172/config/versao_ativa_spcoi',
+        OperationType.GET
+      );
       resultados.push({
         id: 'TESTE_2',
-        titulo: 'TESTE 2: Outro Produto Real da SMGOI013 (Cód. 54666)',
-        descricao: 'Confirmar que outros produtos da SMGOI013 existem na coleção central "produtos"',
+        titulo: 'TESTE 2: SPCOI007 Compactado e Versionado (fflate + SHA-256)',
+        descricao: 'Verifica ponteiro filiais/172/config/versao_ativa_spcoi.',
         sucesso: false,
         tempoMs: Date.now() - t2Inicio,
-        detalhes: `Falha: ${err.message}`,
+        detalhes: detail.mensagemUsuario,
       });
     }
 
     // ------------------------------------------------------------------------
-    // TESTE 3: Terceiro Teste — EAN Real Vinculado (7896216100909)
+    // TESTE 3: Sincronização Comercial (Promotores, Agências e Vínculos)
     // ------------------------------------------------------------------------
     const t3Inicio = Date.now();
     try {
-      const resEan = await this.consultarProdutoPorEan('7896216100909', '172');
-      const t3Tempo = Date.now() - t3Inicio;
-
-      if (resEan.sucesso && resEan.produto) {
-        resultados.push({
-          id: 'TESTE_3',
-          titulo: 'TESTE 3: Fluxo EAN 7896216100909 → Código Interno → Produto',
-          descricao: 'Consulta em vinculosEAN resolvendo para código 76916 e Produto Oficial',
-          sucesso: true,
-          tempoMs: t3Tempo,
-          detalhes: `Fluxo resolvido com sucesso: EAN ${resEan.ean} → Código ${resEan.codigoInterno} → ${resEan.produto.descricao}`,
-          dadosReais: { ean: resEan.ean, codigoInterno: resEan.codigoInterno, produto: resEan.produto },
-        });
-      } else {
-        resultados.push({
-          id: 'TESTE_3',
-          titulo: 'TESTE 3: Fluxo EAN 7896216100909 → Código Interno → Produto',
-          descricao: 'Consulta em vinculosEAN resolvendo para código 76916 e Produto Oficial',
-          sucesso: false,
-          tempoMs: t3Tempo,
-          detalhes: 'Vínculo EAN ou produto não localizado no Firestore.',
-        });
-      }
-    } catch (err: any) {
+      const [metaComSnap, promSnap, agSnap, promLocais, agLocais] = await Promise.all([
+        getDoc(doc(db, 'filiais', '172', 'config', 'sync_comercial_meta')),
+        getDocs(query(collection(db, 'promotores'), where('filialId', '==', '172'), limit(1))),
+        getDocs(query(collection(db, 'agencias'), where('filialId', '==', '172'), limit(1))),
+        dbGetAll(STORES.PROMOTORES).catch(() => []),
+        dbGetAll(STORES.AGENCIAS).catch(() => []),
+      ]);
+      const statusCom = comercialSyncService.getStatus();
       resultados.push({
         id: 'TESTE_3',
-        titulo: 'TESTE 3: Fluxo EAN 7896216100909 → Código Interno → Produto',
-        descricao: 'Consulta em vinculosEAN resolvendo para código 76916 e Produto Oficial',
+        titulo: 'TESTE 3: Sincronização Comercial Automática (ComercialSyncService)',
+        descricao: 'Valida leitura de sync_comercial_meta, promotores e agências para Filial 172.',
+        sucesso: true,
+        tempoMs: Date.now() - t3Inicio,
+        detalhes: `Estado: ${statusCom.estado} | GERENCIA_ADMIN: ${statusCom.isGerenciaAutenticada ? 'Autenticada' : 'Somente Leitura'} | Ponteiro remoto: ${metaComSnap.exists() ? metaComSnap.data()?.ultimaAlteracaoEm : 'vazio'} | Amostras Nuvem: promotores(${promSnap.size}), agências(${agSnap.size}) | Local IndexedDB: ${promLocais.length} promotores, ${agLocais.length} agências.`,
+        dadosReais: metaComSnap.exists() ? metaComSnap.data() : { promotoresSample: promSnap.size, agenciasSample: agSnap.size },
+      });
+    } catch (err: any) {
+      if (isQuotaError(err)) markQuotaExceeded(err?.message);
+      const detail = formatarErroSyncPorServico(
+        err,
+        'Comercial',
+        'filiais/172/config/sync_comercial_meta / promotores / agencias',
+        OperationType.GET
+      );
+      resultados.push({
+        id: 'TESTE_3',
+        titulo: 'TESTE 3: Sincronização Comercial Automática (ComercialSyncService)',
+        descricao: 'Valida leitura de sync_comercial_meta, promotores e agências.',
         sucesso: false,
         tempoMs: Date.now() - t3Inicio,
-        detalhes: `Falha: ${err.message}`,
+        detalhes: detail.mensagemUsuario,
       });
     }
 
     // ------------------------------------------------------------------------
-    // TESTE 4: Quarto Teste — Vencimentos Reais Cadastrados
+    // TESTE 4: Vencimentos & Conformidade Schema (isAllowedLoteKeys)
     // ------------------------------------------------------------------------
     const t4Inicio = Date.now();
     try {
+      const samplePayload = buildVencimentoCentralPayload({
+        id: 'TESTE_SCHEMA_ONLY',
+        codigo_interno: '76916',
+        digito: '185',
+        codigo_exibicao: '76916-185',
+        descricao_produto: 'TESTE SCHEMA',
+        embalagem: 'UN 1',
+        data_validade: '2026-12-31',
+        quantidade_total_unidades: 1,
+        enviar_ao_comprador: false,
+        origem: 'MANUAL',
+        criado_em: new Date().toISOString(),
+        atualizado_em: new Date().toISOString(),
+      });
+      const camposProibidosPresentes = ['version', 'criadoPorTipo', 'criadoPorId', 'atualizadoPorTipo', 'atualizadoPorId']
+        .filter((k) => k in samplePayload);
+
       const qVenc = query(
         collection(db, 'vencimentos'),
-        where('codigoInterno', '==', '76916'),
+        where('filialId', '==', '172'),
         limit(1)
       );
       const snapVenc = await getDocs(qVenc);
-      const t4Tempo = Date.now() - t4Inicio;
 
-      if (!snapVenc.empty) {
-        const vencData = snapVenc.docs[0].data() as VencimentoCentralDoc;
-        resultados.push({
-          id: 'TESTE_4',
-          titulo: 'TESTE 4: Vencimento Real Cadastrado para 76916',
-          descricao: 'Confirmar que os apontamentos de validade existem na coleção central "vencimentos"',
-          sucesso: true,
-          tempoMs: t4Tempo,
-          detalhes: `Vencimento verificado (Doc ID: ${snapVenc.docs[0].id}): Validade ${vencData.dataVencimento}, Quantidade: ${vencData.quantidade} UN, Produto: ${vencData.descricao_produto}`,
-          dadosReais: vencData,
-        });
-      } else {
-        // Fallback: verificar qualquer vencimento existente na coleção
-        const anyVencSnap = await getDocs(query(collection(db, 'vencimentos'), limit(1)));
-        if (!anyVencSnap.empty) {
-          const anyData = anyVencSnap.docs[0].data() as VencimentoCentralDoc;
-          resultados.push({
-            id: 'TESTE_4',
-            titulo: 'TESTE 4: Vencimento Real Cadastrado na Coleção',
-            descricao: 'Confirmar persistência de vencimentos na coleção central "vencimentos"',
-            sucesso: true,
-            tempoMs: t4Tempo,
-            detalhes: `Vencimento verificado (ID: ${anyVencSnap.docs[0].id}): Código ${anyData.codigoInterno}, Validade ${anyData.dataVencimento}, Quantidade: ${anyData.quantidade} UN`,
-            dadosReais: anyData,
-          });
-        } else {
-          resultados.push({
-            id: 'TESTE_4',
-            titulo: 'TESTE 4: Vencimento Real Cadastrado',
-            descricao: 'Confirmar que vencimentos existem na coleção central "vencimentos"',
-            sucesso: false,
-            tempoMs: t4Tempo,
-            detalhes: 'Nenhum lote de vencimento encontrado na coleção central.',
-          });
-        }
-      }
-    } catch (err: any) {
       resultados.push({
         id: 'TESTE_4',
-        titulo: 'TESTE 4: Vencimento Real Cadastrado',
-        descricao: 'Confirmar que vencimentos existem na coleção central "vencimentos"',
+        titulo: 'TESTE 4: Vencimentos & Conformidade isAllowedLoteKeys',
+        descricao: 'Verifica leitura da coleção vencimentos (Filial 172) e sanitização estrita de chaves permitidas.',
+        sucesso: camposProibidosPresentes.length === 0,
+        tempoMs: Date.now() - t4Inicio,
+        detalhes: `Leitura Firestore OK (${snapVenc.size} amostra retornada) | Chaves proibidas no payload sanitizado: ${camposProibidosPresentes.length === 0 ? 'Nenhuma (conforme firestore.rules)' : camposProibidosPresentes.join(', ')}.`,
+        dadosReais: !snapVenc.empty ? snapVenc.docs[0].data() : samplePayload,
+      });
+    } catch (err: any) {
+      if (isQuotaError(err)) markQuotaExceeded(err?.message);
+      const detail = formatarErroSyncPorServico(err, 'Vencimentos', 'vencimentos', OperationType.LIST);
+      resultados.push({
+        id: 'TESTE_4',
+        titulo: 'TESTE 4: Vencimentos & Conformidade isAllowedLoteKeys',
+        descricao: 'Verifica leitura da coleção vencimentos e conformidade do schema.',
         sucesso: false,
         tempoMs: Date.now() - t4Inicio,
-        detalhes: `Falha: ${err.message}`,
+        detalhes: detail.mensagemUsuario,
       });
     }
 
     // ------------------------------------------------------------------------
-    // TESTE 5: Promotora MARIA em "promotores" & Vínculos de Promotor
+    // TESTE 5: Vínculos EAN (metadados/geral & vinculos_chunks)
     // ------------------------------------------------------------------------
     const t5Inicio = Date.now();
     try {
-      const mariaVerificada = await this.consultarPromotor('MARIA');
-      const t5Tempo = Date.now() - t5Inicio;
+      const [metaSnap, vinculosLocais] = await Promise.all([
+        getDoc(doc(db, 'metadados', 'geral')),
+        dbGetAll(STORES.VINCULOS_EAN).catch(() => []),
+      ]);
+      const isAdmin = authRoleService.isGerenciaAdminVerificadaNoServidor();
+      const metaData = metaSnap.exists() ? metaSnap.data() : null;
 
-      if (mariaVerificada) {
-        resultados.push({
-          id: 'TESTE_5',
-          titulo: 'TESTE 5: Promotora MARIA em "promotores"',
-          descricao: 'Confirmar cadastro central da MARIA (Agência: SEARA, Filial: 172 — Cascavel, Setores: FRIOS + LOJA)',
-          sucesso: true,
-          tempoMs: t5Tempo,
-          detalhes: `Promotora confirmada: ${mariaVerificada.nome} (${mariaVerificada.agenciaNome}), Filial: ${mariaVerificada.filialId}, Setores: ${mariaVerificada.setores?.join(' + ')}, Status: ${mariaVerificada.status}`,
-          dadosReais: mariaVerificada,
-        });
-      } else {
-        resultados.push({
-          id: 'TESTE_5',
-          titulo: 'TESTE 5: Promotora MARIA em "promotores"',
-          descricao: 'Confirmar cadastro central da MARIA na coleção "promotores"',
-          sucesso: false,
-          tempoMs: t5Tempo,
-          detalhes: 'Promotora MARIA não localizada na coleção "promotores".',
-        });
-      }
-    } catch (err: any) {
       resultados.push({
         id: 'TESTE_5',
-        titulo: 'TESTE 5: Promotora MARIA em "promotores"',
-        descricao: 'Confirmar cadastro central da MARIA na coleção "promotores"',
+        titulo: 'TESTE 5: Vínculos EAN & Proteção GERENCIA_ADMIN',
+        descricao: 'Valida leitura em metadados/geral, contagem local e permissão para gravação em vinculos_chunks.',
+        sucesso: true,
+        tempoMs: Date.now() - t5Inicio,
+        detalhes: `metadados/geral: ${metaData ? `${metaData.total_eans || 0} EANs (v.${metaData.vinculos_version || 0})` : 'sem documento remoto'} | IndexedDB local: ${vinculosLocais.length} vínculos | Escrita em vinculos_chunks: ${isAdmin ? 'Liberada (GERENCIA_ADMIN autenticada)' : 'Bloqueada neste dispositivo (somente leitura até login Google Gerência)'}.`,
+        dadosReais: metaData || { totalLocal: vinculosLocais.length, gerenciaAdmin: isAdmin },
+      });
+    } catch (err: any) {
+      if (isQuotaError(err)) markQuotaExceeded(err?.message);
+      const detail = formatarErroSyncPorServico(err, 'Vínculos EAN', 'metadados/geral', OperationType.GET);
+      resultados.push({
+        id: 'TESTE_5',
+        titulo: 'TESTE 5: Vínculos EAN & Proteção GERENCIA_ADMIN',
+        descricao: 'Valida leitura em metadados/geral e proteção de escrita.',
         sucesso: false,
         tempoMs: Date.now() - t5Inicio,
-        detalhes: `Falha: ${err.message}`,
+        detalhes: detail.mensagemUsuario,
       });
     }
 

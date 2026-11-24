@@ -8,17 +8,20 @@ import {
   db,
   detectQuotaResourceType,
   ensureAuth,
+  formatarErroSyncPorServico,
   isFirestoreQuotaExceeded,
   isQuotaError,
   markQuotaExceeded,
+  OperationType,
 } from './firebase';
-import { doc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 import {
   buildVencimentoCentralPayload,
   cleanForFirestore,
   getDeviceId,
-  generateOperationId,
+  sanitizeLoteForFirestore,
 } from './deviceId';
+import { authRoleService } from './authRoleService';
 import { LoteVencimento } from '../types';
 
 export type SyncOperationType =
@@ -296,19 +299,18 @@ class SyncQueueService {
           op.erroMensagem = undefined;
         } catch (err: any) {
           console.warn(`[SyncQueue] Falha ao sincronizar operação ${op.operationId} (${op.tipoOperacao}):`, err?.message);
-          
+
           if (isQuotaError(err)) {
             markQuotaExceeded(err?.message, detectQuotaResourceType(err));
             op.status = 'ERRO';
-            op.erroMensagem = 'Cota temporariamente indisponível. O aplicativo continuará operando localmente e tentará sincronizar posteriormente.';
+            op.erroMensagem = '[Vencimentos • Coleção: vencimentos] Cota diária temporariamente indisponível. O aplicativo continuará operando localmente.';
             this.saveToStorage();
             this.notify();
-            // Interromper tentativas subsequentes imediatamente (evita loop)
             break;
           }
 
           op.status = 'ERRO';
-          op.erroMensagem = err?.message || 'Erro de comunicação';
+          op.erroMensagem = err?.message || '[Vencimentos • Coleção: vencimentos] Erro de comunicação';
         }
 
         this.saveToStorage();
@@ -340,68 +342,107 @@ class SyncQueueService {
   private async executeOperation(op: SyncOperation): Promise<void> {
     if (!db) throw new Error('Firebase Firestore não disponível');
 
+    const loteDocPath = `vencimentos/${op.registroId}`;
     const loteDocRef = doc(db, 'vencimentos', op.registroId);
+    const isAdmin = authRoleService.isGerenciaAdminVerificadaNoServidor();
 
-    switch (op.tipoOperacao) {
-      case 'CREATE_VENCIMENTO': {
-        const payload = buildVencimentoCentralPayload(op.payload, op.operationId);
-        await setDoc(loteDocRef, payload, { merge: true });
-        break;
-      }
+    try {
+      switch (op.tipoOperacao) {
+        case 'CREATE_VENCIMENTO': {
+          const remoteSnap = await getDoc(loteDocRef);
+          const rawPayload = buildVencimentoCentralPayload(op.payload, op.operationId);
+          const payload = sanitizeLoteForFirestore(rawPayload, {
+            isUpdate: remoteSnap.exists(),
+            remoteData: remoteSnap.exists() ? remoteSnap.data() : undefined,
+          });
+          await setDoc(loteDocRef, payload, { merge: true });
+          break;
+        }
 
-      case 'UPDATE_VENCIMENTO':
-      case 'UPDATE_QUANTIDADE':
-      case 'ENVIAR_COMPRADOR':
-      case 'REMOVER_ENVIO_COMPRADOR': {
-        // Se foi excluído localmente (tombstoned), assegurar que na nuvem conste como tombstone lógico
-        if (this.isTombstoned(op.registroId)) {
+        case 'UPDATE_VENCIMENTO':
+        case 'UPDATE_QUANTIDADE':
+        case 'ENVIAR_COMPRADOR':
+        case 'REMOVER_ENVIO_COMPRADOR': {
+          const remoteSnap = await getDoc(loteDocRef);
+
+          if (this.isTombstoned(op.registroId)) {
+            if (!remoteSnap.exists() && !isAdmin) {
+              return; // Exclusão local preservada sem criar tombstone em nuvem quando não-admin
+            }
+            const agora = new Date().toISOString();
+            const tombstonePayload = sanitizeLoteForFirestore(
+              {
+                id: op.registroId,
+                vencimentoId: op.registroId,
+                filialId: op.payload?.filialId || '172',
+                isDeleted: true,
+                deletedAt: agora,
+                motivoExclusao:
+                  typeof op.payload?.motivoExclusao === 'string' && op.payload.motivoExclusao.trim().length >= 3
+                    ? op.payload.motivoExclusao.trim().slice(0, 200)
+                    : 'Exclusão lógica local (tombstone)',
+                updatedAt: agora,
+                operationId: op.operationId,
+                deviceId: getDeviceId(),
+              },
+              {
+                isUpdate: remoteSnap.exists(),
+                remoteData: remoteSnap.exists() ? remoteSnap.data() : undefined,
+              }
+            );
+            await setDoc(loteDocRef, tombstonePayload, { merge: true });
+            return;
+          }
+
+          const rawPayload = buildVencimentoCentralPayload(op.payload, op.operationId);
+          const payload = sanitizeLoteForFirestore(rawPayload, {
+            isUpdate: remoteSnap.exists(),
+            remoteData: remoteSnap.exists() ? remoteSnap.data() : undefined,
+          });
+          await setDoc(loteDocRef, payload, { merge: true });
+          break;
+        }
+
+        case 'DELETE_VENCIMENTO': {
+          const remoteSnap = await getDoc(loteDocRef);
+          if (!remoteSnap.exists() && !isAdmin) {
+            return; // Documento não existe remotamente; tombstone local impede restauração
+          }
           const agora = new Date().toISOString();
-          await setDoc(
-            loteDocRef,
+          const motivoSeguro =
+            typeof op.payload?.motivoExclusao === 'string' && op.payload.motivoExclusao.trim().length >= 3
+              ? op.payload.motivoExclusao.trim().slice(0, 200)
+              : 'Exclusão lógica via fila offline';
+          const deletePayload = sanitizeLoteForFirestore(
             {
               vencimentoId: op.registroId,
-              filialId: op.payload?.filialId || '172',
+              id: op.registroId,
               isDeleted: true,
               deletedAt: agora,
-              motivoExclusao:
-                typeof op.payload?.motivoExclusao === 'string' && op.payload.motivoExclusao.trim().length >= 3
-                  ? op.payload.motivoExclusao.trim().slice(0, 200)
-                  : 'Exclusão lógica local (tombstone)',
+              motivoExclusao: motivoSeguro,
               updatedAt: agora,
               operationId: op.operationId,
               deviceId: getDeviceId(),
+              atualizadoPor: 'SISTEMA_PRINCIPAL',
+              filialId: op.payload?.filialId || '172',
             },
-            { merge: true }
+            {
+              isUpdate: remoteSnap.exists(),
+              remoteData: remoteSnap.exists() ? remoteSnap.data() : undefined,
+            }
           );
-          return;
+          await setDoc(loteDocRef, cleanForFirestore(deletePayload), { merge: true });
+          break;
         }
-        const payload = buildVencimentoCentralPayload(op.payload, op.operationId);
-        await setDoc(loteDocRef, payload, { merge: true });
-        break;
       }
-
-      case 'DELETE_VENCIMENTO': {
-        // Exclusão por tombstone lógico central (NÃO apaga fisicamente para evitar ressuscitação)
-        const agora = new Date().toISOString();
-        const motivoSeguro =
-          typeof op.payload?.motivoExclusao === 'string' && op.payload.motivoExclusao.trim().length >= 3
-            ? op.payload.motivoExclusao.trim().slice(0, 200)
-            : 'Exclusão lógica via fila offline';
-        const deletePayload = {
-          vencimentoId: op.registroId,
-          id: op.registroId,
-          isDeleted: true,
-          deletedAt: agora,
-          motivoExclusao: motivoSeguro,
-          updatedAt: agora,
-          operationId: op.operationId,
-          deviceId: getDeviceId(),
-          atualizadoPor: 'SISTEMA_PRINCIPAL',
-          filialId: op.payload?.filialId || '172',
-        };
-        await setDoc(loteDocRef, cleanForFirestore(deletePayload), { merge: true });
-        break;
-      }
+    } catch (err: any) {
+      const detail = formatarErroSyncPorServico(
+        err,
+        'Vencimentos (Fila)',
+        loteDocPath,
+        op.tipoOperacao === 'CREATE_VENCIMENTO' ? OperationType.CREATE : OperationType.UPDATE
+      );
+      throw new Error(detail.mensagemUsuario);
     }
   }
 

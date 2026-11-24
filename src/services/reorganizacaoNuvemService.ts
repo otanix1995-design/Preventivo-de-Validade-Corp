@@ -19,7 +19,6 @@ import {
   getDocs,
   limit,
   query,
-  setDoc,
   where,
   writeBatch,
 } from 'firebase/firestore';
@@ -29,10 +28,10 @@ import { nuvemSyncEngine } from './nuvemSyncEngine';
 import { syncQueueService } from './syncQueueService';
 import { productRepository } from './productRepository';
 import { rubSyncService } from './rubSyncService';
-import { buildVencimentoKey, cleanForFirestore, getDeviceId } from './deviceId';
-import { LoteVencimento, ProdutoSMG } from '../types';
+import { buildVencimentoKey, getDeviceId, sanitizeLoteForFirestore } from './deviceId';
 import { dbGetAll, STORES } from './db';
 import { authRoleService } from './authRoleService';
+import { isModoAtualizacaoLocalAtivo } from './localPackageMode';
 
 export interface ItemReconciliacaoVencimento {
   id: string;
@@ -149,9 +148,11 @@ export class ReorganizacaoNuvemService {
    * Executa a Reorganização e Ressincronização Limpa em lote atômico e verificável.
    */
   public async executarReorganizacaoCompleta(filialId = '172'): Promise<RelatorioReorganizacaoNuvem> {
-    if (!authRoleService.podePublicarRub()) {
+    const perm = authRoleService.podePublicarRub();
+    if (!perm.permitido) {
       throw new Error(
-        'Acesso negado: a reorganização e ressyncronização completa da nuvem exige autenticação Google verificada da Gerência (GERENCIA_ADMIN — Filial 172).'
+        perm.motivoRecusa ||
+          'Acesso negado: a reorganização e ressyncronização completa da nuvem exige autenticação Google verificada da Gerência (GERENCIA_ADMIN — Filial 172).'
       );
     }
 
@@ -360,19 +361,42 @@ export class ReorganizacaoNuvemService {
           for (const it of excluidos) {
             const docFilialRef = doc(db, 'filiais', filialId, 'vencimentos', it.id);
             const docRaizRef = doc(db, 'vencimentos', it.id);
-            const payload = cleanForFirestore({
+            const [snapFilial, snapRaiz] = await Promise.all([
+              getDoc(docFilialRef).catch(() => null),
+              getDoc(docRaizRef).catch(() => null),
+            ]);
+            const rawTombstone = {
               id: it.id,
               vencimentoId: it.id,
+              codigoInterno: it.codigoInterno,
+              codigo_interno: it.codigoInterno,
+              digito: it.digito,
+              dataVencimento: it.dataVencimento,
+              data_validade: it.dataVencimento,
               filialId,
               isDeleted: true,
               deletedAt: agoraIso,
               motivoExclusao: it.motivo,
               usuarioExclusao: 'Administrador (Filial 172)',
               updatedAt: agoraIso,
-            });
+            };
 
-            batch.set(docFilialRef, payload, { merge: true });
-            batch.set(docRaizRef, payload, { merge: true });
+            batch.set(
+              docFilialRef,
+              sanitizeLoteForFirestore(rawTombstone, {
+                isUpdate: Boolean(snapFilial?.exists()),
+                remoteData: snapFilial?.exists() ? snapFilial.data() : undefined,
+              }),
+              { merge: true }
+            );
+            batch.set(
+              docRaizRef,
+              sanitizeLoteForFirestore(rawTombstone, {
+                isUpdate: Boolean(snapRaiz?.exists()),
+                remoteData: snapRaiz?.exists() ? snapRaiz.data() : undefined,
+              }),
+              { merge: true }
+            );
             countInBatch += 2;
 
             if (countInBatch >= 200) {
@@ -427,7 +451,11 @@ export class ReorganizacaoNuvemService {
       let statusPubRub: 'PUBLICADA_NA_NUVEM' | 'ENFILEIRADA_AGUARDANDO_COTA_OU_REDE' = 'ENFILEIRADA_AGUARDANDO_COTA_OU_REDE';
       let msgPubRub = 'Nova versão da BASE RUB preparada e validada localmente.';
 
-      if (produtosRub.length > 0) {
+      if (isModoAtualizacaoLocalAtivo()) {
+        statusPubRub = 'PUBLICADA_NA_NUVEM';
+        msgPubRub =
+          'Arquitetura Híbrida V1.0: BASE RUB preservada exclusivamente no IndexedDB local (atualização via .zip), sem envio de lotes ao Firestore.';
+      } else if (produtosRub.length > 0) {
         if (!isFirestoreQuotaExceeded() && typeof navigator !== 'undefined' && navigator.onLine && db) {
           try {
             const resPub = await rubSyncService.publicarBaseRubCentral(produtosRub, {

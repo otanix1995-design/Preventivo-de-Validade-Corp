@@ -31,8 +31,9 @@ import {
   PublishAdapter,
 } from '../firestorePublishGuard';
 import { RubSyncService } from '../rubSyncService';
-import { SpcoiSyncService } from '../spcoiSyncService';
+import { SpcoiSyncService, spcoiSyncService } from '../spcoiSyncService';
 import { SaeouSyncService } from '../saeouSyncService';
+import { comercialSyncService } from '../comercialSyncService';
 import { resolverEstadoPublicacaoImportacao } from '../importacaoResultadoHelper';
 import { productRepository } from '../productRepository';
 import { cloudSyncService } from '../cloudSyncService';
@@ -631,27 +632,39 @@ async function runSparkOptimizationTests() {
   }
 
   // -------------------------------------------------------------------------
-  // CENÁRIO 5: Eliminação de gravações legadas no productRepository & cloudSyncService
+  // CENÁRIO 5: Eliminação definitiva de gravações legadas no productRepository & cloudSyncService
   // -------------------------------------------------------------------------
-  console.log('[5/6] Eliminação de escritas legadas em massa e redundantes na Filial 172...');
+  console.log('[5/6] Eliminação definitiva de escritas legadas BASE RUB/SAEOU060 e adesão Híbrida V1.0...');
   {
-    let centralSyncArgProdutosLen = -1;
-    let centralSyncArgVencimentosLen = -1;
     let centralSyncCalls = 0;
     let syncFullCalls = 0;
+    let spcoiCheckCalls = 0;
+    let comercialCheckCalls = 0;
+    let syncFullProdutosLen = -1;
+    let syncFullSaeouLen = -1;
 
     const origSincronizarCentral = centralFirestoreService.sincronizarBaseComNuvem.bind(centralFirestoreService);
     const origSyncFull = cloudSyncService.syncFull.bind(cloudSyncService);
+    const origSpcoiCheck = spcoiSyncService.verificarSincronizacaoComRemoto.bind(spcoiSyncService);
+    const origComercialSync = comercialSyncService.sincronizarAgora.bind(comercialSyncService);
 
     centralFirestoreService.sincronizarBaseComNuvem = async (params) => {
       centralSyncCalls++;
-      centralSyncArgProdutosLen = params.produtos.length;
-      centralSyncArgVencimentosLen = params.vencimentos.length;
-      return { sucesso: true, mensagem: 'simulado offline', stats: {} };
+      return origSincronizarCentral(params);
     };
-    cloudSyncService.syncFull = async () => {
+    cloudSyncService.syncFull = async (prods, _meta, _vinc, saeou) => {
       syncFullCalls++;
+      syncFullProdutosLen = prods.length;
+      syncFullSaeouLen = saeou.length;
       return { success: true, message: 'simulado offline' };
+    };
+    spcoiSyncService.verificarSincronizacaoComRemoto = async () => {
+      spcoiCheckCalls++;
+      return { verificado: true, baixouNovaVersao: false };
+    };
+    comercialSyncService.sincronizarAgora = async () => {
+      comercialCheckCalls++;
+      return { sucesso: true, enviados: 0, recebidos: 0, pendentes: 0, mensagem: 'ok offline' };
     };
 
     try {
@@ -660,19 +673,34 @@ async function runSparkOptimizationTests() {
       await productRepository.syncWithCloud();
 
       assert(syncFullCalls === 1, 'syncWithCloud com cota livre deve delegar ao cloudSyncService.');
-      assert(centralSyncCalls === 1, 'centralFirestoreService deve rodar para vínculos/promotores.');
+      assert(syncFullProdutosLen === 0, `syncWithCloud NÃO deve enviar produtos da BASE RUB ao cloudSyncService (recebeu ${syncFullProdutosLen}).`);
+      assert(syncFullSaeouLen === 0, `syncWithCloud NÃO deve enviar SAEOU060 ao cloudSyncService (recebeu ${syncFullSaeouLen}).`);
+      assert(spcoiCheckCalls === 1, 'syncWithCloud deve verificar SPCOI007 compactado e versionado.');
+      assert(comercialCheckCalls === 1, 'syncWithCloud deve acionar comercialSyncService.');
       assert(
-        centralSyncArgProdutosLen === 0,
-        `Filial 172/BASE_RUB NÃO pode gravar documentos individuais em "produtos" no syncWithCloud (recebeu ${centralSyncArgProdutosLen}).`
+        centralSyncCalls === 0,
+        `syncWithCloud NUNCA pode chamar centralFirestoreService.sincronizarBaseComNuvem (recebeu ${centralSyncCalls}).`
       );
+
+      // Chamada direta ao método legado também deve retornar bloqueadoArquiteturaHibrida
+      const resLegadoDireto = await origSincronizarCentral({
+        produtos: makeProdutos(2, 10),
+        vinculos: [],
+        vencimentos: [],
+        promotores: [],
+        vinculosPromotores: [],
+        filialPadrao: '172',
+      });
       assert(
-        centralSyncArgVencimentosLen === 0,
-        `syncWithCloud NÃO pode duplicar vencimentos no centralFirestoreService (recebeu ${centralSyncArgVencimentosLen}).`
+        resLegadoDireto.sucesso === false && resLegadoDireto.bloqueadoArquiteturaHibrida === true,
+        'sincronizarBaseComNuvem legado deve retornar bloqueadoArquiteturaHibrida=true.'
       );
 
       // Agora com bloqueio de cota ativo: syncWithCloud não chama nenhum serviço de nuvem!
       syncFullCalls = 0;
       centralSyncCalls = 0;
+      spcoiCheckCalls = 0;
+      comercialCheckCalls = 0;
       markQuotaExceeded('Bloqueio Spark ativo', 'ESCRITA');
 
       const resQuotaSync = await productRepository.syncWithCloud();
@@ -681,6 +709,7 @@ async function runSparkOptimizationTests() {
         centralSyncCalls === 0,
         'Com cota bloqueada, syncWithCloud não pode chamar centralFirestoreService.sincronizarBaseComNuvem.'
       );
+      assert(spcoiCheckCalls === 0 && comercialCheckCalls === 0, 'Com cota bloqueada, serviços ativos ficam em standby local.');
       assert(
         resQuotaSync.message.toLowerCase().includes('indexeddb') || resQuotaSync.message.toLowerCase().includes('local'),
         'Deve informar operação local via IndexedDB.'
@@ -695,10 +724,12 @@ async function runSparkOptimizationTests() {
     } finally {
       centralFirestoreService.sincronizarBaseComNuvem = origSincronizarCentral;
       cloudSyncService.syncFull = origSyncFull;
+      spcoiSyncService.verificarSincronizacaoComRemoto = origSpcoiCheck;
+      comercialSyncService.sincronizarAgora = origComercialSync;
       resetQuotaExceeded();
     }
 
-    console.log('  ✓ Zero gravações legadas redundantes em Filial 172 confirmadas.');
+    console.log('  ✓ Zero gravações legadas BASE RUB/SAEOU060 confirmadas na Filial 172.');
   }
 
   // -------------------------------------------------------------------------

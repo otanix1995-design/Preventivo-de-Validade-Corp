@@ -14,6 +14,7 @@ import { spcoiSyncService, PublicacaoSpcoiStatus } from './spcoiSyncService';
 import { saeouSyncService, PublicacaoSaeouStatus } from './saeouSyncService';
 import { productRepository } from './productRepository';
 import { isvService } from './isvService';
+import { isModoAtualizacaoLocalAtivo } from './localPackageMode';
 import {
   getQuotaLockState,
   isFirestoreQuotaExceeded,
@@ -96,6 +97,23 @@ class BaseSyncStatusService {
       const versaoLocal = rubSyncService.getVersaoLocalId();
       const produtos = productRepository.getProdutos();
 
+      if (isModoAtualizacaoLocalAtivo()) {
+        this._statusState.rub = {
+          id: 'BASE_RUB',
+          nome: 'BASE RUB',
+          descricao: 'Catálogo Oficial Soberano (Exclusivo Local .zip)',
+          status: 'LOCAL',
+          versaoId: 'zip_local',
+          dataAtualizacao: rubStatus.ultimaSincronizacao,
+          totalRegistros: produtos.length,
+          mensagem: `Exclusivo IndexedDB local via .zip (${produtos.length.toLocaleString('pt-BR')} produtos — sem envio ao Firestore)`,
+          progressoPorcentagem: 100,
+          emAndamento: false,
+        };
+        this._notificar();
+        return;
+      }
+
       let statusCalculado: StatusSyncBase = rubStatus.status;
       if (rubStatus.emAndamento) {
         statusCalculado = 'PUBLICANDO';
@@ -167,6 +185,23 @@ class BaseSyncStatusService {
       const versaoRemota = saeouSyncService.getVersaoAtivaRemota();
       const versaoLocal = saeouSyncService.getVersaoLocalId();
       const saeou = productRepository.getSaeou060Registros();
+
+      if (isModoAtualizacaoLocalAtivo()) {
+        this._statusState.saeou = {
+          id: 'SAEOU060',
+          nome: 'SAEOU060',
+          descricao: 'Lotes de Vencimentos de Promotores (Exclusivo Local .zip)',
+          status: 'LOCAL',
+          versaoId: 'zip_local',
+          dataAtualizacao: saeouStatus.ultimaSincronizacao,
+          totalRegistros: saeou.length,
+          mensagem: `Exclusivo IndexedDB local via .zip (${saeou.length.toLocaleString('pt-BR')} registros — sem envio ao Firestore)`,
+          progressoPorcentagem: 100,
+          emAndamento: false,
+        };
+        this._notificar();
+        return;
+      }
 
       let statusCalculado: StatusSyncBase = saeouStatus.status;
       if (saeouStatus.emAndamento) {
@@ -270,29 +305,51 @@ class BaseSyncStatusService {
         saeou: { sucesso: false, mensagem: msg },
       };
     }
-    const resRub = await rubSyncService.verificarSincronizacaoComRemoto(filialId).then(() => ({
-      sucesso: true,
-      mensagem: 'BASE RUB verificada com sucesso',
-    })).catch((e) => ({
-      sucesso: false,
-      mensagem: e?.message || 'Falha na verificação da BASE RUB',
-    }));
 
-    const resSpcoi = await spcoiSyncService.verificarSincronizacaoComRemoto(filialId).then(() => ({
-      sucesso: true,
-      mensagem: 'SPCOI007 verificado com sucesso',
-    })).catch((e) => ({
-      sucesso: false,
-      mensagem: e?.message || 'Falha na verificação do SPCOI007',
-    }));
+    const modoLocalHibrido = isModoAtualizacaoLocalAtivo();
 
-    const resSaeou = await saeouSyncService.verificarSincronizacaoComRemoto(filialId).then(() => ({
-      sucesso: true,
-      mensagem: 'SAEOU060 verificado com sucesso',
-    })).catch((e) => ({
-      sucesso: false,
-      mensagem: e?.message || 'Falha na verificação do SAEOU060',
-    }));
+    const resRub = modoLocalHibrido
+      ? {
+          sucesso: true,
+          mensagem: 'BASE RUB mantida exclusivamente local no IndexedDB (atualização via .zip).',
+        }
+      : await rubSyncService
+          .verificarSincronizacaoComRemoto(filialId)
+          .then(() => ({
+            sucesso: true,
+            mensagem: 'BASE RUB verificada com sucesso',
+          }))
+          .catch((e) => ({
+            sucesso: false,
+            mensagem: e?.message || 'Falha na verificação da BASE RUB',
+          }));
+
+    const resSpcoi = await spcoiSyncService
+      .verificarSincronizacaoComRemoto(filialId)
+      .then(() => ({
+        sucesso: true,
+        mensagem: 'SPCOI007 verificado com sucesso',
+      }))
+      .catch((e) => ({
+        sucesso: false,
+        mensagem: e?.message || 'Falha na verificação do SPCOI007',
+      }));
+
+    const resSaeou = modoLocalHibrido
+      ? {
+          sucesso: true,
+          mensagem: 'SAEOU060 mantido exclusivamente local no IndexedDB (atualização via .zip).',
+        }
+      : await saeouSyncService
+          .verificarSincronizacaoComRemoto(filialId)
+          .then(() => ({
+            sucesso: true,
+            mensagem: 'SAEOU060 verificado com sucesso',
+          }))
+          .catch((e) => ({
+            sucesso: false,
+            mensagem: e?.message || 'Falha na verificação do SAEOU060',
+          }));
 
     return { rub: resRub, spcoi: resSpcoi, saeou: resSaeou };
   }

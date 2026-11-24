@@ -64,9 +64,9 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
       icon: RefreshCw,
       iconColor: 'text-indigo-700',
       iconBg: 'bg-indigo-100',
-      title: 'Base Central Firestore & Nuvem',
-      desc: 'Sincronizar BASE DO RUB com o Firestore e executar testes de validação central.',
-      badge: 'Fase Central',
+      title: 'Base Central Firestore & Arquitetura Híbrida',
+      desc: 'Sincronizar SPCOI007 compactado, Comercial, Vencimentos e Vínculos EAN. BASE RUB e SAEOU060 via .zip.',
+      badge: 'Híbrida V1.0',
       onClick: () => setIsNuvemModalOpen(true),
     },
     {
@@ -182,15 +182,15 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
             </div>
             <div>
               <h3 className="text-xs font-black uppercase tracking-wider text-white">
-                Base Central Firestore
+                Base Central — Arquitetura Híbrida V1.0
               </h3>
               <p className="text-[11px] text-orange-200 font-medium">
-                Conexão Nuvem entre App Principal e App Promotor
+                SPCOI007 compactado, Comercial, Vencimentos e EANs na nuvem • BASE RUB e SAEOU060 locais (.zip)
               </p>
             </div>
           </div>
           <span className="text-[10px] font-black uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded">
-            Pronto
+            Híbrida V1.0
           </span>
         </div>
 
@@ -201,7 +201,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
             className="px-3.5 py-2 rounded-lg bg-[#F36B0B] hover:bg-[#C94F00] text-white text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-colors cursor-pointer"
           >
             <Cloud className="w-3.5 h-3.5" />
-            <span>Sincronizar Base com a Nuvem</span>
+            <span>Sincronizar Serviços Ativos</span>
           </button>
 
           <button
@@ -210,7 +210,7 @@ export const MaisMenuView: React.FC<MaisMenuViewProps> = ({
             className="px-3.5 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white border border-white/20 text-xs font-black uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            <span>Validar 5 Testes Obrigatórios</span>
+            <span>Validar Arquitetura Híbrida</span>
           </button>
         </div>
       </div>
