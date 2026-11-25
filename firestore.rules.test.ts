@@ -315,6 +315,7 @@ function testRulesAndBlueprintConsistency() {
   assert.equal(rulesContent.includes('allow write: if true;'), false, 'Não deve haver allow write: if true genérico');
   assert.ok(rulesContent.includes('match /agencias/{agenciaId}'));
   assert.ok(rulesContent.includes('match /vinculos_promotor_industria/{vinculoId}'));
+  assert.ok(rulesContent.includes('function isAllowedLoteUpdateKeys(data, ex)'));
   assert.ok(rulesContent.includes('match /test/{docId}'));
 
   const firestorePaths = Object.keys(blueprint.firestore || {});
@@ -325,12 +326,101 @@ function testRulesAndBlueprintConsistency() {
   assert.ok(firestorePaths.includes('/test/{docId}'));
 }
 
+function testLegacyVencimentosUpdateRules() {
+  // 1. Update legítimo em lote legado com campos antigos preservados (ex.: merge: true) deve ser PERMITIDO
+  const updateLegacyPreserved = validator.avaliarRequisicao(anonAuth, {
+    metodo: 'update',
+    caminho: '/vencimentos/lote_legado_01',
+    dadosExistentes: {
+      id: 'lote_legado_01',
+      filialId: '172',
+      codigoInterno: '85327',
+      quantidade: 10,
+      version: 1,
+      criadoPorTipo: 'PRINCIPAL',
+      atualizadoPorTipo: 'PRINCIPAL',
+      criadoPorId: 'SISTEMA_PRINCIPAL',
+      atualizadoPorId: 'SISTEMA_PRINCIPAL',
+    },
+    novosDados: {
+      id: 'lote_legado_01',
+      filialId: '172',
+      codigoInterno: '85327',
+      quantidade: 15,
+      version: 1,
+      criadoPorTipo: 'PRINCIPAL',
+      atualizadoPorTipo: 'PRINCIPAL',
+      criadoPorId: 'SISTEMA_PRINCIPAL',
+      atualizadoPorId: 'SISTEMA_PRINCIPAL',
+    },
+  });
+  assert.equal(updateLegacyPreserved.permitido, true, `Update legado preservado deve passar: ${updateLegacyPreserved.motivo}`);
+
+  // 2. Remover campos legados durante update em lote legado deve ser PERMITIDO
+  const updateLegacyDeleted = validator.avaliarRequisicao(anonAuth, {
+    metodo: 'update',
+    caminho: '/vencimentos/lote_legado_01',
+    dadosExistentes: {
+      id: 'lote_legado_01',
+      filialId: '172',
+      codigoInterno: '85327',
+      quantidade: 10,
+      version: 1,
+      criadoPorTipo: 'PRINCIPAL',
+    },
+    novosDados: {
+      id: 'lote_legado_01',
+      filialId: '172',
+      codigoInterno: '85327',
+      quantidade: 15,
+    },
+  });
+  assert.equal(updateLegacyDeleted.permitido, true, `Remoção de campo legado no update deve passar: ${updateLegacyDeleted.motivo}`);
+
+  // 3. Alterar valor de campo legado ou injetar campo legado novo deve ser NEGADO
+  const updateLegacyMutated = validator.avaliarRequisicao(anonAuth, {
+    metodo: 'update',
+    caminho: '/vencimentos/lote_legado_01',
+    dadosExistentes: {
+      id: 'lote_legado_01',
+      filialId: '172',
+      codigoInterno: '85327',
+      quantidade: 10,
+      version: 1,
+    },
+    novosDados: {
+      id: 'lote_legado_01',
+      filialId: '172',
+      codigoInterno: '85327',
+      quantidade: 10,
+      version: 2,
+    },
+  });
+  assert.equal(updateLegacyMutated.permitido, false, 'Alteração de campo legado version deve ser negada');
+
+  // 4. Criar novo lote com campos legados deve continuar NEGADO
+  const createWithLegacy = validator.avaliarRequisicao(anonAuth, {
+    metodo: 'create',
+    caminho: '/vencimentos/lote_novo_legado',
+    novosDados: {
+      id: 'lote_novo_legado',
+      filialId: '172',
+      codigoInterno: '85327',
+      dataVencimento: '2026-12-31',
+      quantidade: 10,
+      version: 1,
+    },
+  });
+  assert.equal(createWithLegacy.permitido, false, 'Criação de novo lote com campo legado deve ser negada');
+}
+
 async function main() {
   testDirtyDozen();
   testLegitimateFlowsAndBuiltInSuite();
   await testStage1CodeShieldingInvariants();
   testRulesAndBlueprintConsistency();
-  console.log('✅ firestore.rules.test.ts: Todos os testes (Dirty Dozen + Eight Pillars + Isolamento SPCOI/RUB + Anti-Escalonamento) PASSARAM!');
+  testLegacyVencimentosUpdateRules();
+  console.log('✅ firestore.rules.test.ts: Todos os testes (Dirty Dozen + Eight Pillars + Isolamento SPCOI/RUB + Anti-Escalonamento + Legado Vencimentos) PASSARAM!');
   process.exit(0);
 }
 

@@ -358,6 +358,7 @@ export class IsvService {
     }
     try {
       comercialSyncService.registerIsvHandlers({
+        ensureReady: () => this.init(),
         getVinculosIndustria: () => [...this._vinculos],
         getIndustrias: () => [...this._industrias],
         applyRemoteChanges: async ({ vinculosIndustria }) => {
@@ -398,6 +399,7 @@ export class IsvService {
             return atualizada;
           });
 
+          this.invalidarCache();
           this._rebuildIndices();
           await dbPutAll(STORES.VINCULOS_PROMOTOR_INDUSTRIA, this._vinculos, true);
           for (const ind of industriasAlteradas) {
@@ -1271,8 +1273,16 @@ export class IsvService {
     }
     const id = `${promotor.promotorId}_${cnpjNorm}_${filialId}`;
 
-    const jaExiste = this._vinculos.some((v) => v.id === id);
-    if (jaExiste) return;
+    const existenteIdx = this._vinculos.findIndex((v) => v.id === id);
+    const existente = existenteIdx >= 0 ? this._vinculos[existenteIdx] : null;
+    if (
+      existente &&
+      existente.ativo !== false &&
+      existente.promotorNome === promotor.nome &&
+      (existente.agenciaNome || '') === (promotor.agenciaNome || '')
+    ) {
+      return;
+    }
 
     const agora = new Date().toISOString();
     const novoVinculo: VinculoPromotorIndustria = {
@@ -1282,12 +1292,16 @@ export class IsvService {
       agenciaNome: promotor.agenciaNome || '',
       cnpj: cnpjNorm,
       filialId,
-      criado_em: agora,
+      criado_em: existente?.criado_em || agora,
       atualizadoEm: agora,
       ativo: true,
     };
 
-    this._vinculos.push(novoVinculo);
+    if (existenteIdx >= 0) {
+      this._vinculos[existenteIdx] = novoVinculo;
+    } else {
+      this._vinculos.push(novoVinculo);
+    }
 
     // Atualizar lista de promotores na indústria
     const ind = this._industrias.find((i) => i.cnpj === cnpjNorm);

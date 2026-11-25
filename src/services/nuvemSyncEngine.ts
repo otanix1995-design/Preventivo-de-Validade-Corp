@@ -83,6 +83,7 @@ const STORAGE_KEY_QUEUE_V3 = 'nuvem_v3_sync_queue_filial172';
 const STORAGE_KEY_TOMBSTONES_V3 = 'nuvem_v3_tombstones_filial172';
 const STORAGE_KEY_STATUS_MAP = 'nuvem_v3_status_map_v1';
 const STORAGE_KEY_LAST_SYNC = 'nuvem_v3_last_sync_timestamp_172';
+const STORAGE_KEY_RULE_FIX_RETRY_V3 = 'nuvem_v3_rule_fix_retry_v1';
 
 class NuvemSyncEngine {
   private _queue: OperacaoSyncV3[] = [];
@@ -118,9 +119,29 @@ class NuvemSyncEngine {
         const parsed = JSON.parse(q);
         if (Array.isArray(parsed)) {
           this._queue = parsed;
-          parsed.forEach((op) => {
+          let recovered = false;
+          const alreadyRetried = Boolean(localStorage.getItem(STORAGE_KEY_RULE_FIX_RETRY_V3));
+          if (!alreadyRetried) {
+            this._queue = this._queue.map((op) => {
+              const msg = String(op?.erroMensagem || '').toLowerCase();
+              if (
+                op?.status === 'ERRO' &&
+                (msg.includes('permission') || msg.includes('permiss') || msg.includes('insufficient'))
+              ) {
+                recovered = true;
+                return { ...op, status: 'PENDENTE', tentativas: 0, erroMensagem: undefined };
+              }
+              return op;
+            });
+            localStorage.setItem(STORAGE_KEY_RULE_FIX_RETRY_V3, '1');
+          }
+          this._queue.forEach((op) => {
             this._statusMap.set(op.loteId, op.status);
           });
+          if (recovered) {
+            this.salvarFilaPersistente();
+            this.agendarProcessamento();
+          }
         }
       }
     } catch (e) {
@@ -996,6 +1017,53 @@ class NuvemSyncEngine {
       else if (op.status === 'ERRO') erros++;
     });
     return { pendentes, enviando, erros, totalFila: this._queue.length };
+  }
+
+  public async reprocessarErros(): Promise<{ processadas: number; erros: number; reativadas: number }> {
+    let reativadas = 0;
+    this._queue = this._queue.map((op) => {
+      if (op.status === 'ERRO') {
+        reativadas++;
+        this._statusMap.set(op.loteId, 'PENDENTE');
+        return {
+          ...op,
+          status: 'PENDENTE',
+          tentativas: 0,
+          erroMensagem: undefined,
+        };
+      }
+      return op;
+    });
+    if (reativadas > 0) {
+      this.salvarFilaPersistente();
+      this.notificar();
+      const res = await this.processarFila();
+      return { ...res, reativadas };
+    }
+    return { processadas: 0, erros: 0, reativadas: 0 };
+  }
+
+  public limparErros(): number {
+    const before = this._queue.length;
+    const removidosIds = new Set<string>();
+    this._queue = this._queue.filter((op) => {
+      if (op.status === 'ERRO') {
+        removidosIds.add(op.loteId);
+        return false;
+      }
+      return true;
+    });
+    removidosIds.forEach((loteId) => {
+      if (!this._queue.some((o) => o.loteId === loteId)) {
+        this._statusMap.delete(loteId);
+      }
+    });
+    const removed = before - this._queue.length;
+    if (removed > 0) {
+      this.salvarFilaPersistente();
+      this.notificar();
+    }
+    return removed;
   }
 
   private limparPayloadFirestore(data: any): any {

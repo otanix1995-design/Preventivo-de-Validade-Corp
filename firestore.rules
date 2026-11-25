@@ -156,8 +156,36 @@ service cloud.firestore {
         (isActiveLoteCreate || isTombstoneByAdmin);
     }
 
+    function isAllowedLoteUpdateKeys(data, ex) {
+      return data.keys().hasOnly([
+        'id', 'vencimentoId', 'filialId', 'filial_id',
+        'codigo_interno', 'codigoInterno', 'digito', 'codigo_exibicao',
+        'descricao_produto', 'descricao', 'embalagem', 'fator_embalagem',
+        'data_validade', 'dataVencimento',
+        'quantidade_total_unidades', 'quantidade',
+        'observacao', 'lote_identificador',
+        'status_customizado', 'status',
+        'enviar_ao_comprador', 'enviarParaComprador',
+        'origem', 'preco_normal', 'precoNormal', 'preco_trabalhado', 'precoTrabalhado',
+        'data_preco', 'saeou060_id', 'arquivo_origem',
+        'criado_em', 'criadoEm', 'atualizado_em', 'atualizadoEm', 'updatedAt', 'createdAt',
+        'criadoPor', 'criadoPorMatricula', 'criadoPorPapel',
+        'atualizadoPor', 'atualizadoPorMatricula', 'atualizadoPorPapel',
+        'deviceId', 'operationId',
+        'isDeleted', 'deletedAt', 'motivoExclusao', 'usuarioExclusao', 'papelExclusao',
+        '_versaoLocal', '_serverVersion', '_syncedAt',
+        'version', 'criadoPorTipo', 'atualizadoPorTipo', 'criadoPorId', 'atualizadoPorId'
+      ]) &&
+      (!('version' in data) || ('version' in ex && data.version == ex.version)) &&
+      (!('criadoPorTipo' in data) || ('criadoPorTipo' in ex && data.criadoPorTipo == ex.criadoPorTipo)) &&
+      (!('atualizadoPorTipo' in data) || ('atualizadoPorTipo' in ex && data.atualizadoPorTipo == ex.atualizadoPorTipo)) &&
+      (!('criadoPorId' in data) || ('criadoPorId' in ex && data.criadoPorId == ex.criadoPorId)) &&
+      (!('atualizadoPorId' in data) || ('atualizadoPorId' in ex && data.atualizadoPorId == ex.atualizadoPorId));
+    }
+
     function isValidLoteImmutableFields(data, ex) {
-      return data.filialId == ex.filialId &&
+      return (!('filialId' in ex) || data.filialId == ex.filialId) &&
+        (!('filial_id' in ex) || !('filial_id' in data) || data.filial_id == ex.filial_id) &&
         (!('id' in ex) || !('id' in data) || data.id == ex.id) &&
         (!('vencimentoId' in ex) || !('vencimentoId' in data) || data.vencimentoId == ex.vencimentoId) &&
         (!('codigo_interno' in ex) || !('codigo_interno' in data) || data.codigo_interno == ex.codigo_interno) &&
@@ -178,7 +206,7 @@ service cloud.firestore {
     function isValidLoteUpdate(filialId) {
       let data = incoming();
       let ex = existing();
-      return isAllowedLoteKeys(data) &&
+      return isAllowedLoteUpdateKeys(data, ex) &&
         isValidLoteFieldTypes(data) &&
         data.filialId == filialId &&
         filialId == '172' &&
@@ -196,7 +224,8 @@ service cloud.firestore {
           'atualizadoPor', 'atualizadoPorMatricula', 'atualizadoPorPapel',
           'deviceId', 'operationId',
           'isDeleted', 'deletedAt', 'motivoExclusao', 'usuarioExclusao', 'papelExclusao',
-          '_versaoLocal', '_serverVersion', '_syncedAt'
+          '_versaoLocal', '_serverVersion', '_syncedAt',
+          'version', 'criadoPorTipo', 'atualizadoPorTipo', 'criadoPorId', 'atualizadoPorId'
         ]) &&
         (
           (!('isDeleted' in data) || data.isDeleted == false) ||

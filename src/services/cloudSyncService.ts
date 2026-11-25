@@ -12,9 +12,13 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
   onSnapshot,
+  orderBy,
   query,
+  QueryDocumentSnapshot,
   setDoc,
+  startAfter,
   Unsubscribe,
   where,
   writeBatch,
@@ -720,10 +724,43 @@ class CloudSyncService {
     }
   }
 
+  private async carregarMapaRemotoVencimentos(): Promise<Map<string, Record<string, any>>> {
+    const mapa = new Map<string, Record<string, any>>();
+    if (!db) return mapa;
+    const PAGE_SIZE = 200;
+    let lastDoc: QueryDocumentSnapshot | null = null;
+    while (true) {
+      const q = lastDoc
+        ? query(
+            collection(db, 'vencimentos'),
+            where('filialId', '==', '172'),
+            orderBy('__name__'),
+            startAfter(lastDoc),
+            limit(PAGE_SIZE)
+          )
+        : query(
+            collection(db, 'vencimentos'),
+            where('filialId', '==', '172'),
+            orderBy('__name__'),
+            limit(PAGE_SIZE)
+          );
+      const snap = await getDocs(q);
+      logFirestoreRead('carregarMapaRemotoVencimentos', 'vencimentos', snap.size);
+      snap.docs.forEach((d) => {
+        const data = d.data();
+        if (data) mapa.set(d.id, data);
+      });
+      if (snap.size < PAGE_SIZE) break;
+      lastDoc = snap.docs[snap.docs.length - 1];
+    }
+    return mapa;
+  }
+
   public async pushAllLotesToCloud(lotes: LoteVencimento[]): Promise<void> {
     if (isFirestoreQuotaExceeded()) return;
     try {
       await ensureAuth().catch(() => null);
+      const mapaRemoto = await this.carregarMapaRemotoVencimentos();
       const batchSize = 300;
       for (let i = 0; i < lotes.length; i += batchSize) {
         const batch = writeBatch(db);
@@ -731,9 +768,14 @@ class CloudSyncService {
         slice.forEach((lote) => {
           if (lote.isDeleted) return;
           const rawPayload = buildVencimentoCentralPayload(lote);
-          const isExistingSynced = Boolean((lote as any)._serverVersion);
-          const payload = sanitizeLoteForFirestore(rawPayload, { isUpdate: isExistingSynced });
-          const docRef = doc(db, 'vencimentos', rawPayload.vencimentoId || lote.id);
+          const docId = rawPayload.vencimentoId || lote.id;
+          const remoteData = mapaRemoto.get(docId);
+          const isExistingSynced = Boolean(remoteData) || Boolean((lote as any)._serverVersion);
+          const payload = sanitizeLoteForFirestore(rawPayload, {
+            isUpdate: isExistingSynced,
+            remoteData,
+          });
+          const docRef = doc(db, 'vencimentos', docId);
           batch.set(docRef, payload, { merge: true });
         });
         await batch.commit();
@@ -791,6 +833,7 @@ class CloudSyncService {
     }
     try {
       await ensureAuth().catch(() => null);
+      const mapaRemoto = await this.carregarMapaRemotoVencimentos();
       let enviados = 0;
       let ignorados = 0;
       let batch = writeBatch(db);
@@ -803,9 +846,14 @@ class CloudSyncService {
         }
 
         const rawPayload = buildVencimentoCentralPayload(lote);
-        const isExistingSynced = Boolean((lote as any)._serverVersion);
-        const payload = sanitizeLoteForFirestore(rawPayload, { isUpdate: isExistingSynced });
-        const docRef = doc(db, 'vencimentos', rawPayload.vencimentoId || lote.id);
+        const docId = rawPayload.vencimentoId || lote.id;
+        const remoteData = mapaRemoto.get(docId);
+        const isExistingSynced = Boolean(remoteData) || Boolean((lote as any)._serverVersion);
+        const payload = sanitizeLoteForFirestore(rawPayload, {
+          isUpdate: isExistingSynced,
+          remoteData,
+        });
+        const docRef = doc(db, 'vencimentos', docId);
         batch.set(docRef, payload, { merge: true });
         enviados++;
         countInBatch++;

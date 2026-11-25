@@ -15,6 +15,7 @@ import {
   Users
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
+import { ComercialSyncStatus, comercialSyncService } from '../../services/comercialSyncService';
 import { isvService } from '../../services/isvService';
 import { promotorService } from '../../services/promotorService';
 import { Industria, Promotor } from '../../types';
@@ -31,8 +32,11 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
   const [searchIndustria, setSearchIndustria] = useState('');
   const [filtroPromotores, setFiltroPromotores] = useState<'TODOS' | 'COM_VINCULO' | 'SEM_VINCULO'>('TODOS');
   const [filtroIndustrias, setFiltroIndustrias] = useState<'TODAS' | 'COM_PROMOTOR' | 'SEM_PROMOTOR'>('TODAS');
-  const [feedback, setFeedback] = useState<{ tipo: 'success' | 'error'; msg: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ tipo: 'success' | 'warning' | 'error'; msg: string } | null>(null);
   const [syncTick, setSyncTick] = useState(0);
+  const [comercialStatus, setComercialStatus] = useState<ComercialSyncStatus>(() =>
+    comercialSyncService.getStatus()
+  );
 
   useEffect(() => {
     Promise.all([isvService.init(), promotorService.init()]).then(() => {
@@ -40,9 +44,11 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
     });
     const u1 = isvService.subscribe(() => setSyncTick((t) => t + 1));
     const u2 = promotorService.subscribe(() => setSyncTick((t) => t + 1));
+    const u3 = comercialSyncService.subscribeStatus(setComercialStatus);
     return () => {
       u1();
       u2();
+      u3();
     };
   }, []);
 
@@ -119,21 +125,34 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
           industria.cnpj,
           selectedPromotor.filialId || '172'
         );
-        setFeedback({
-          tipo: 'success',
-          msg: `Indústria "${industria.nome_exibicao}" desvinculada de ${selectedPromotor.nome}.`,
-        });
       } else {
         await isvService.vincularPromotorIndustria(
           selectedPromotor,
           industria.cnpj,
           selectedPromotor.filialId || '172'
         );
-        setFeedback({
-          tipo: 'success',
-          msg: `Indústria "${industria.nome_exibicao}" vinculada a ${selectedPromotor.nome} com sucesso!`,
-        });
       }
+
+      const stAfter = comercialSyncService.getStatus();
+      const isWarn =
+        !stAfter.online ||
+        !stAfter.isGerenciaAutenticada ||
+        stAfter.estado === 'ERRO' ||
+        stAfter.estado === 'BLOQUEADO_COTA';
+      const sufixo = !stAfter.online
+        ? ' Salvo localmente — será sincronizado ao reconectar.'
+        : !stAfter.isGerenciaAutenticada
+        ? ' Salvo somente neste aparelho! Faça login Google como Gerência para replicar nos outros aparelhos.'
+        : stAfter.estado === 'ERRO' || stAfter.estado === 'BLOQUEADO_COTA'
+        ? ` Salvo na fila local, falha no envio: ${stAfter.ultimoErro || 'verifique permissões'}.`
+        : ' Sincronizado com o Firestore!';
+
+      setFeedback({
+        tipo: isWarn ? 'warning' : 'success',
+        msg: estaVinculado
+          ? `Indústria "${industria.nome_exibicao}" desvinculada de ${selectedPromotor.nome}.${sufixo}`
+          : `Indústria "${industria.nome_exibicao}" vinculada a ${selectedPromotor.nome}.${sufixo}`,
+      });
     } catch (err: any) {
       setFeedback({
         tipo: 'error',
@@ -141,7 +160,7 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
       });
     }
 
-    setTimeout(() => setFeedback(null), 3500);
+    setTimeout(() => setFeedback(null), 5000);
   };
 
   // Carteira de produtos calculada on-the-fly para o promotor selecionado
@@ -155,18 +174,31 @@ export const VincularPromotorIndustriaTab: React.FC<VincularPromotorIndustriaTab
 
   return (
     <div className="space-y-4">
+      {comercialStatus.pendentesCount > 0 && !comercialStatus.isGerenciaAutenticada && (
+        <div className="p-3 rounded-xl border bg-amber-50 border-amber-300 text-amber-950 text-xs font-bold flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+          <span>
+            Existem {comercialStatus.pendentesCount} vínculo(s)/alteração(ões) aguardando login Google da Gerência para envio ao Firestore.
+          </span>
+        </div>
+      )}
+
       {/* Feedback Alert */}
       {feedback && (
         <div
           className={`p-3 rounded-xl border text-xs font-bold flex items-center justify-between gap-2 animate-fadeIn ${
             feedback.tipo === 'success'
               ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+              : feedback.tipo === 'warning'
+              ? 'bg-amber-50 border-amber-300 text-amber-950'
               : 'bg-red-50 border-red-300 text-red-900'
           }`}
         >
           <div className="flex items-center gap-2">
             {feedback.tipo === 'success' ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : feedback.tipo === 'warning' ? (
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
             ) : (
               <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
             )}

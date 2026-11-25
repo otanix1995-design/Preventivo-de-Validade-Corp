@@ -151,6 +151,7 @@ export class PromotorService {
   constructor() {
     try {
       comercialSyncService.registerPromotorHandlers({
+        ensureReady: () => this.init(),
         getPromotores: () => [...this._promotores],
         getAgencias: () => [...this._agencias],
         getVinculosDispositivo: () => [...this._vinculos],
@@ -291,14 +292,13 @@ export class PromotorService {
         await this._sincronizarAgenciasDePromotoresExistentes();
 
         this.verificarExpiracaoVinculos();
+        this._isInitialized = true;
+        this.notify();
 
         // 2. Iniciar sincronização comercial centralizada via Firestore (preservando BASE RUB/SAEOU060 no ZIP)
         if (typeof window !== 'undefined') {
           void comercialSyncService.iniciar().catch(() => {});
         }
-
-        this._isInitialized = true;
-        this.notify();
       } catch (err) {
         console.warn('Erro ao inicializar PromotorService via IndexedDB:', err);
         this._isInitialized = true;

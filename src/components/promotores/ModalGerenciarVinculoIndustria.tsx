@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { normalizarChaveAgencia } from '../../services/agenciaNormalizer';
+import { comercialSyncService } from '../../services/comercialSyncService';
 import { isvService } from '../../services/isvService';
 import { promotorService } from '../../services/promotorService';
 import { formatarCnpj, normalizarCnpj } from '../../services/spcoi007Parser';
@@ -170,9 +171,17 @@ export const ModalGerenciarVinculoIndustria: React.FC<ModalGerenciarVinculoIndus
         cnpjNorm,
         promotor.filialId || '172'
       );
+      const st = comercialSyncService.getStatus();
+      const extra = !st.online
+        ? ' (Salvo localmente — será enviado ao reconectar.)'
+        : !st.isGerenciaAutenticada
+        ? ' (Salvo apenas localmente! Entre com Google da Gerência para replicar nos outros aparelhos.)'
+        : st.estado === 'ERRO' || st.estado === 'BLOQUEADO_COTA'
+        ? ` (Pendente na fila: ${st.ultimoErro || 'erro na nuvem'})`
+        : ' Sincronizado com o Firestore!';
       exibirFeedback(
         'success',
-        `${promotor.nome} vinculado à indústria "${industria.nome}" com sucesso.`
+        `${promotor.nome} vinculado à indústria "${industria.nome}".${extra}`
       );
       onVinculoAlterado?.();
     } catch (err: any) {
@@ -187,9 +196,17 @@ export const ModalGerenciarVinculoIndustria: React.FC<ModalGerenciarVinculoIndus
     setIsSubmitting(true);
     try {
       await isvService.desvincularPromotorIndustria(promotorId, cnpjNorm, '172');
+      const st = comercialSyncService.getStatus();
+      const extra = !st.online
+        ? ' (Salvo localmente — será enviado ao reconectar.)'
+        : !st.isGerenciaAutenticada
+        ? ' (Salvo apenas localmente! Entre com Google da Gerência para replicar nos outros aparelhos.)'
+        : st.estado === 'ERRO' || st.estado === 'BLOQUEADO_COTA'
+        ? ` (Pendente na fila: ${st.ultimoErro || 'erro na nuvem'})`
+        : ' Sincronizado com o Firestore!';
       exibirFeedback(
         'success',
-        `Vínculo removido: ${promotorNome} foi desvinculado desta indústria (ambos os cadastros foram preservados).`
+        `Vínculo removido: ${promotorNome} foi desvinculado desta indústria (ambos os cadastros foram preservados).${extra}`
       );
       onVinculoAlterado?.();
     } catch (err: any) {

@@ -45,6 +45,8 @@ import {
 } from '../services/limpezaTresBasesService';
 import { STORES } from '../services/db';
 import { isModoAtualizacaoLocalAtivo } from '../services/localPackageMode';
+import { syncQueueService, SyncOperation } from '../services/syncQueueService';
+import { comercialSyncService, ComercialSyncStatus } from '../services/comercialSyncService';
 
 const TOTAL_TABELAS_INDEXEDDB = Object.values(STORES).length;
 
@@ -94,6 +96,10 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
   const [isForcingSync, setIsForcingSync] = useState(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
   const [rubToast, setRubToast] = useState<string | null>(null);
+  const [legacyQueue, setLegacyQueue] = useState<SyncOperation[]>(() => syncQueueService.getQueue());
+  const [comercialStatus, setComercialStatus] = useState<ComercialSyncStatus>(() =>
+    comercialSyncService.getStatus()
+  );
 
   // Server Auth states
   const [authServidor, setAuthServidor] = useState<EstadoAuthServidor>(() => firebaseAuthService.getEstado());
@@ -122,6 +128,8 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
     const unsubRubStatus = rubSyncService.subscribeStatus(setStatusPub);
     const unsubReorg = reorganizacaoNuvemService.subscribe(setRelatorioReorg);
     const unsubServerAuth = firebaseAuthService.subscribe(setAuthServidor);
+    const unsubLegacyQueue = syncQueueService.subscribe(setLegacyQueue);
+    const unsubComercial = comercialSyncService.subscribeStatus(setComercialStatus);
 
     return () => {
       unsubAuth();
@@ -130,6 +138,8 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
       unsubRubStatus();
       unsubReorg();
       unsubServerAuth();
+      unsubLegacyQueue();
+      unsubComercial();
     };
   }, [isOpen]);
 
@@ -274,17 +284,40 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
   const handleForcarSincronizacao = async () => {
     if (isForcingSync) return;
     setIsForcingSync(true);
-    setSyncToast('Disparando sincronização transacional...');
+    setSyncToast('Disparando sincronização transacional e comercial...');
     try {
+      await nuvemSyncEngine.reprocessarErros();
+      await syncQueueService.retryErroredOperations();
       const resQueue = await nuvemSyncEngine.processarFila();
       const resDelta = await nuvemSyncEngine.executarSincronizacaoIncremental('172');
       await cloudSyncService.pullVencimentosFromCloud();
+      const resComercial = await comercialSyncService.sincronizarAgora();
       setSyncToast(
-        `Sincronização concluída: ${resQueue.processadas} operações enviadas, ${resDelta.atualizados} atualizações recebidas.`
+        `Sincronização concluída: ${resQueue.processadas} vencimento(s) enviado(s), ${resDelta.atualizados} atualização(ões) recebida(s). Comercial: ${resComercial.mensagem}`
       );
-      setTimeout(() => setSyncToast(null), 5000);
+      setTimeout(() => setSyncToast(null), 6000);
     } catch (e: any) {
       setSyncToast(`Erro no envio: ${e?.message}`);
+      setTimeout(() => setSyncToast(null), 5000);
+    } finally {
+      setIsForcingSync(false);
+    }
+  };
+
+  const handleReenviarErros = async () => {
+    if (isForcingSync) return;
+    setIsForcingSync(true);
+    setSyncToast('Reprocessando itens com erro nas filas locais...');
+    try {
+      const resetLegacy = await syncQueueService.retryErroredOperations();
+      const resV3 = await nuvemSyncEngine.reprocessarErros();
+      const resCom = await comercialSyncService.sincronizarAgora();
+      setSyncToast(
+        `Reenvio concluído (fila v1: ${resetLegacy} reativado(s), Nuvem V3: ${resV3.processadas} enviado(s), Comercial: ${resCom.enviados} envio(s)).`
+      );
+      setTimeout(() => setSyncToast(null), 6000);
+    } catch (e: any) {
+      setSyncToast(`Erro ao reprocessar fila: ${e?.message}`);
       setTimeout(() => setSyncToast(null), 5000);
     } finally {
       setIsForcingSync(false);
@@ -751,18 +784,98 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
                     Sincronização Transacional Forçada
                   </h4>
                   <p className="text-[11px] text-slate-500 mt-0.5">
-                    Dispara o envio de todas as operações pendentes locais e busca novos lotes com cursores sem limite de 250.
+                    Reprocessa pendências/erros de vencimentos e sincroniza dados comerciais (promotores, agências e vínculos) com o Firestore.
                   </p>
                 </div>
-                <button
-                  onClick={handleForcarSincronizacao}
-                  disabled={isForcingSync}
-                  className="px-4 py-2 bg-[#F36B0B] hover:bg-[#C94F00] text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-xs cursor-pointer flex items-center gap-1.5 shrink-0 disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isForcingSync ? 'animate-spin' : ''}`} />
-                  <span>{isForcingSync ? 'Sincronizando...' : 'Sincronizar Agora'}</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {(contadores.erros > 0 || legacyQueue.some((o) => o.status === 'ERRO') || comercialStatus.estado === 'ERRO') && (
+                    <button
+                      onClick={handleReenviarErros}
+                      disabled={isForcingSync}
+                      className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-xs cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <RotateCcw className={`w-3.5 h-3.5 ${isForcingSync ? 'animate-spin' : ''}`} />
+                      <span>Reenviar Erros</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={handleForcarSincronizacao}
+                    disabled={isForcingSync}
+                    className="px-4 py-2 bg-[#F36B0B] hover:bg-[#C94F00] text-white text-xs font-black uppercase tracking-wider rounded-xl transition-all shadow-xs cursor-pointer flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isForcingSync ? 'animate-spin' : ''}`} />
+                    <span>{isForcingSync ? 'Sincronizando...' : 'Sincronizar Agora'}</span>
+                  </button>
+                </div>
               </div>
+
+              {/* Status da Sincronização Comercial (Promotores, Agências e Indústrias) */}
+              <div className="border border-slate-200 rounded-xl p-3.5 bg-white space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Users className="w-4 h-4 text-blue-700" />
+                    <h4 className="text-xs font-black uppercase text-slate-800">
+                      Sincronização Comercial (Promotores × Agências × Indústrias)
+                    </h4>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                      comercialStatus.estado === 'SINCRONIZADO'
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : comercialStatus.estado === 'ERRO' || comercialStatus.estado === 'BLOQUEADO_COTA'
+                        ? 'bg-rose-100 text-rose-800'
+                        : 'bg-amber-100 text-amber-900'
+                    }`}
+                  >
+                    {comercialStatus.estado} • {comercialStatus.pendentesCount} pendente(s)
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-600">
+                  {comercialStatus.estado === 'AGUARDANDO_GERENCIA'
+                    ? 'Há alterações comerciais na fila local aguardando login Google verificado da Gerência (aba "Papéis & Acesso") para gravação no Firestore.'
+                    : comercialStatus.ultimoErro
+                    ? `Último erro comercial: ${comercialStatus.ultimoErro}`
+                    : comercialStatus.ultimaSincronizacaoIso
+                    ? `Última sincronização comercial confirmada em ${new Date(comercialStatus.ultimaSincronizacaoIso).toLocaleString('pt-BR')}.`
+                    : 'Ponteiro /filiais/172/config/sync_comercial_meta ativo.'}
+                </p>
+              </div>
+
+              {/* Erros da Fila Clássica (syncQueueService) quando existirem */}
+              {legacyQueue.some((op) => op.status === 'ERRO' || op.status === 'PENDENTE') && (
+                <div>
+                  <h4 className="text-xs font-black uppercase tracking-wider text-rose-700 mb-2">
+                    Fila Clássica de Vencimentos ({legacyQueue.filter((o) => o.status === 'ERRO').length} erro(s), {legacyQueue.filter((o) => o.status === 'PENDENTE').length} pendente(s))
+                  </h4>
+                  <div className="border border-rose-200 rounded-xl divide-y divide-rose-100 max-h-40 overflow-y-auto bg-rose-50/30">
+                    {legacyQueue
+                      .filter((op) => op.status === 'ERRO' || op.status === 'PENDENTE')
+                      .slice()
+                      .reverse()
+                      .map((op) => (
+                        <div key={op.operationId} className="p-2.5 text-xs space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="font-mono font-bold text-slate-700">
+                              {op.tipoOperacao} • {op.registroId.slice(-16)}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                op.status === 'ERRO' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800'
+                              }`}
+                            >
+                              {op.status} ({op.tentativas}x)
+                            </span>
+                          </div>
+                          {op.erroMensagem && (
+                            <p className="text-[11px] text-rose-700 font-medium break-words">
+                              {op.erroMensagem}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
 
               {/* Fila de Operações Detalhada */}
               <div>
@@ -776,37 +889,44 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
                     </div>
                   ) : (
                     nuvemSyncEngine.getFila().slice().reverse().map((op) => (
-                      <div key={op.opId} className="p-2.5 text-xs flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase ${
-                              op.tipo === 'CREATE'
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : op.tipo === 'UPDATE'
-                                ? 'bg-blue-100 text-blue-800'
-                                : 'bg-rose-100 text-rose-800'
-                            }`}
-                          >
-                            {op.tipo}
-                          </span>
-                          <span className="font-mono text-slate-600 font-bold">{op.loteId.slice(-14)}</span>
-                          <span className="text-slate-400 text-[10px]">por {op.usuario}</span>
+                      <div key={op.opId} className="p-2.5 text-xs space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase ${
+                                op.tipo === 'CREATE'
+                                  ? 'bg-emerald-100 text-emerald-800'
+                                  : op.tipo === 'UPDATE'
+                                  ? 'bg-blue-100 text-blue-800'
+                                  : 'bg-rose-100 text-rose-800'
+                              }`}
+                            >
+                              {op.tipo}
+                            </span>
+                            <span className="font-mono text-slate-600 font-bold">{op.loteId.slice(-14)}</span>
+                            <span className="text-slate-400 text-[10px]">por {op.usuario}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                op.status === 'SINCRONIZADO'
+                                  ? 'bg-emerald-50 text-emerald-700'
+                                  : op.status === 'ENVIANDO'
+                                  ? 'bg-sky-50 text-sky-700 animate-pulse'
+                                  : op.status === 'ERRO'
+                                  ? 'bg-rose-50 text-rose-700'
+                                  : 'bg-amber-50 text-amber-700'
+                              }`}
+                            >
+                              {op.status}
+                            </span>
+                          </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              op.status === 'SINCRONIZADO'
-                                ? 'bg-emerald-50 text-emerald-700'
-                                : op.status === 'ENVIANDO'
-                                ? 'bg-sky-50 text-sky-700 animate-pulse'
-                                : op.status === 'ERRO'
-                                ? 'bg-rose-50 text-rose-700'
-                                : 'bg-amber-50 text-amber-700'
-                            }`}
-                          >
-                            {op.status}
-                          </span>
-                        </div>
+                        {op.status === 'ERRO' && op.erroMensagem && (
+                          <p className="text-[11px] text-rose-700 font-medium break-words">
+                            {op.erroMensagem}
+                          </p>
+                        )}
                       </div>
                     ))
                   )}

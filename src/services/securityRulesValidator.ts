@@ -81,6 +81,10 @@ const ALLOWED_LOTE_KEYS = new Set([
   '_versaoLocal', '_serverVersion', '_syncedAt'
 ]);
 
+const LEGACY_LOTE_KEYS = new Set([
+  'version', 'criadoPorTipo', 'atualizadoPorTipo', 'criadoPorId', 'atualizadoPorId'
+]);
+
 const ALLOWED_DIVERGENCIA_KEYS = new Set([
   'id', 'tipo', 'origem', 'codigo_interno', 'identificador',
   'descricao', 'descricao_problema', 'impacto', 'status',
@@ -252,9 +256,17 @@ export class SecurityRulesValidator {
           const existentes = req.dadosExistentes || {};
 
           for (const key of Object.keys(dados)) {
-            if (!ALLOWED_LOTE_KEYS.has(key)) {
-              return { permitido: false, motivo: `Rejeitado: Campo desconhecido '${key}' não permitido na atualização.` };
+            if (ALLOWED_LOTE_KEYS.has(key)) continue;
+            if (LEGACY_LOTE_KEYS.has(key)) {
+              if (!(key in existentes) || dados[key] !== existentes[key]) {
+                return {
+                  permitido: false,
+                  motivo: `Rejeitado: Campo legado '${key}' só pode permanecer inalterado ou ser removido na atualização.`,
+                };
+              }
+              continue;
             }
+            return { permitido: false, motivo: `Rejeitado: Campo desconhecido '${key}' não permitido na atualização.` };
           }
 
           // CAMPOS IMUTÁVEIS PROTEGIDOS

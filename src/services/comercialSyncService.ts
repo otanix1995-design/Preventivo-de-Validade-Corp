@@ -30,7 +30,10 @@ import {
   getDocs,
   limit,
   onSnapshot,
+  orderBy,
   query,
+  QueryDocumentSnapshot,
+  startAfter,
   Unsubscribe,
   where,
   writeBatch,
@@ -109,6 +112,7 @@ export interface ComercialOutboxItem {
   operations: ComercialWriteOp[];
   tentativas: number;
   ultimoErro?: string;
+  queuedWhileDeferred?: boolean;
 }
 
 export interface ComercialSyncPointerDoc {
@@ -164,6 +168,7 @@ export interface ComercialLocalStateSnapshot {
 }
 
 export interface ComercialPromotorHandlers {
+  ensureReady?: () => Promise<void>;
   getPromotores: () => Promotor[];
   getAgencias: () => AgenciaComercial[];
   getVinculosDispositivo: () => VinculoPromotor[];
@@ -177,6 +182,7 @@ export interface ComercialPromotorHandlers {
 }
 
 export interface ComercialIsvHandlers {
+  ensureReady?: () => Promise<void>;
   getVinculosIndustria: () => VinculoPromotorIndustria[];
   getIndustrias: () => Industria[];
   applyRemoteChanges: (params: {
@@ -185,6 +191,7 @@ export interface ComercialIsvHandlers {
 }
 
 export interface ComercialStateBridge {
+  ensureReady?: () => Promise<void>;
   getSnapshot: () => ComercialLocalStateSnapshot;
   applyMergedState: (params: {
     promotores?: Promotor[];
@@ -496,20 +503,47 @@ function createDefaultAdapter(): ComercialSyncAdapter {
     fetchCollection: async (collectionName, sinceIso, maxLimit) => {
       if (!db) return [];
       const colRef = collection(db, collectionName);
-      const q = sinceIso
-        ? query(colRef, where('atualizadoEm', '>=', sinceIso), limit(maxLimit))
-        : query(colRef, limit(maxLimit));
-      const snap = await getDocs(q);
+      const pageSize = Math.max(1, maxLimit || DEFAULT_FETCH_LIMIT);
+      const MAX_PAGES = 20;
+      const rows: Array<Record<string, any>> = [];
+      let lastDoc: QueryDocumentSnapshot | null = null;
+      let totalReads = 0;
+
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const q = sinceIso
+          ? lastDoc
+            ? query(
+                colRef,
+                where('atualizadoEm', '>=', sinceIso),
+                orderBy('atualizadoEm', 'asc'),
+                startAfter(lastDoc),
+                limit(pageSize)
+              )
+            : query(
+                colRef,
+                where('atualizadoEm', '>=', sinceIso),
+                orderBy('atualizadoEm', 'asc'),
+                limit(pageSize)
+              )
+          : lastDoc
+            ? query(colRef, orderBy('__name__'), startAfter(lastDoc), limit(pageSize))
+            : query(colRef, orderBy('__name__'), limit(pageSize));
+
+        const snap = await getDocs(q);
+        totalReads += snap.size;
+        snap.forEach((docSnap) => {
+          const d = docSnap.data();
+          if (d) rows.push(d);
+        });
+        if (snap.size < pageSize) break;
+        lastDoc = snap.docs[snap.docs.length - 1];
+      }
+
       logFirestoreRead(
         sinceIso ? 'incrementalComercialFetch' : 'bootstrapComercialFetch',
         collectionName,
-        snap.size
+        totalReads
       );
-      const rows: Array<Record<string, any>> = [];
-      snap.forEach((docSnap) => {
-        const d = docSnap.data();
-        if (d) rows.push(d);
-      });
       return rows;
     },
     writeBatchOps: async (ops: ComercialWriteOp[]) => {
@@ -597,6 +631,12 @@ export class ComercialSyncService {
     if (this._bridge) return this._bridge;
     if (!this._promotorHandlers && !this._isvHandlers) return null;
     return {
+      ensureReady: async () => {
+        await Promise.all([
+          this._promotorHandlers?.ensureReady?.(),
+          this._isvHandlers?.ensureReady?.(),
+        ]);
+      },
       getSnapshot: () => ({
         promotores: this._promotorHandlers?.getPromotores() ?? [],
         agencias: this._promotorHandlers?.getAgencias() ?? [],
@@ -627,6 +667,15 @@ export class ComercialSyncService {
         }
       },
     };
+  }
+
+  private async _waitForHandlersReady(bridge: ComercialStateBridge | null): Promise<void> {
+    if (!bridge?.ensureReady) return;
+    try {
+      await bridge.ensureReady();
+    } catch {
+      // Handler individual já trata fallback de inicialização
+    }
   }
 
   public getStatus(): ComercialSyncStatus {
@@ -732,6 +781,7 @@ export class ComercialSyncService {
    */
   public async iniciar(): Promise<void> {
     await this._ensureLoaded();
+    await this._waitForHandlersReady(this._getResolvedBridge());
 
     if (!this._started) {
       this._started = true;
@@ -875,6 +925,11 @@ export class ComercialSyncService {
     await this._ensureLoaded();
 
     const agora = new Date().toISOString();
+    const isDeferredAtEnqueue =
+      !this._adapter.isOnline() ||
+      !this._adapter.isGerenciaAdmin() ||
+      this._adapter.isQuotaExceeded() ||
+      params.flushImmediately === false;
     const nextItem: ComercialOutboxItem = {
       opId: `csop_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       domain: params.domain,
@@ -883,6 +938,7 @@ export class ComercialSyncService {
       pointerDomains: Array.from(new Set(params.pointerDomains)),
       operations: params.operations,
       tentativas: 0,
+      queuedWhileDeferred: isDeferredAtEnqueue,
     };
 
     if (params.coalesceSingleDocKey) {
@@ -1321,8 +1377,28 @@ export class ComercialSyncService {
           if (d === 'movimentacoes_comerciais') pointerPatch.movimentacoesUpdatedAt = agoraItem;
         }
 
+        const itemAgeMs = Date.now() - (Date.parse(item.criadoEmIso || '') || Date.now());
+        const shouldRefreshTimestamp =
+          Boolean(item.queuedWhileDeferred) ||
+          (item.tentativas || 0) > 0 ||
+          itemAgeMs > 10_000;
+
+        const refreshedOps: ComercialWriteOp[] = item.operations.map((op) => {
+          if (op.immutableCreate || !shouldRefreshTimestamp) return op;
+          if (op.collectionName === 'vinculos_promotor_industria' && op.payload?.ativo === false && op.docId) {
+            this._state.tombstonesVinculosIndustria[op.docId] = agoraItem;
+          }
+          return {
+            ...op,
+            payload: {
+              ...op.payload,
+              atualizadoEm: agoraItem,
+            },
+          };
+        });
+
         const batchWithPointer: ComercialWriteOp[] = [
-          ...item.operations,
+          ...refreshedOps,
           {
             collectionName: `filiais/${FILIAL_COMERCIAL_ID}/config`,
             docId: META_DOC_SYNC_COMERCIAL,
@@ -1399,9 +1475,11 @@ export class ComercialSyncService {
     enviados: number;
     recebidos: number;
     pendentes: number;
+    aguardandoGerencia?: boolean;
     mensagem: string;
   }> {
     await this._ensureLoaded();
+    await this._waitForHandlersReady(this._getResolvedBridge());
 
     if (!this._adapter.isOnline()) {
       this._notifyStatus();
@@ -1434,14 +1512,18 @@ export class ComercialSyncService {
     const pushRes = await this.processarFilaPendente();
 
     const ok = !this._ultimoErro;
+    const aguardandoGerencia = pushRes.pendentes > 0 && !this._adapter.isGerenciaAdmin();
     return {
       sucesso: ok,
       enviados: pushRes.enviados,
       recebidos: pullRes.recebidos,
       pendentes: pushRes.pendentes,
-      mensagem: ok
-        ? `Sincronização comercial concluída (${pushRes.enviados} envio(s), ${pullRes.recebidos} atualização(ões) recebida(s)).`
-        : this._ultimoErro || 'Sincronização parcial com avisos.',
+      aguardandoGerencia,
+      mensagem: !ok
+        ? this._ultimoErro || 'Sincronização parcial com avisos.'
+        : aguardandoGerencia
+        ? `${pushRes.pendentes} alteração(ões) salva(s) localmente. Faça login Google como Gerência para enviar ao Firestore (${pullRes.recebidos} atualização(ões) recebida(s)).`
+        : `Sincronização comercial concluída (${pushRes.enviados} envio(s), ${pullRes.recebidos} atualização(ões) recebida(s)).`,
     };
   }
 
@@ -1451,6 +1533,7 @@ export class ComercialSyncService {
     await this._ensureLoaded();
 
     const resolvedBridge = this._getResolvedBridge();
+    await this._waitForHandlersReady(resolvedBridge);
     if (
       this._isPulling ||
       !this._adapter.isOnline() ||

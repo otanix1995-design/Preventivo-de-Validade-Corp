@@ -79,11 +79,8 @@ export default function App() {
       setDivergencias(getDivergencias());
       setMetadados(getMetadados());
     });
-    isvService.init().catch((err) => {
-      console.warn('Erro ao inicializar IsvService no boot:', err);
-    });
-    promotorService.init().catch((err) => {
-      console.warn('Erro ao inicializar PromotorService no boot:', err);
+    Promise.all([isvService.init(), promotorService.init()]).catch((err) => {
+      console.warn('Erro ao inicializar serviços comerciais/ISV no boot:', err);
     });
 
     const unsubscribe = subscribeToStore(() => {

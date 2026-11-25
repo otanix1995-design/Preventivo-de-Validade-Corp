@@ -48,6 +48,7 @@ export interface SyncOperation {
 
 const STORAGE_KEY_QUEUE = 'vencimentos_sync_queue_v1';
 const STORAGE_KEY_TOMBSTONES = 'vencimentos_tombstones_v1';
+const STORAGE_KEY_RULE_FIX_RETRY = 'vencimentos_rule_fix_retry_v1';
 
 class SyncQueueService {
   private _queue: SyncOperation[] = [];
@@ -76,6 +77,25 @@ class SyncQueueService {
         const parsed = JSON.parse(qData);
         if (Array.isArray(parsed)) {
           this._queue = parsed;
+          if (!localStorage.getItem(STORAGE_KEY_RULE_FIX_RETRY)) {
+            let recovered = false;
+            this._queue = this._queue.map((op) => {
+              const msg = String(op?.erroMensagem || '').toLowerCase();
+              if (
+                op?.status === 'ERRO' &&
+                (msg.includes('permission') || msg.includes('permiss') || msg.includes('insufficient'))
+              ) {
+                recovered = true;
+                return { ...op, status: 'PENDENTE', tentativas: 0, erroMensagem: undefined };
+              }
+              return op;
+            });
+            localStorage.setItem(STORAGE_KEY_RULE_FIX_RETRY, '1');
+            if (recovered) {
+              this.saveToStorage();
+              this.triggerProcessBackground();
+            }
+          }
         }
       }
     } catch (e) {
@@ -465,6 +485,39 @@ class SyncQueueService {
 
   public getQueue(): SyncOperation[] {
     return [...this._queue];
+  }
+
+  public async retryErroredOperations(): Promise<number> {
+    let resetCount = 0;
+    this._queue = this._queue.map((op) => {
+      if (op.status === 'ERRO') {
+        resetCount++;
+        return {
+          ...op,
+          status: 'PENDENTE',
+          tentativas: 0,
+          erroMensagem: undefined,
+        };
+      }
+      return op;
+    });
+    if (resetCount > 0) {
+      this.saveToStorage();
+      this.notify();
+      await this.processQueue();
+    }
+    return resetCount;
+  }
+
+  public clearErroredOperations(): number {
+    const before = this._queue.length;
+    this._queue = this._queue.filter((op) => op.status !== 'ERRO');
+    const removed = before - this._queue.length;
+    if (removed > 0) {
+      this.saveToStorage();
+      this.notify();
+    }
+    return removed;
   }
 }
 

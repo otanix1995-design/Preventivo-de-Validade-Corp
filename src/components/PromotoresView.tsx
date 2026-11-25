@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ComercialSyncStatus, comercialSyncService } from '../services/comercialSyncService';
+import { isvService } from '../services/isvService';
 import { promotorService } from '../services/promotorService';
 import { EstadoAuthServidor, firebaseAuthService } from '../services/firebaseAuthService';
 import {
@@ -103,13 +104,10 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
 
   const handleSincronizarAgora = async () => {
     setSyncFeedback(null);
+    await Promise.all([promotorService.init(), isvService.init()]);
     const res = await comercialSyncService.sincronizarAgora();
     carregarDados();
-    if (!res.sucesso) {
-      setSyncFeedback(res.mensagem);
-    } else if (res.enviados > 0 || res.recebidos > 0) {
-      setSyncFeedback(res.mensagem);
-    }
+    setSyncFeedback(res.mensagem);
   };
 
   const isGerenciaAutenticada =
