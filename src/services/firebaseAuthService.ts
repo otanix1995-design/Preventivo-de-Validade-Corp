@@ -337,6 +337,42 @@ class FirebaseAuthService {
         markQuotaExceeded(err?.message, detectQuotaResourceType(err));
       }
       console.warn('[FirebaseAuthService] Falha ao verificar perfil no Firestore:', err?.message);
+
+      const isBootstrapEmail =
+        Boolean(user.email) &&
+        user.emailVerified === true &&
+        user.email!.toLowerCase() === ADMIN_BOOTSTRAP_EMAIL.toLowerCase();
+
+      if (isBootstrapEmail) {
+        const perfilBootstrap: PerfilServidorUsuario = {
+          uid: user.uid,
+          email: user.email,
+          nome: user.displayName || 'Administrador Central Filial 172',
+          matricula: '172001',
+          filialId: '172',
+          papel: 'GERENCIA_ADMIN',
+          ativo: true,
+          criadoEm: new Date().toISOString(),
+        };
+        authRoleService.aplicarSessaoServidorVerificada({
+          autenticado: true,
+          isVerificadoServidor: true,
+          uid: user.uid,
+          email: user.email,
+          nome: perfilBootstrap.nome,
+          matricula: perfilBootstrap.matricula,
+          filialId: '172',
+          papel: 'GERENCIA_ADMIN',
+        });
+        this._atualizarEstado({
+          isVerificadoServidor: true,
+          perfil: perfilBootstrap,
+          carregando: false,
+          mensagem: `Gerência Filial 172 mantida (falha transitória ao consultar servidor: ${err?.message || 'sem resposta'}).`,
+        });
+        return;
+      }
+
       authRoleService.aplicarSessaoServidorVerificada({
         autenticado: false,
         isVerificadoServidor: false,

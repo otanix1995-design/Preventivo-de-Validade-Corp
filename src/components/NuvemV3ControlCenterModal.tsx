@@ -284,16 +284,18 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
   const handleForcarSincronizacao = async () => {
     if (isForcingSync) return;
     setIsForcingSync(true);
-    setSyncToast('Disparando sincronização transacional e comercial...');
+    setSyncToast('Disparando sincronização transacional e reconciliação comercial...');
     try {
       await nuvemSyncEngine.reprocessarErros();
       await syncQueueService.retryErroredOperations();
       const resQueue = await nuvemSyncEngine.processarFila();
       const resDelta = await nuvemSyncEngine.executarSincronizacaoIncremental('172');
       await cloudSyncService.pullVencimentosFromCloud();
-      const resComercial = await comercialSyncService.sincronizarAgora();
+      const resComercial = await comercialSyncService.sincronizarAgora({ reconciliar: true });
+      const temErrosFila = resQueue.erros > 0 || syncQueueService.hasErrors() || nuvemSyncEngine.getContadores().erros > 0;
+      const prefixo = temErrosFila || !resComercial.sucesso ? 'Sincronização finalizada com pendências/erros' : 'Sincronização concluída';
       setSyncToast(
-        `Sincronização concluída: ${resQueue.processadas} vencimento(s) enviado(s), ${resDelta.atualizados} atualização(ões) recebida(s). Comercial: ${resComercial.mensagem}`
+        `${prefixo}: ${resQueue.processadas} vencimento(s) enviado(s), ${resDelta.atualizados} atualização(ões) recebida(s). Comercial: ${resComercial.mensagem}`
       );
       setTimeout(() => setSyncToast(null), 6000);
     } catch (e: any) {
@@ -311,9 +313,10 @@ export const NuvemV3ControlCenterModal: React.FC<NuvemV3ControlCenterModalProps>
     try {
       const resetLegacy = await syncQueueService.retryErroredOperations();
       const resV3 = await nuvemSyncEngine.reprocessarErros();
-      const resCom = await comercialSyncService.sincronizarAgora();
+      const resCom = await comercialSyncService.sincronizarAgora({ reconciliar: true });
+      const temErros = resV3.erros > 0 || syncQueueService.hasErrors() || !resCom.sucesso;
       setSyncToast(
-        `Reenvio concluído (fila v1: ${resetLegacy} reativado(s), Nuvem V3: ${resV3.processadas} enviado(s), Comercial: ${resCom.enviados} envio(s)).`
+        `${temErros ? 'Reprocessamento com pendências/erros' : 'Reenvio concluído'} (fila v1: ${resetLegacy} reativado(s), Nuvem V3: ${resV3.processadas} enviado(s), Comercial: ${resCom.mensagem}).`
       );
       setTimeout(() => setSyncToast(null), 6000);
     } catch (e: any) {

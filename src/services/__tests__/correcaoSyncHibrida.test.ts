@@ -156,7 +156,7 @@ async function runCorrecaoSyncHibridaTests(): Promise<void> {
     };
     comercialSyncService.sincronizarAgora = async () => {
       comercialSynced = true;
-      return { sucesso: true, enviados: 0, recebidos: 0, pendentes: 0, mensagem: 'ok' };
+      return { sucesso: true, enviados: 0, recebidos: 0, pendentes: 0, bloqueados: 0, erros: 0, mensagem: 'ok' };
     };
 
     try {

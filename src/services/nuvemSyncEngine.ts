@@ -83,7 +83,7 @@ const STORAGE_KEY_QUEUE_V3 = 'nuvem_v3_sync_queue_filial172';
 const STORAGE_KEY_TOMBSTONES_V3 = 'nuvem_v3_tombstones_filial172';
 const STORAGE_KEY_STATUS_MAP = 'nuvem_v3_status_map_v1';
 const STORAGE_KEY_LAST_SYNC = 'nuvem_v3_last_sync_timestamp_172';
-const STORAGE_KEY_RULE_FIX_RETRY_V3 = 'nuvem_v3_rule_fix_retry_v1';
+const STORAGE_KEY_RULE_FIX_RETRY_V3 = 'nuvem_v3_rule_fix_retry_v2';
 
 class NuvemSyncEngine {
   private _queue: OperacaoSyncV3[] = [];
@@ -123,11 +123,7 @@ class NuvemSyncEngine {
           const alreadyRetried = Boolean(localStorage.getItem(STORAGE_KEY_RULE_FIX_RETRY_V3));
           if (!alreadyRetried) {
             this._queue = this._queue.map((op) => {
-              const msg = String(op?.erroMensagem || '').toLowerCase();
-              if (
-                op?.status === 'ERRO' &&
-                (msg.includes('permission') || msg.includes('permiss') || msg.includes('insufficient'))
-              ) {
+              if (op?.status === 'ERRO') {
                 recovered = true;
                 return { ...op, status: 'PENDENTE', tentativas: 0, erroMensagem: undefined };
               }
@@ -560,16 +556,19 @@ class NuvemSyncEngine {
           processadas++;
         } catch (err: any) {
           console.warn(`[NuvemSyncEngine] Falha no envio da operação ${op.opId}:`, err?.message);
-          erros++;
 
           if (isQuotaError(err)) {
             markQuotaExceeded(err?.message, detectQuotaResourceType(err));
-            op.status = 'ERRO';
-            op.erroMensagem = `[Vencimentos • Coleção: vencimentos] Cota diária gratuita do Spark atingida. Dados salvos com segurança no dispositivo.`;
-            this._statusMap.set(op.loteId, 'ERRO');
+            op.status = 'PENDENTE';
+            op.tentativas = Math.max(0, op.tentativas - 1);
+            op.erroMensagem = undefined;
+            this._statusMap.set(op.loteId, 'PENDENTE');
+            this.salvarFilaPersistente();
+            this.notificar();
             break;
           }
 
+          erros++;
           op.status = 'ERRO';
           op.erroMensagem = err?.message || 'Falha de comunicação com o servidor';
           this._statusMap.set(op.loteId, 'ERRO');

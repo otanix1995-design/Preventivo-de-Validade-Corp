@@ -57,6 +57,7 @@ import {
 import { dbClear, dbGetMeta, dbPut, dbSetMeta, STORES } from './db';
 import { EstadoAuthServidor, firebaseAuthService } from './firebaseAuthService';
 import { isvService } from './isvService';
+import { comercialSyncService } from './comercialSyncService';
 import {
   EventoAlteracaoPacoteLocal,
   isModoAtualizacaoLocalAtivo,
@@ -1765,6 +1766,7 @@ export class LocalUpdatePackageService {
         preservarAlteracoesComerciaisLocais: preservarComerciaisLocais,
       });
       promotoresAplicados = true;
+      await comercialSyncService.marcarReconciliacaoPendente().catch(() => {});
 
       // Etapa 12: Limpar staging, atualizar metadados do pacote e reconstruir índices
       etapaAtual = 'ATUALIZACAO_METADADOS';

@@ -53,7 +53,6 @@ import {
   normalizarChaveAgencia,
 } from './agenciaNormalizer';
 import { authRoleService } from './authRoleService';
-import { cleanForFirestore } from './cloudSyncService';
 import { dbGetMeta, dbSetMeta, STORES } from './db';
 import {
   db,
@@ -131,10 +130,24 @@ export interface ComercialSyncPointerDoc {
 export interface ComercialSyncPersistedState {
   bootstrapCompleted: boolean;
   initialCloudReconciled: boolean;
+  needsReconciliation?: boolean;
   cursors: Record<ComercialSyncDomain, string | null>;
   lastPointerSeen: Partial<Record<ComercialSyncDomain, string>>;
   tombstonesVinculosIndustria: Record<string, string>; // vinculoId -> atualizadoEmIso
   ultimaSincronizacaoIso: string | null;
+}
+
+export interface SincronizarComercialResult {
+  sucesso: boolean;
+  enviados: number;
+  recebidos: number;
+  pendentes: number;
+  bloqueados: number;
+  erros: number;
+  erroDetalhe?: string;
+  bloqueadoMotivo?: string;
+  aguardandoGerencia?: boolean;
+  mensagem: string;
 }
 
 export interface ComercialSyncStatus {
@@ -231,6 +244,7 @@ export interface ComercialSyncAdapter {
 const DEFAULT_PERSISTED_STATE: ComercialSyncPersistedState = {
   bootstrapCompleted: false,
   initialCloudReconciled: false,
+  needsReconciliation: false,
   cursors: {
     promotores: null,
     agencias: null,
@@ -248,6 +262,7 @@ function cloneDefaultState(): ComercialSyncPersistedState {
   return {
     bootstrapCompleted: false,
     initialCloudReconciled: false,
+    needsReconciliation: false,
     cursors: { ...DEFAULT_PERSISTED_STATE.cursors },
     lastPointerSeen: {},
     tombstonesVinculosIndustria: {},
@@ -322,21 +337,143 @@ function reportPermissionDiagnostic(
   }
 }
 
-export function buildFirestorePromotorPayload(promotor: Promotor, updatedAtIso?: string): Record<string, any> {
+/**
+ * Remove propriedades `undefined` recursivamente SEM convertê-las em `null`.
+ * Evita que campos não-anuláveis no `firestore.rules` (ex: `setores`, `status`,
+ * `modoTransferencia`, `promotorNome`) virem `null` e causem `permission-denied`.
+ */
+export function omitUndefinedForFirestore<T>(obj: T): T {
+  if (obj === undefined) return undefined as T;
+  if (obj === null || typeof obj !== 'object') {
+    if (typeof obj === 'number' && Number.isNaN(obj)) return 0 as unknown as T;
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj
+      .filter((item) => item !== undefined)
+      .map((item) => omitUndefinedForFirestore(item)) as unknown as T;
+  }
+  const result: Record<string, any> = {};
+  for (const [k, v] of Object.entries(obj as Record<string, any>)) {
+    if (v === undefined) continue;
+    if (typeof v === 'number' && Number.isNaN(v)) continue;
+    result[k] = omitUndefinedForFirestore(v);
+  }
+  return result as T;
+}
+
+const VALID_PROMOTOR_STATUSES = new Set([
+  'ATIVO',
+  'BLOQUEADO',
+  'DESVINCULADO',
+  'PENDENTE_VINCULO',
+  'INATIVO',
+]);
+const VALID_VINCULO_DISP_STATUSES = new Set([
+  'AGUARDANDO',
+  'UTILIZADO',
+  'EXPIRADO',
+  'CANCELADO',
+]);
+const VALID_MODOS_TRANSFERENCIA = new Set(['TODAS', 'MANUAL', 'NENHUMA']);
+
+function clipStr(val: unknown, maxLen: number): string | undefined {
+  if (typeof val !== 'string') return undefined;
+  return val.length > maxLen ? val.slice(0, maxLen) : val;
+}
+
+function clipNullableStr(val: unknown, maxLen: number): string | null | undefined {
+  if (val === undefined) return undefined;
+  if (val === null) return null;
+  const s = String(val);
+  return s.length > maxLen ? s.slice(0, maxLen) : s;
+}
+
+function sanitizeStringList(val: unknown, maxItems: number): string[] | undefined {
+  if (!Array.isArray(val)) return undefined;
+  return val
+    .filter((item) => item !== undefined && item !== null && String(item).trim().length > 0)
+    .map((item) => String(item))
+    .slice(0, maxItems);
+}
+
+export function buildFirestorePromotorPayload(
+  promotor: Promotor,
+  updatedAtIso?: string
+): Record<string, any> {
   const agora = updatedAtIso || promotor.atualizadoEm || new Date().toISOString();
-  return cleanForFirestore({
-    ...promotor,
-    filialId: promotor.filialId || FILIAL_COMERCIAL_ID,
-    atualizadoEm: agora,
+  const setores = sanitizeStringList(promotor.setores, 10);
+  const status =
+    promotor.status && VALID_PROMOTOR_STATUSES.has(promotor.status)
+      ? promotor.status
+      : undefined;
+
+  return omitUndefinedForFirestore({
+    promotorId: String(promotor.promotorId).slice(0, 128),
+    nome: String(promotor.nome || 'PROMOTOR').trim().slice(0, 150),
+    agenciaId: clipNullableStr(promotor.agenciaId, 128),
+    agenciaNome: clipNullableStr(promotor.agenciaNome, 150),
+    matricula: clipNullableStr(promotor.matricula, 40),
+    filialId: FILIAL_COMERCIAL_ID,
+    filialNome: clipNullableStr(promotor.filialNome || 'Cascavel', 80),
+    setores: setores && setores.length > 0 ? setores : undefined,
+    setorId: clipStr(promotor.setorId, 80),
+    setorNome: clipStr(promotor.setorNome, 80),
+    status,
+    permissoes:
+      promotor.permissoes && typeof promotor.permissoes === 'object'
+        ? promotor.permissoes
+        : undefined,
+    dispositivoVinculado:
+      promotor.dispositivoVinculado === null
+        ? null
+        : promotor.dispositivoVinculado && typeof promotor.dispositivoVinculado === 'object'
+          ? promotor.dispositivoVinculado
+          : undefined,
+    dataCadastro: clipStr(promotor.dataCadastro, 60),
+    dataVinculo: clipNullableStr(promotor.dataVinculo, 60),
+    ultimoAcesso: clipNullableStr(promotor.ultimoAcesso, 60),
+    ultimaSincronizacao: clipNullableStr(promotor.ultimaSincronizacao, 60),
+    inativadoEm: clipNullableStr(promotor.inativadoEm, 60),
+    reativadoEm: clipNullableStr(promotor.reativadoEm, 60),
+    motivoInativacao: clipNullableStr(promotor.motivoInativacao, 300),
+    substituidoPorPromotorId: clipNullableStr(promotor.substituidoPorPromotorId, 128),
+    substituidoPorPromotorNome: clipNullableStr(promotor.substituidoPorPromotorNome, 150),
+    criadoPor: clipNullableStr(promotor.criadoPor, 120),
+    atualizadoPor: clipNullableStr(promotor.atualizadoPor, 120),
+    atualizadoEm: clipNullableStr(agora, 60),
   });
 }
 
-export function buildFirestoreAgenciaPayload(agencia: AgenciaComercial, updatedAtIso?: string): Record<string, any> {
+export function buildFirestoreAgenciaPayload(
+  agencia: AgenciaComercial,
+  updatedAtIso?: string
+): Record<string, any> {
   const agora = updatedAtIso || agencia.atualizadoEm || new Date().toISOString();
-  return cleanForFirestore({
-    ...agencia,
-    filialId: agencia.filialId || FILIAL_COMERCIAL_ID,
-    atualizadoEm: agora,
+  return omitUndefinedForFirestore({
+    agenciaId: String(agencia.agenciaId).slice(0, 128),
+    nome: String(agencia.nome || 'AGÊNCIA').trim().slice(0, 150),
+    nomeNormalizado: clipStr(agencia.nomeNormalizado || normalizarChaveAgencia(agencia.nome), 150),
+    filialId: FILIAL_COMERCIAL_ID,
+    ativo: typeof agencia.ativo === 'boolean' ? agencia.ativo : true,
+    cnpj: clipNullableStr(agencia.cnpj, 30),
+    telefone: clipNullableStr(agencia.telefone, 40),
+    contato: clipNullableStr(agencia.contato, 150),
+    observacoes: clipNullableStr(agencia.observacoes, 500),
+    criadoEm: clipStr(agencia.criadoEm, 60),
+    atualizadoEm: clipStr(agora, 60),
+    totalPromotores:
+      typeof agencia.totalPromotores === 'number' && !Number.isNaN(agencia.totalPromotores)
+        ? agencia.totalPromotores
+        : undefined,
+    totalPromotoresAtivos:
+      typeof agencia.totalPromotoresAtivos === 'number' && !Number.isNaN(agencia.totalPromotoresAtivos)
+        ? agencia.totalPromotoresAtivos
+        : undefined,
+    totalIndustrias:
+      typeof agencia.totalIndustrias === 'number' && !Number.isNaN(agencia.totalIndustrias)
+        ? agencia.totalIndustrias
+        : undefined,
   });
 }
 
@@ -352,7 +489,7 @@ export function buildFirestoreVinculoIndustriaPayload(
 ): Record<string, any> {
   const cnpjNorm = normalizarCnpj(vinculo.cnpj);
   const agora = options?.atualizadoEm || vinculo.atualizadoEm || new Date().toISOString();
-  const ativo = options?.ativo !== undefined ? options.ativo : (vinculo.ativo !== false);
+  const ativo = options?.ativo !== undefined ? options.ativo : vinculo.ativo !== false;
   const agId =
     options?.agenciaId !== undefined
       ? options.agenciaId
@@ -360,23 +497,25 @@ export function buildFirestoreVinculoIndustriaPayload(
         ? gerarAgenciaId(vinculo.agenciaNome)
         : null;
 
-  return cleanForFirestore({
-    id: vinculo.id,
-    vinculoId: vinculo.id,
-    promotorId: vinculo.promotorId,
-    promotorNome: vinculo.promotorNome,
-    agenciaId: agId,
-    agenciaNome: vinculo.agenciaNome || '',
-    industriaId: cnpjNorm,
+  return omitUndefinedForFirestore({
+    id: String(vinculo.id).slice(0, 128),
+    vinculoId: String(vinculo.id).slice(0, 128),
+    promotorId: String(vinculo.promotorId).slice(0, 128),
+    promotorNome: String(vinculo.promotorNome || '').slice(0, 150),
+    agenciaId: agId ? String(agId).slice(0, 128) : null,
+    agenciaNome: String(vinculo.agenciaNome || '').slice(0, 150),
+    industriaId: cnpjNorm ? cnpjNorm.slice(0, 128) : undefined,
     cnpj: cnpjNorm,
     cnpjFormatado: formatarCnpj(cnpjNorm),
-    industriaRazaoSocial: options?.industriaRazaoSocial || undefined,
-    filialId: vinculo.filialId || FILIAL_COMERCIAL_ID,
+    industriaRazaoSocial: options?.industriaRazaoSocial
+      ? String(options.industriaRazaoSocial).slice(0, 200)
+      : undefined,
+    filialId: FILIAL_COMERCIAL_ID,
     ativo,
-    criadoEm: vinculo.criado_em || agora,
-    atualizadoEm: agora,
-    criadoPor: options?.usuario || 'SISTEMA_PRINCIPAL',
-    atualizadoPor: options?.usuario || 'SISTEMA_PRINCIPAL',
+    criadoEm: String(vinculo.criado_em || agora).slice(0, 60),
+    atualizadoEm: String(agora).slice(0, 60),
+    criadoPor: String(options?.usuario || 'SISTEMA_PRINCIPAL').slice(0, 120),
+    atualizadoPor: String(options?.usuario || 'SISTEMA_PRINCIPAL').slice(0, 120),
   });
 }
 
@@ -385,27 +524,29 @@ export function buildFirestoreVinculoAgenciaPayload(
   updatedAtIso?: string,
   usuario?: string
 ): Record<string, any> {
-  const filialId = promotor.filialId || FILIAL_COMERCIAL_ID;
-  const temAgencia = !isAgenciaSemVinculoNome(promotor.agenciaNome) && Boolean(promotor.agenciaId || promotor.agenciaNome);
+  const filialId = FILIAL_COMERCIAL_ID;
+  const temAgencia =
+    !isAgenciaSemVinculoNome(promotor.agenciaNome) &&
+    Boolean(promotor.agenciaId || promotor.agenciaNome);
   const agenciaId = temAgencia
     ? promotor.agenciaId || gerarAgenciaId(promotor.agenciaNome)
     : null;
   const agora = updatedAtIso || promotor.atualizadoEm || new Date().toISOString();
-  const id = `pa_${promotor.promotorId}_${filialId}`;
+  const id = `pa_${promotor.promotorId}_${filialId}`.slice(0, 128);
 
-  return cleanForFirestore({
+  return omitUndefinedForFirestore({
     id,
     vinculoId: id,
-    promotorId: promotor.promotorId,
-    promotorNome: promotor.nome,
-    agenciaId,
-    agenciaNome: temAgencia ? promotor.agenciaNome : '',
+    promotorId: String(promotor.promotorId).slice(0, 128),
+    promotorNome: String(promotor.nome || '').slice(0, 150),
+    agenciaId: agenciaId ? String(agenciaId).slice(0, 128) : null,
+    agenciaNome: temAgencia ? String(promotor.agenciaNome || '').slice(0, 150) : '',
     filialId,
     ativo: temAgencia && promotor.status !== 'INATIVO',
-    criadoEm: promotor.dataCadastro || agora,
-    atualizadoEm: agora,
-    criadoPor: usuario || 'SISTEMA_PRINCIPAL',
-    atualizadoPor: usuario || 'SISTEMA_PRINCIPAL',
+    criadoEm: String(promotor.dataCadastro || agora).slice(0, 60),
+    atualizadoEm: String(agora).slice(0, 60),
+    criadoPor: String(usuario || 'SISTEMA_PRINCIPAL').slice(0, 120),
+    atualizadoPor: String(usuario || 'SISTEMA_PRINCIPAL').slice(0, 120),
   });
 }
 
@@ -413,38 +554,142 @@ export function buildFirestoreVinculoDispositivoPayload(
   vinculo: VinculoPromotor,
   updatedAtIso?: string
 ): Record<string, any> {
-  const agora = updatedAtIso || vinculo.atualizadoEm || vinculo.dataUtilizacao || vinculo.dataCriacao || new Date().toISOString();
-  return cleanForFirestore({
-    vinculoId: vinculo.vinculoId,
-    promotorId: vinculo.promotorId,
-    promotorNome: vinculo.promotorNome,
-    agenciaNome: vinculo.agenciaNome,
-    filialId: vinculo.filialId || FILIAL_COMERCIAL_ID,
-    filialNome: vinculo.filialNome || 'Cascavel',
-    setores: vinculo.setores,
-    setorId: vinculo.setorId,
-    setorNome: vinculo.setorNome,
-    permissoes: vinculo.permissoes,
-    codigoVinculo: vinculo.codigoVinculo,
-    tokenVinculo: vinculo.tokenVinculo,
-    dataCriacao: vinculo.dataCriacao,
-    dataExpiracao: vinculo.dataExpiracao,
-    status: vinculo.status,
-    dispositivoId: vinculo.dispositivoId ?? null,
-    dispositivoNome: vinculo.dispositivoNome ?? null,
-    dataUtilizacao: vinculo.dataUtilizacao ?? null,
-    atualizadoEm: agora,
+  const agora =
+    updatedAtIso ||
+    vinculo.atualizadoEm ||
+    vinculo.dataUtilizacao ||
+    vinculo.dataCriacao ||
+    new Date().toISOString();
+  const setores = sanitizeStringList(vinculo.setores, 10);
+  const status =
+    vinculo.status && VALID_VINCULO_DISP_STATUSES.has(vinculo.status)
+      ? vinculo.status
+      : 'AGUARDANDO';
+
+  return omitUndefinedForFirestore({
+    vinculoId: String(vinculo.vinculoId).slice(0, 128),
+    promotorId: String(vinculo.promotorId).slice(0, 128),
+    promotorNome: clipStr(vinculo.promotorNome, 150),
+    agenciaNome: clipStr(vinculo.agenciaNome, 150),
+    filialId: FILIAL_COMERCIAL_ID,
+    filialNome: clipStr(vinculo.filialNome || 'Cascavel', 80),
+    setores: setores && setores.length > 0 ? setores : undefined,
+    setorId: clipStr(vinculo.setorId, 80),
+    setorNome: clipStr(vinculo.setorNome, 80),
+    permissoes:
+      vinculo.permissoes && typeof vinculo.permissoes === 'object'
+        ? vinculo.permissoes
+        : undefined,
+    codigoVinculo: String(vinculo.codigoVinculo).slice(0, 20),
+    tokenVinculo: clipNullableStr(vinculo.tokenVinculo, 128),
+    dataCriacao: clipStr(vinculo.dataCriacao, 60),
+    dataExpiracao: clipStr(vinculo.dataExpiracao, 60),
+    status,
+    dispositivoId: clipNullableStr(vinculo.dispositivoId, 128),
+    dispositivoNome: clipNullableStr(vinculo.dispositivoNome, 150),
+    dataUtilizacao: clipNullableStr(vinculo.dataUtilizacao, 60),
+    atualizadoEm: clipStr(agora, 60),
   });
 }
 
 export function buildFirestoreMovimentacaoPayload(
   mov: HistoricoMovimentacaoComercial
 ): Record<string, any> {
-  return cleanForFirestore({
-    ...mov,
+  const modoTransferencia =
+    mov.modoTransferencia && VALID_MODOS_TRANSFERENCIA.has(mov.modoTransferencia)
+      ? mov.modoTransferencia
+      : undefined;
+
+  return omitUndefinedForFirestore({
+    id: String(mov.id).slice(0, 128),
     filialId: FILIAL_COMERCIAL_ID,
-    atualizadoEm: mov.dataHora || new Date().toISOString(),
+    tipo: String(mov.tipo || 'MOVIMENTACAO').slice(0, 60),
+    dataHora: String(mov.dataHora || new Date().toISOString()).slice(0, 60),
+    atualizadoEm: clipNullableStr(mov.dataHora || new Date().toISOString(), 60),
+    promotorId: clipNullableStr(mov.promotorId, 128),
+    promotorNome: clipNullableStr(mov.promotorNome, 150),
+    promotorSubstitutoId: clipNullableStr(mov.promotorSubstitutoId, 128),
+    promotorSubstitutoNome: clipNullableStr(mov.promotorSubstitutoNome, 150),
+    agenciaId: clipNullableStr(mov.agenciaId, 128),
+    agenciaNome: clipNullableStr(mov.agenciaNome, 150),
+    agenciaAnteriorId: clipNullableStr(mov.agenciaAnteriorId, 128),
+    agenciaAnteriorNome: clipNullableStr(mov.agenciaAnteriorNome, 150),
+    cnpjsTransferidos: sanitizeStringList(mov.cnpjsTransferidos, 500),
+    industriasTransferidas: sanitizeStringList(mov.industriasTransferidas, 500),
+    cnpjsOrigemAntes: sanitizeStringList(mov.cnpjsOrigemAntes, 500),
+    cnpjsIgnoradosDuplicidade: sanitizeStringList(mov.cnpjsIgnoradosDuplicidade, 500),
+    modoTransferencia,
+    inativacaoOrigem:
+      typeof mov.inativacaoOrigem === 'boolean' ? mov.inativacaoOrigem : undefined,
+    motivo: clipNullableStr(mov.motivo, 500),
+    detalhes: String(mov.detalhes || 'Movimentação comercial').slice(0, 1000),
+    realizadoPor: String(mov.realizadoPor || 'GERENCIA_172').slice(0, 120),
   });
+}
+
+/**
+ * Higieniza payloads antigos/em fila antes de gravar no Firestore, garantindo
+ * conformidade estrita com `firestore.rules` mesmo após upgrade de versão.
+ */
+export function sanitizeComercialWriteOpPayload(
+  collectionName: string,
+  payload: Record<string, any>
+): Record<string, any> {
+  if (!payload || typeof payload !== 'object') return {};
+  if (collectionName === 'promotores') {
+    return buildFirestorePromotorPayload(payload as Promotor, payload.atualizadoEm);
+  }
+  if (collectionName === 'agencias') {
+    return buildFirestoreAgenciaPayload(payload as AgenciaComercial, payload.atualizadoEm);
+  }
+  if (
+    collectionName === 'vinculos_promotor_industria' ||
+    collectionName === 'vinculosPromotorIndustria'
+  ) {
+    return buildFirestoreVinculoIndustriaPayload(
+      {
+        id: String(payload.id || payload.vinculoId || ''),
+        promotorId: String(payload.promotorId || ''),
+        promotorNome: String(payload.promotorNome || ''),
+        agenciaNome: String(payload.agenciaNome || ''),
+        cnpj: String(payload.cnpj || payload.industriaId || ''),
+        filialId: FILIAL_COMERCIAL_ID,
+        criado_em: String(payload.criadoEm || payload.criado_em || payload.atualizadoEm || new Date().toISOString()),
+        atualizadoEm: payload.atualizadoEm,
+        ativo: payload.ativo !== false,
+      },
+      {
+        ativo: payload.ativo !== false,
+        atualizadoEm: payload.atualizadoEm,
+        industriaRazaoSocial: payload.industriaRazaoSocial || undefined,
+        agenciaId: payload.agenciaId ?? null,
+        usuario: payload.atualizadoPor || payload.criadoPor,
+      }
+    );
+  }
+  if (collectionName === 'vinculosPromotorAgencia') {
+    return omitUndefinedForFirestore({
+      id: clipStr(payload.id || payload.vinculoId, 128),
+      vinculoId: clipStr(payload.vinculoId || payload.id, 128),
+      promotorId: clipStr(payload.promotorId, 128),
+      promotorNome: String(payload.promotorNome || '').slice(0, 150),
+      agenciaId: clipNullableStr(payload.agenciaId, 128),
+      agenciaNome: clipNullableStr(payload.agenciaNome, 150),
+      filialId: FILIAL_COMERCIAL_ID,
+      ativo: typeof payload.ativo === 'boolean' ? payload.ativo : true,
+      criadoEm: clipStr(payload.criadoEm, 60),
+      atualizadoEm: clipStr(payload.atualizadoEm, 60),
+      criadoPor: clipStr(payload.criadoPor, 120),
+      atualizadoPor: clipStr(payload.atualizadoPor, 120),
+    });
+  }
+  if (collectionName === 'vinculosPromotor' || collectionName === 'vinculos_promotores') {
+    return buildFirestoreVinculoDispositivoPayload(payload as VinculoPromotor, payload.atualizadoEm);
+  }
+  if (collectionName === 'movimentacoes_comerciais') {
+    return buildFirestoreMovimentacaoPayload(payload as HistoricoMovimentacaoComercial);
+  }
+  return omitUndefinedForFirestore(payload);
 }
 
 export function fromFirestoreVinculoIndustria(raw: Record<string, any>): VinculoPromotorIndustria | null {
@@ -557,7 +802,7 @@ function createDefaultAdapter(): ComercialSyncAdapter {
           const ref = op.collectionName.includes('/')
             ? doc(db, ...(op.collectionName.split('/') as [string, ...string[]]), op.docId)
             : doc(db, op.collectionName, op.docId);
-          const sanitized = cleanForFirestore(op.payload);
+          const sanitized = sanitizeComercialWriteOpPayload(op.collectionName, op.payload);
           if (op.merge !== false && !op.immutableCreate) {
             batch.set(ref, sanitized, { merge: true });
           } else {
@@ -737,11 +982,22 @@ export class ComercialSyncService {
         this._adapter.getMeta<ComercialOutboxItem[]>(META_KEY_OUTBOX, []),
         this._adapter.getMeta<Partial<ComercialSyncPersistedState> | null>(META_KEY_SYNC_STATE, null),
       ]);
-      this._outbox = Array.isArray(outboxRaw) ? outboxRaw : [];
+      this._outbox = Array.isArray(outboxRaw)
+        ? outboxRaw.map((item) => ({
+            ...item,
+            operations: Array.isArray(item.operations)
+              ? item.operations.map((op) => ({
+                  ...op,
+                  payload: sanitizeComercialWriteOpPayload(op.collectionName, op.payload),
+                }))
+              : [],
+          }))
+        : [];
       if (stateRaw && typeof stateRaw === 'object') {
         this._state = {
           bootstrapCompleted: Boolean(stateRaw.bootstrapCompleted),
           initialCloudReconciled: Boolean(stateRaw.initialCloudReconciled),
+          needsReconciliation: Boolean(stateRaw.needsReconciliation),
           cursors: {
             ...DEFAULT_PERSISTED_STATE.cursors,
             ...(stateRaw.cursors || {}),
@@ -751,11 +1007,22 @@ export class ComercialSyncService {
           ultimaSincronizacaoIso: stateRaw.ultimaSincronizacaoIso || null,
         };
       }
+      const firstErr = this._outbox.find((item) => item.ultimoErro)?.ultimoErro;
+      if (firstErr) {
+        this._ultimoErro = firstErr;
+      }
     } catch {
       this._outbox = [];
       this._state = cloneDefaultState();
     }
     this._loadedFromStorage = true;
+  }
+
+  public async marcarReconciliacaoPendente(): Promise<void> {
+    await this._ensureLoaded();
+    this._state.needsReconciliation = true;
+    await this._persistState();
+    this._notifyStatus();
   }
 
   private async _persistOutbox(): Promise<void> {
@@ -1321,22 +1588,27 @@ export class ComercialSyncService {
   // PROCESSAMENTO DA FILA OUTBOX (ENVIO PARA FIRESTORE)
   // =========================================================================
 
-  public async processarFilaPendente(): Promise<{ enviados: number; pendentes: number; erro?: string }> {
+  public async processarFilaPendente(): Promise<{
+    enviados: number;
+    pendentes: number;
+    erros: number;
+    erro?: string;
+  }> {
     await this._ensureLoaded();
 
     if (this._isProcessingOutbox) {
-      return { enviados: 0, pendentes: this._outbox.length };
+      return { enviados: 0, pendentes: this._outbox.length, erros: 0 };
     }
     if (this._outbox.length === 0) {
-      return { enviados: 0, pendentes: 0 };
+      return { enviados: 0, pendentes: 0, erros: 0 };
     }
     if (!this._adapter.isOnline() || this._adapter.isQuotaExceeded()) {
       this._notifyStatus();
-      return { enviados: 0, pendentes: this._outbox.length };
+      return { enviados: 0, pendentes: this._outbox.length, erros: 0 };
     }
     if (!this._adapter.isGerenciaAdmin()) {
       this._notifyStatus();
-      return { enviados: 0, pendentes: this._outbox.length };
+      return { enviados: 0, pendentes: this._outbox.length, erros: 0 };
     }
 
     this._isProcessingOutbox = true;
@@ -1344,6 +1616,7 @@ export class ComercialSyncService {
     this._notifyStatus();
 
     let enviados = 0;
+    let erros = 0;
 
     try {
       await this._adapter.ensureAuth().catch(() => null);
@@ -1384,14 +1657,17 @@ export class ComercialSyncService {
           itemAgeMs > 10_000;
 
         const refreshedOps: ComercialWriteOp[] = item.operations.map((op) => {
-          if (op.immutableCreate || !shouldRefreshTimestamp) return op;
-          if (op.collectionName === 'vinculos_promotor_industria' && op.payload?.ativo === false && op.docId) {
+          const sanitizedBase = sanitizeComercialWriteOpPayload(op.collectionName, op.payload);
+          if (op.immutableCreate || !shouldRefreshTimestamp) {
+            return { ...op, payload: sanitizedBase };
+          }
+          if (op.collectionName === 'vinculos_promotor_industria' && sanitizedBase?.ativo === false && op.docId) {
             this._state.tombstonesVinculosIndustria[op.docId] = agoraItem;
           }
           return {
             ...op,
             payload: {
-              ...op.payload,
+              ...sanitizedBase,
               atualizadoEm: agoraItem,
             },
           };
@@ -1418,6 +1694,7 @@ export class ComercialSyncService {
           }
           await Promise.all([this._persistOutbox(), this._persistState()]);
         } catch (err: any) {
+          erros += 1;
           if (this._adapter.isQuotaError(err)) {
             this._adapter.markQuotaExceeded(
               err?.message,
@@ -1437,12 +1714,12 @@ export class ComercialSyncService {
             if (exists) {
               this._outbox.shift();
               enviados += 1;
+              erros -= 1;
               await this._persistOutbox();
               continue;
             }
           }
 
-          // Se for batch com múltiplas movimentações ou falha de permissão real, reportar diagnóstico estruturado
           reportPermissionDiagnostic(
             err,
             OperationType.WRITE,
@@ -1463,21 +1740,16 @@ export class ComercialSyncService {
       this._notifyStatus();
     }
 
-    return { enviados, pendentes: this._outbox.length, erro: this._ultimoErro };
+    return { enviados, pendentes: this._outbox.length, erros, erro: this._ultimoErro };
   }
 
   // =========================================================================
   // SINCRONIZAÇÃO INCREMENTAL (PULL + RECONCILIAÇÃO SEM SOBRESCRITA)
   // =========================================================================
 
-  public async sincronizarAgora(): Promise<{
-    sucesso: boolean;
-    enviados: number;
-    recebidos: number;
-    pendentes: number;
-    aguardandoGerencia?: boolean;
-    mensagem: string;
-  }> {
+  public async sincronizarAgora(options?: {
+    reconciliar?: boolean;
+  }): Promise<SincronizarComercialResult> {
     await this._ensureLoaded();
     await this._waitForHandlersReady(this._getResolvedBridge());
 
@@ -1488,7 +1760,9 @@ export class ComercialSyncService {
         enviados: 0,
         recebidos: 0,
         pendentes: this._outbox.length,
-        mensagem: 'Dispositivo offline. Alterações salvas localmente no IndexedDB.',
+        bloqueados: 0,
+        erros: 0,
+        mensagem: `Dispositivo offline (${this._outbox.length} pendente(s) salvo(s) localmente no IndexedDB).`,
       };
     }
 
@@ -1499,37 +1773,84 @@ export class ComercialSyncService {
         enviados: 0,
         recebidos: 0,
         pendentes: this._outbox.length,
-        mensagem: 'Cota diária do Firebase Spark aguardando liberação.',
+        bloqueados: this._outbox.length,
+        erros: 0,
+        bloqueadoMotivo: 'Cota diária do Firebase Spark aguardando liberação.',
+        mensagem: `Cota diária do Firebase Spark aguardando liberação (${this._outbox.length} pendente(s) local(is)).`,
       };
     }
 
+    this._ultimoErro = undefined;
     await this._adapter.ensureAuth().catch(() => null);
 
-    // 1. Puxar alterações remotas antes ou depois do outbox (outbox protege edições locais pendentes!)
-    const pullRes = await this.puxarAlteracoesIncrementais();
+    // 1. Puxar alterações remotas e reconciliar registros ausentes entre IndexedDB e Firestore
+    const pullRes = await this.puxarAlteracoesIncrementais(undefined, {
+      reconciliar: Boolean(options?.reconciliar),
+    });
 
     // 2. Enviar pendências da fila local caso usuário seja GERENCIA_ADMIN verificada
     const pushRes = await this.processarFilaPendente();
 
-    const ok = !this._ultimoErro;
-    const aguardandoGerencia = pushRes.pendentes > 0 && !this._adapter.isGerenciaAdmin();
+    const isGerencia = this._adapter.isGerenciaAdmin();
+    const erroPullMsg =
+      pullRes.errosDominios.length > 0
+        ? `Falha ao consultar ${pullRes.errosDominios.map((e) => e.domain).join(', ')}: ${pullRes.errosDominios[0].mensagem}`
+        : undefined;
+    const erroDetalhe = pushRes.erro || erroPullMsg || this._ultimoErro;
+
+    if (erroDetalhe && !this._ultimoErro) {
+      this._ultimoErro = erroDetalhe;
+      this._notifyStatus();
+    }
+
+    const totalErros = pullRes.errosDominios.length + pushRes.erros;
+    const pendentesRestantes = pushRes.pendentes;
+    const bloqueados = !isGerencia ? pendentesRestantes : 0;
+    const aguardandoGerencia = bloqueados > 0;
+    const quotaAgora = this._adapter.isQuotaExceeded();
+
+    const sucesso =
+      totalErros === 0 && pendentesRestantes === 0 && bloqueados === 0 && !quotaAgora;
+
+    let mensagem: string;
+    if (quotaAgora) {
+      mensagem = `Cota diária do Firebase Spark atingida (${pushRes.enviados} envio(s), ${pullRes.recebidos} atualização(ões), ${pendentesRestantes} pendente(s)).`;
+    } else if (totalErros > 0) {
+      mensagem = `Erro na sincronização comercial (${pushRes.enviados} enviado(s), ${pullRes.recebidos} recebido(s), ${pendentesRestantes} pendente(s), ${totalErros} erro(s)): ${erroDetalhe}`;
+    } else if (aguardandoGerencia) {
+      mensagem = `${bloqueados} registro(s) local(is) bloqueado(s) aguardando login Google da Gerência para envio ao Firestore (${pushRes.enviados} enviado(s), ${pullRes.recebidos} atualização(ões) recebida(s)).`;
+    } else if (pendentesRestantes > 0) {
+      mensagem = `Sincronização parcial: ${pendentesRestantes} pendência(s) restante(s) (${pushRes.enviados} enviado(s), ${pullRes.recebidos} atualização(ões) recebida(s)).`;
+    } else {
+      mensagem = `Sincronização comercial concluída (${pushRes.enviados} envio(s), ${pullRes.recebidos} atualização(ões) recebida(s)).`;
+    }
+
     return {
-      sucesso: ok,
+      sucesso,
       enviados: pushRes.enviados,
       recebidos: pullRes.recebidos,
-      pendentes: pushRes.pendentes,
+      pendentes: pendentesRestantes,
+      bloqueados,
+      erros: totalErros,
+      erroDetalhe,
+      bloqueadoMotivo: aguardandoGerencia
+        ? 'Login Google da Gerência necessário para gravar cadastros e vínculos no Firestore.'
+        : quotaAgora
+          ? 'Cota diária do Spark atingida.'
+          : undefined,
       aguardandoGerencia,
-      mensagem: !ok
-        ? this._ultimoErro || 'Sincronização parcial com avisos.'
-        : aguardandoGerencia
-        ? `${pushRes.pendentes} alteração(ões) salva(s) localmente. Faça login Google como Gerência para enviar ao Firestore (${pullRes.recebidos} atualização(ões) recebida(s)).`
-        : `Sincronização comercial concluída (${pushRes.enviados} envio(s), ${pullRes.recebidos} atualização(ões) recebida(s)).`,
+      mensagem,
     };
   }
 
   public async puxarAlteracoesIncrementais(
-    pointerPreCarregado?: ComercialSyncPointerDoc | null
-  ): Promise<{ recebidos: number; domainsConsultados: ComercialSyncDomain[] }> {
+    pointerPreCarregado?: ComercialSyncPointerDoc | null,
+    options?: { reconciliar?: boolean }
+  ): Promise<{
+    recebidos: number;
+    domainsConsultados: ComercialSyncDomain[];
+    errosDominios: Array<{ domain: ComercialSyncDomain; mensagem: string; isPermission: boolean }>;
+  }> {
     await this._ensureLoaded();
 
     const resolvedBridge = this._getResolvedBridge();
@@ -1540,19 +1861,26 @@ export class ComercialSyncService {
       this._adapter.isQuotaExceeded() ||
       !resolvedBridge
     ) {
-      return { recebidos: 0, domainsConsultados: [] };
+      return { recebidos: 0, domainsConsultados: [], errosDominios: [] };
     }
 
     this._isPulling = true;
     this._notifyStatus();
 
     const domainsConsultados: ComercialSyncDomain[] = [];
+    const errosDominios: Array<{
+      domain: ComercialSyncDomain;
+      mensagem: string;
+      isPermission: boolean;
+    }> = [];
+    const failedDomains = new Set<ComercialSyncDomain>();
     let recebidos = 0;
 
     try {
       await this._adapter.ensureAuth().catch(() => null);
 
       let pointer = pointerPreCarregado !== undefined ? pointerPreCarregado : null;
+      let pointerReadError: string | null = null;
       if (pointerPreCarregado === undefined) {
         try {
           pointer = await this._adapter.getPointerDoc(FILIAL_COMERCIAL_ID);
@@ -1565,8 +1893,9 @@ export class ComercialSyncService {
               err?.message,
               this._adapter.detectQuotaResourceType(err)
             );
-            return { recebidos: 0, domainsConsultados: [] };
+            return { recebidos: 0, domainsConsultados: [], errosDominios: [] };
           }
+          pointerReadError = err?.message || 'Erro ao ler ponteiro comercial.';
           reportPermissionDiagnostic(
             err,
             OperationType.GET,
@@ -1576,15 +1905,17 @@ export class ComercialSyncService {
       }
 
       const isGerencia = this._adapter.isGerenciaAdmin();
+      const forceReconcile = Boolean(options?.reconciliar) || Boolean(this._state.needsReconciliation);
       const needsGerenciaInitialReconcile = !this._state.initialCloudReconciled && isGerencia;
-      const isBootstrap = !this._state.bootstrapCompleted || needsGerenciaInitialReconcile;
+      const isFullFetch =
+        !this._state.bootstrapCompleted || needsGerenciaInitialReconcile || forceReconcile;
 
       const shouldFetchDomain = (
         domain: ComercialSyncDomain,
         remoteDomainTs?: string
       ): boolean => {
         if (domain === 'vinculos_dispositivo' && !isGerencia) return false;
-        if (isBootstrap) return true;
+        if (isFullFetch) return true;
         if (!remoteDomainTs) return false;
         const lastSeen = this._state.lastPointerSeen[domain] || this._state.cursors[domain];
         return !lastSeen || remoteDomainTs > lastSeen;
@@ -1597,7 +1928,7 @@ export class ComercialSyncService {
       ): Promise<Array<Record<string, any>>> => {
         if (!shouldFetchDomain(domain, remoteTs)) return [];
         domainsConsultados.push(domain);
-        const sinceIso = isBootstrap ? null : subtractSkewIso(this._state.cursors[domain]);
+        const sinceIso = isFullFetch ? null : subtractSkewIso(this._state.cursors[domain]);
         try {
           return await this._adapter.fetchCollection(collectionName, sinceIso, DEFAULT_FETCH_LIMIT);
         } catch (err: any) {
@@ -1609,6 +1940,12 @@ export class ComercialSyncService {
             throw err;
           }
           reportPermissionDiagnostic(err, OperationType.LIST, collectionName);
+          failedDomains.add(domain);
+          errosDominios.push({
+            domain,
+            mensagem: err?.message || `Falha ao consultar coleção ${collectionName}`,
+            isPermission: isPermissionDeniedError(err),
+          });
           return [];
         }
       };
@@ -1645,13 +1982,13 @@ export class ComercialSyncService {
         ),
       ]);
 
-      recebidos =
-        rawPromotores.length +
-        rawAgencias.length +
-        rawVinculosInd.length +
-        rawVinculosAg.length +
-        rawMovs.length +
-        rawVinculosDisp.length;
+      if (pointerReadError && domainsConsultados.length === 0) {
+        errosDominios.push({
+          domain: 'promotores',
+          mensagem: pointerReadError,
+          isPermission: pointerReadError.toLowerCase().includes('permission'),
+        });
+      }
 
       // Mesclar respeitando outbox pendente e timestamps mais novos locais
       const snapshot = resolvedBridge.getSnapshot();
@@ -1665,6 +2002,8 @@ export class ComercialSyncService {
         rawVinculosDisp,
       });
 
+      recebidos = mergeResult.aplicadosCount;
+
       if (mergeResult.hasAnyChange) {
         await resolvedBridge.applyMergedState({
           promotores: mergeResult.nextPromotores,
@@ -1675,25 +2014,34 @@ export class ComercialSyncService {
         });
       }
 
-      // Na primeira carga autenticada da Gerência, reconciliar cadastros locais pré-existentes que ainda não estão na nuvem
-      if (needsGerenciaInitialReconcile) {
+      // Reconciliação bidirecional incremental (sem duplicar nem apagar dados existentes)
+      if (isFullFetch && errosDominios.length === 0) {
         const snapshotAtual = resolvedBridge.getSnapshot();
-        await this._reconciliarDadosLocaisIniciaisParaNuvem(snapshotAtual, {
-          rawPromotores,
-          rawAgencias,
-          rawVinculosInd,
-          rawMovs,
-          rawVinculosDisp,
-        });
-        this._state.initialCloudReconciled = true;
+        await this._reconciliarDadosLocaisVsNuvem(
+          snapshotAtual,
+          {
+            rawPromotores,
+            rawAgencias,
+            rawVinculosInd,
+            rawVinculosAg,
+            rawMovs,
+            rawVinculosDisp,
+          },
+          { includeDispositivos: isGerencia && !failedDomains.has('vinculos_dispositivo') }
+        );
+        if (isGerencia) {
+          this._state.initialCloudReconciled = true;
+        }
+        this._state.needsReconciliation = false;
       }
 
-      // Atualizar cursores incrementais apenas pelos dados efetivamente processados
+      // Atualizar cursores incrementais SOMENTE para domínios sem erro
       const updateDomainCursor = (
         domain: ComercialSyncDomain,
         rows: Array<Record<string, any>>,
         pointerTs?: string
       ) => {
+        if (failedDomains.has(domain)) return;
         let maxIso = this._state.cursors[domain] || '';
         for (const row of rows) {
           const cand =
@@ -1744,8 +2092,12 @@ export class ComercialSyncService {
         );
       }
 
-      this._state.bootstrapCompleted = true;
-      this._state.ultimaSincronizacaoIso = new Date().toISOString();
+      if (errosDominios.length === 0) {
+        this._state.bootstrapCompleted = true;
+        this._state.ultimaSincronizacaoIso = new Date().toISOString();
+      } else {
+        this._ultimoErro = errosDominios[0].mensagem;
+      }
       await this._persistState();
     } catch (err: any) {
       if (!this._adapter.isQuotaError(err)) {
@@ -1756,7 +2108,7 @@ export class ComercialSyncService {
       this._notifyStatus();
     }
 
-    return { recebidos, domainsConsultados };
+    return { recebidos, domainsConsultados, errosDominios };
   }
 
   private _mergeRemoteSnapshots(
@@ -1772,6 +2124,7 @@ export class ComercialSyncService {
     }
   ): {
     hasAnyChange: boolean;
+    aplicadosCount: number;
     nextPromotores?: Promotor[];
     nextAgencias?: AgenciaComercial[];
     nextVinculosIndustria?: VinculoPromotorIndustria[];
@@ -1779,6 +2132,7 @@ export class ComercialSyncService {
     nextMovimentacoes?: HistoricoMovimentacaoComercial[];
   } {
     let hasAnyChange = false;
+    let aplicadosCount = 0;
 
     // 1. Agências (com deduplicação por chave normalizada e ID)
     let nextAgencias: AgenciaComercial[] | undefined;
@@ -1815,9 +2169,23 @@ export class ComercialSyncService {
           filialId: String(raw.filialId || FILIAL_COMERCIAL_ID),
           ativo: raw.ativo !== undefined ? Boolean(raw.ativo) : true,
         };
-        porId.set(mergedAg.agenciaId, mergedAg);
-        porChave.set(chave, mergedAg.agenciaId);
-        agChanged = true;
+
+        const isIdentical =
+          Boolean(localAg) &&
+          localAg!.nome === mergedAg.nome &&
+          localAg!.ativo === mergedAg.ativo &&
+          (localAg!.contato || '') === (mergedAg.contato || '') &&
+          (localAg!.telefone || '') === (mergedAg.telefone || '') &&
+          (localAg!.cnpj || '') === (mergedAg.cnpj || '') &&
+          (localAg!.observacoes || '') === (mergedAg.observacoes || '') &&
+          (localAg!.atualizadoEm || '') === (mergedAg.atualizadoEm || '');
+
+        if (!isIdentical) {
+          porId.set(mergedAg.agenciaId, mergedAg);
+          porChave.set(chave, mergedAg.agenciaId);
+          agChanged = true;
+          aplicadosCount += 1;
+        }
       }
 
       if (agChanged) {
@@ -1849,8 +2217,23 @@ export class ComercialSyncService {
         if (localProm && isLocked && remoteTs <= localTs) continue;
         if (localProm && localTs > remoteTs) continue;
 
-        mapProm.set(id, raw as Promotor);
-        promChanged = true;
+        const nextProm = raw as Promotor;
+        const isIdentical =
+          Boolean(localProm) &&
+          localProm!.nome === nextProm.nome &&
+          (localProm!.agenciaId || null) === (nextProm.agenciaId || null) &&
+          (localProm!.agenciaNome || '') === (nextProm.agenciaNome || '') &&
+          localProm!.status === nextProm.status &&
+          (localProm!.atualizadoEm || '') === (nextProm.atualizadoEm || '') &&
+          JSON.stringify(localProm!.setores || []) === JSON.stringify(nextProm.setores || []) &&
+          (localProm!.dispositivoVinculado?.dispositivoId || null) ===
+            (nextProm.dispositivoVinculado?.dispositivoId || null);
+
+        if (!isIdentical) {
+          mapProm.set(id, nextProm);
+          promChanged = true;
+          aplicadosCount += 1;
+        }
       }
 
       // Aplicar vínculos promotor x agência se mais recentes que o registro atual do promotor
@@ -1869,13 +2252,21 @@ export class ComercialSyncService {
         const vaTs = extractTimestampMs(rawVa);
         if (vaTs > promTs) {
           const desvinculado = rawVa.ativo === false || isAgenciaSemVinculoNome(rawVa.agenciaNome);
-          mapProm.set(pId, {
-            ...prom,
-            agenciaId: desvinculado ? null : (rawVa.agenciaId || gerarAgenciaId(rawVa.agenciaNome)),
-            agenciaNome: desvinculado ? '' : String(rawVa.agenciaNome || ''),
-            atualizadoEm: rawVa.atualizadoEm || prom.atualizadoEm,
-          });
-          promChanged = true;
+          const nextAgId = desvinculado ? null : (rawVa.agenciaId || gerarAgenciaId(rawVa.agenciaNome));
+          const nextAgNome = desvinculado ? '' : String(rawVa.agenciaNome || '');
+          if (
+            (prom.agenciaId || null) !== (nextAgId || null) ||
+            (prom.agenciaNome || '') !== nextAgNome
+          ) {
+            mapProm.set(pId, {
+              ...prom,
+              agenciaId: nextAgId,
+              agenciaNome: nextAgNome,
+              atualizadoEm: rawVa.atualizadoEm || prom.atualizadoEm,
+            });
+            promChanged = true;
+            aplicadosCount += 1;
+          }
         }
       }
 
@@ -1931,19 +2322,35 @@ export class ComercialSyncService {
           if (localVinc) {
             mapVinc.delete(parsed.id);
             vincChanged = true;
+            aplicadosCount += 1;
           }
           this._state.tombstonesVinculosIndustria[parsed.id] =
             String(raw.atualizadoEm || new Date().toISOString());
         } else {
           // Garantir que não existe duplicidade por (promotorId + cnpj)
+          let dedupRemoved = false;
           for (const [kExist, vExist] of mapVinc.entries()) {
             if (vExist.promotorId === parsed.promotorId && vExist.cnpj === parsed.cnpj && kExist !== parsed.id) {
               mapVinc.delete(kExist);
+              dedupRemoved = true;
             }
           }
           delete this._state.tombstonesVinculosIndustria[parsed.id];
-          mapVinc.set(parsed.id, parsed);
-          vincChanged = true;
+
+          const isIdentical =
+            !dedupRemoved &&
+            Boolean(localVinc) &&
+            localVinc!.promotorId === parsed.promotorId &&
+            localVinc!.cnpj === parsed.cnpj &&
+            (localVinc!.promotorNome || '') === (parsed.promotorNome || '') &&
+            (localVinc!.agenciaNome || '') === (parsed.agenciaNome || '') &&
+            (localVinc!.atualizadoEm || '') === (parsed.atualizadoEm || '');
+
+          if (!isIdentical) {
+            mapVinc.set(parsed.id, parsed);
+            vincChanged = true;
+            aplicadosCount += 1;
+          }
         }
       }
 
@@ -1973,8 +2380,18 @@ export class ComercialSyncService {
         if (localV && isLocked && remoteTs <= localTs) continue;
         if (localV && localTs > remoteTs) continue;
 
-        mapDisp.set(id, raw as VinculoPromotor);
-        dispChanged = true;
+        const nextV = raw as VinculoPromotor;
+        const isIdentical =
+          Boolean(localV) &&
+          localV!.status === nextV.status &&
+          (localV!.dispositivoId || null) === (nextV.dispositivoId || null) &&
+          (localV!.atualizadoEm || '') === (nextV.atualizadoEm || '');
+
+        if (!isIdentical) {
+          mapDisp.set(id, nextV);
+          dispChanged = true;
+          aplicadosCount += 1;
+        }
       }
 
       if (dispChanged) {
@@ -1998,6 +2415,7 @@ export class ComercialSyncService {
         if (!mapMov.has(id)) {
           mapMov.set(id, raw as HistoricoMovimentacaoComercial);
           movChanged = true;
+          aplicadosCount += 1;
         }
       }
 
@@ -2011,6 +2429,7 @@ export class ComercialSyncService {
 
     return {
       hasAnyChange,
+      aplicadosCount,
       nextPromotores,
       nextAgencias,
       nextVinculosIndustria,
@@ -2020,19 +2439,21 @@ export class ComercialSyncService {
   }
 
   /**
-   * Garante que cadastros e vínculos comerciais locais já existentes antes da ativação
-   * da sincronização em nuvem sejam publicados apenas uma vez (delta mínimo: 0 escritas
-   * para registros já equivalentes na nuvem).
+   * Reconciliação bidirecional incremental: compara o IndexedDB local com o Firestore,
+   * enfileirando exclusivamente registros/vínculos locais ausentes ou estritamente mais novos
+   * na nuvem, sem duplicar nem excluir dados existentes.
    */
-  private async _reconciliarDadosLocaisIniciaisParaNuvem(
+  private async _reconciliarDadosLocaisVsNuvem(
     local: ComercialLocalStateSnapshot,
     remote: {
       rawPromotores: Array<Record<string, any>>;
       rawAgencias: Array<Record<string, any>>;
       rawVinculosInd: Array<Record<string, any>>;
+      rawVinculosAg: Array<Record<string, any>>;
       rawMovs: Array<Record<string, any>>;
       rawVinculosDisp: Array<Record<string, any>>;
-    }
+    },
+    options?: { includeDispositivos?: boolean }
   ): Promise<void> {
     const locked = this._getLockedEntityKeys();
     const ops: ComercialWriteOp[] = [];
@@ -2044,6 +2465,9 @@ export class ComercialSyncService {
     const remoteAgMap = new Map(remote.rawAgencias.map((r) => [String(r.agenciaId), r]));
     const remoteVincIndMap = new Map(
       remote.rawVinculosInd.map((r) => [String(r.id || r.vinculoId), r])
+    );
+    const remoteVincAgMap = new Map(
+      remote.rawVinculosAg.map((r) => [String(r.id || r.vinculoId || `pa_${r.promotorId}_${FILIAL_COMERCIAL_ID}`), r])
     );
     const remoteMovIds = new Set(remote.rawMovs.map((r) => String(r.id)));
     const remoteDispMap = new Map(remote.rawVinculosDisp.map((r) => [String(r.vinculoId), r]));
@@ -2064,37 +2488,52 @@ export class ComercialSyncService {
     }
 
     for (const p of local.promotores) {
-      // Não enviar seed default se nuvem já tiver promotores reais
-      if (
+      const isUntouchedSeedMaria =
         p.promotorId === 'promotor_maria_seara_172' &&
         remote.rawPromotores.length > 0 &&
-        !p.atualizadoEm
-      ) {
+        !p.atualizadoEm;
+      if (isUntouchedSeedMaria) {
         continue;
       }
-      if (locked.has(`promotores:${p.promotorId}`)) continue;
-      const rem = remotePromMap.get(p.promotorId);
-      if (!rem || extractTimestampMs(p) > extractTimestampMs(rem)) {
-        ops.push({
-          collectionName: 'promotores',
-          docId: p.promotorId,
-          payload: buildFirestorePromotorPayload(p),
-          merge: true,
-        });
-        entityKeys.push(`promotores:${p.promotorId}`);
-        pointerDomains.push('promotores');
 
-        const va = buildFirestoreVinculoAgenciaPayload(p, p.atualizadoEm || p.dataCadastro, usuario);
-        ops.push({
-          collectionName: 'vinculosPromotorAgencia',
-          docId: va.id,
-          payload: va,
-          merge: true,
-        });
-        entityKeys.push(`vinculosPromotorAgencia:${va.id}`);
-        pointerDomains.push('vinculosPromotorAgencia');
+      const rem = remotePromMap.get(p.promotorId);
+      if (!locked.has(`promotores:${p.promotorId}`)) {
+        if (!rem || extractTimestampMs(p) > extractTimestampMs(rem)) {
+          ops.push({
+            collectionName: 'promotores',
+            docId: p.promotorId,
+            payload: buildFirestorePromotorPayload(p),
+            merge: true,
+          });
+          entityKeys.push(`promotores:${p.promotorId}`);
+          pointerDomains.push('promotores');
+        }
+      }
+
+      // Verificar vínculo promotor × agência de forma independente (mesmo quando promotor já está na nuvem)
+      const va = buildFirestoreVinculoAgenciaPayload(
+        p,
+        p.atualizadoEm || p.dataCadastro || new Date().toISOString(),
+        usuario
+      );
+      if (!locked.has(`vinculosPromotorAgencia:${va.id}`)) {
+        const remVa = remoteVincAgMap.get(va.id);
+        if (!remVa || extractTimestampMs(p) > extractTimestampMs(remVa)) {
+          ops.push({
+            collectionName: 'vinculosPromotorAgencia',
+            docId: va.id,
+            payload: va,
+            merge: true,
+          });
+          entityKeys.push(`vinculosPromotorAgencia:${va.id}`);
+          pointerDomains.push('vinculosPromotorAgencia');
+        }
       }
     }
+
+    const industriaMap = new Map(
+      local.industrias.map((i) => [normalizarCnpj(i.cnpj), i.razao_social || i.nome_exibicao])
+    );
 
     for (const v of local.vinculosIndustria) {
       if (locked.has(`vinculos_promotor_industria:${v.id}`)) continue;
@@ -2103,7 +2542,11 @@ export class ComercialSyncService {
         ops.push({
           collectionName: 'vinculos_promotor_industria',
           docId: v.id,
-          payload: buildFirestoreVinculoIndustriaPayload(v, { ativo: true, usuario }),
+          payload: buildFirestoreVinculoIndustriaPayload(v, {
+            ativo: true,
+            usuario,
+            industriaRazaoSocial: industriaMap.get(normalizarCnpj(v.cnpj)),
+          }),
           merge: true,
         });
         entityKeys.push(`vinculos_promotor_industria:${v.id}`);
@@ -2111,17 +2554,19 @@ export class ComercialSyncService {
       }
     }
 
-    for (const vd of local.vinculosDispositivo) {
-      if (locked.has(`vinculosPromotor:${vd.vinculoId}`)) continue;
-      const rem = remoteDispMap.get(vd.vinculoId);
-      if (!rem || extractTimestampMs(vd) > extractTimestampMs(rem)) {
-        const vp = buildFirestoreVinculoDispositivoPayload(vd);
-        ops.push(
-          { collectionName: 'vinculosPromotor', docId: vd.vinculoId, payload: vp, merge: true },
-          { collectionName: 'vinculos_promotores', docId: vd.vinculoId, payload: vp, merge: true }
-        );
-        entityKeys.push(`vinculosPromotor:${vd.vinculoId}`);
-        pointerDomains.push('vinculos_dispositivo');
+    if (options?.includeDispositivos !== false) {
+      for (const vd of local.vinculosDispositivo) {
+        if (locked.has(`vinculosPromotor:${vd.vinculoId}`)) continue;
+        const rem = remoteDispMap.get(vd.vinculoId);
+        if (!rem || extractTimestampMs(vd) > extractTimestampMs(rem)) {
+          const vp = buildFirestoreVinculoDispositivoPayload(vd);
+          ops.push(
+            { collectionName: 'vinculosPromotor', docId: vd.vinculoId, payload: vp, merge: true },
+            { collectionName: 'vinculos_promotores', docId: vd.vinculoId, payload: vp, merge: true }
+          );
+          entityKeys.push(`vinculosPromotor:${vd.vinculoId}`);
+          pointerDomains.push('vinculos_dispositivo');
+        }
       }
     }
 
@@ -2141,13 +2586,44 @@ export class ComercialSyncService {
     }
 
     if (ops.length > 0) {
-      await this.enqueueOperations({
-        domain: 'batch_substituicao',
-        entityKeys,
-        pointerDomains,
-        operations: ops,
-        flushImmediately: false, // Será processada imediatamente pelo passo 2 de sincronizarAgora()
-      });
+      // Dividir em lotes seguros (<=150 ops) para nunca exceder o limite de 500 ops/batch do Firestore
+      const MAX_OPS_POR_LOTE = 150;
+      for (let i = 0; i < ops.length; i += MAX_OPS_POR_LOTE) {
+        const chunkOps = ops.slice(i, i + MAX_OPS_POR_LOTE);
+        const chunkKeys = new Set<string>();
+        const chunkDomains = new Set<ComercialSyncDomain>();
+        for (const op of chunkOps) {
+          if (op.collectionName === 'agencias') {
+            chunkKeys.add(`agencias:${op.docId}`);
+            chunkDomains.add('agencias');
+          } else if (op.collectionName === 'promotores') {
+            chunkKeys.add(`promotores:${op.docId}`);
+            chunkDomains.add('promotores');
+          } else if (op.collectionName === 'vinculosPromotorAgencia') {
+            chunkKeys.add(`vinculosPromotorAgencia:${op.docId}`);
+            chunkDomains.add('vinculosPromotorAgencia');
+          } else if (op.collectionName === 'vinculos_promotor_industria') {
+            chunkKeys.add(`vinculos_promotor_industria:${op.docId}`);
+            chunkDomains.add('vinculos_promotor_industria');
+          } else if (
+            op.collectionName === 'vinculosPromotor' ||
+            op.collectionName === 'vinculos_promotores'
+          ) {
+            chunkKeys.add(`vinculosPromotor:${op.docId}`);
+            chunkDomains.add('vinculos_dispositivo');
+          } else if (op.collectionName === 'movimentacoes_comerciais') {
+            chunkKeys.add(`movimentacoes_comerciais:${op.docId}`);
+            chunkDomains.add('movimentacoes_comerciais');
+          }
+        }
+        await this.enqueueOperations({
+          domain: 'batch_substituicao',
+          entityKeys: Array.from(chunkKeys),
+          pointerDomains: Array.from(chunkDomains),
+          operations: chunkOps,
+          flushImmediately: false,
+        });
+      }
     }
   }
 }

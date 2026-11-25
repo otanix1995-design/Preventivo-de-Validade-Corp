@@ -20,7 +20,11 @@ import {
   WifiOff
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
-import { ComercialSyncStatus, comercialSyncService } from '../services/comercialSyncService';
+import {
+  ComercialSyncStatus,
+  SincronizarComercialResult,
+  comercialSyncService,
+} from '../services/comercialSyncService';
 import { isvService } from '../services/isvService';
 import { promotorService } from '../services/promotorService';
 import { EstadoAuthServidor, firebaseAuthService } from '../services/firebaseAuthService';
@@ -55,6 +59,7 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
   const [authServidor, setAuthServidor] = useState<EstadoAuthServidor>(() => firebaseAuthService.getEstado());
   const [isAutenticandoGoogle, setIsAutenticandoGoogle] = useState(false);
   const [syncStatus, setSyncStatus] = useState<ComercialSyncStatus>(() => comercialSyncService.getStatus());
+  const [syncResult, setSyncResult] = useState<SincronizarComercialResult | null>(null);
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<'lista' | 'agencias' | 'vinculo_industrias' | 'auditoria'>('lista');
@@ -104,9 +109,11 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
 
   const handleSincronizarAgora = async () => {
     setSyncFeedback(null);
+    setSyncResult(null);
     await Promise.all([promotorService.init(), isvService.init()]);
-    const res = await comercialSyncService.sincronizarAgora();
+    const res = await comercialSyncService.sincronizarAgora({ reconciliar: true });
     carregarDados();
+    setSyncResult(res);
     setSyncFeedback(res.mensagem);
   };
 
@@ -235,22 +242,35 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
               onClick={handleSincronizarAgora}
               disabled={syncStatus.emAndamento}
               className={`px-3.5 py-2.5 rounded-xl border text-xs font-black uppercase tracking-wider flex items-center justify-center gap-2 shadow-2xs transition-all cursor-pointer shrink-0 disabled:opacity-60 ${
-                syncStatus.estado === 'SINCRONIZADO'
+                syncStatus.estado === 'ERRO' || (syncResult && syncResult.erros > 0)
+                  ? 'bg-rose-50 hover:bg-rose-100 border-rose-300 text-rose-800'
+                  : syncStatus.estado === 'OFFLINE' ||
+                    syncStatus.estado === 'BLOQUEADO_COTA' ||
+                    syncStatus.estado === 'AGUARDANDO_GERENCIA' ||
+                    syncStatus.estado === 'PENDENTE_ENVIO' ||
+                    syncStatus.pendentesCount > 0 ||
+                    (syncResult && !syncResult.sucesso)
+                  ? 'bg-amber-50 hover:bg-amber-100 border-amber-300 text-amber-900'
+                  : syncStatus.estado === 'SINCRONIZADO'
                   ? 'bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-800'
-                  : syncStatus.estado === 'OFFLINE' || syncStatus.estado === 'BLOQUEADO_COTA' || syncStatus.estado === 'ERRO'
-                  ? 'bg-rose-50 hover:bg-rose-100 border-rose-200 text-rose-800'
                   : 'bg-blue-50 hover:bg-blue-100 border-blue-200 text-blue-800'
               }`}
               title={
-                syncStatus.ultimaSincronizacaoIso
+                syncStatus.estado === 'ERRO' && syncStatus.ultimoErro
+                  ? `Erro comercial: ${syncStatus.ultimoErro}`
+                  : syncStatus.estado === 'AGUARDANDO_GERENCIA'
+                  ? `${syncStatus.pendentesCount} alteração(ões) aguardando login Google da Gerência`
+                  : syncStatus.ultimaSincronizacaoIso
                   ? `Última sincronização: ${new Date(syncStatus.ultimaSincronizacaoIso).toLocaleString('pt-BR')}`
-                  : 'Sincronizar dados comerciais com o Firestore'
+                  : 'Reconciliar e sincronizar dados comerciais com o Firestore'
               }
             >
               <RefreshCw className={`w-3.5 h-3.5 stroke-[2.5] ${syncStatus.emAndamento ? 'animate-spin' : ''}`} />
               <span>
                 {syncStatus.emAndamento
                   ? 'Sincronizando...'
+                  : syncStatus.estado === 'ERRO'
+                  ? 'Sincronizar (Erro)'
                   : syncStatus.pendentesCount > 0
                   ? `Sincronizar (${syncStatus.pendentesCount})`
                   : 'Sincronizar'}
@@ -282,35 +302,113 @@ export const PromotoresView: React.FC<PromotoresViewProps> = ({ onBack }) => {
           </div>
         </div>
 
-        {(syncStatus.pendentesCount > 0 || syncFeedback || syncStatus.ultimoErro || !syncStatus.online) && (
-          <div className="mt-3 pt-2.5 border-t border-gray-100 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-            <div className="flex items-center gap-2 font-bold text-slate-700">
-              {!syncStatus.online ? (
-                <span className="text-amber-800">
-                  Modo offline: alterações salvas localmente e serão sincronizadas ao reconectar.
-                </span>
-              ) : syncStatus.pendentesCount > 0 && !isGerenciaAutenticada ? (
-                <span className="text-amber-800">
-                  {syncStatus.pendentesCount} alteração(ões) comercial(is) aguardando login Google da Gerência para envio.
-                </span>
-              ) : syncStatus.pendentesCount > 0 ? (
-                <span className="text-blue-800">
-                  {syncStatus.pendentesCount} alteração(ões) pendente(s) na fila de sincronização.
-                </span>
-              ) : null}
-              {(syncFeedback || syncStatus.ultimoErro) && (
-                <span className="text-slate-600 font-semibold">
-                  {syncFeedback || syncStatus.ultimoErro}
-                </span>
+        {(syncResult ||
+          syncStatus.pendentesCount > 0 ||
+          syncFeedback ||
+          syncStatus.ultimoErro ||
+          syncStatus.estado === 'ERRO' ||
+          !syncStatus.online) && (() => {
+          const hasErr = Boolean(
+            (syncResult && syncResult.erros > 0) ||
+              syncStatus.estado === 'ERRO' ||
+              syncStatus.ultimoErro
+          );
+          const hasWarn = Boolean(
+            !hasErr &&
+              ((syncResult &&
+                (!syncResult.sucesso ||
+                  syncResult.pendentes > 0 ||
+                  syncResult.bloqueados > 0)) ||
+                syncStatus.pendentesCount > 0 ||
+                !syncStatus.online ||
+                syncStatus.estado === 'BLOQUEADO_COTA' ||
+                syncStatus.estado === 'AGUARDANDO_GERENCIA')
+          );
+          const isOk = Boolean(!hasErr && !hasWarn && syncResult?.sucesso);
+
+          const boxClass = hasErr
+            ? 'bg-rose-50 border-rose-200 text-rose-900'
+            : hasWarn
+            ? 'bg-amber-50 border-amber-200 text-amber-950'
+            : isOk
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+            : 'bg-slate-50 border-slate-200 text-slate-800';
+
+          return (
+            <div
+              id="promotores-sync-banner"
+              className={`mt-3 p-3 rounded-xl border flex flex-col gap-2 text-[11px] ${boxClass}`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-start gap-2 font-bold min-w-0">
+                  {hasErr ? (
+                    <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  ) : hasWarn ? (
+                    <Clock className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                  ) : (
+                    <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  )}
+                  <span className="break-words">
+                    {syncFeedback ||
+                      syncStatus.ultimoErro ||
+                      (!syncStatus.online
+                        ? 'Modo offline: alterações salvas localmente e serão sincronizadas ao reconectar.'
+                        : syncStatus.pendentesCount > 0 && !isGerenciaAutenticada
+                        ? `${syncStatus.pendentesCount} alteração(ões) comercial(is) aguardando login Google da Gerência para envio ao Firestore.`
+                        : `${syncStatus.pendentesCount} alteração(ões) pendente(s) na fila de sincronização.`)}
+                  </span>
+                </div>
+
+                {syncStatus.ultimaSincronizacaoIso && (
+                  <span className="text-[10px] font-mono opacity-80 shrink-0">
+                    {new Date(syncStatus.ultimaSincronizacaoIso).toLocaleTimeString('pt-BR', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                )}
+              </div>
+
+              {syncResult && (
+                <div className="flex flex-wrap items-center gap-1.5 font-mono text-[10px] uppercase">
+                  <span className="px-2 py-0.5 rounded bg-white/80 border border-black/10 font-bold">
+                    Enviados: {syncResult.enviados}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-white/80 border border-black/10 font-bold">
+                    Recebidos: {syncResult.recebidos}
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded border font-bold ${
+                      syncResult.pendentes > 0
+                        ? 'bg-amber-100 border-amber-300 text-amber-900'
+                        : 'bg-white/80 border-black/10'
+                    }`}
+                  >
+                    Pendentes: {syncResult.pendentes}
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded border font-bold ${
+                      syncResult.bloqueados > 0
+                        ? 'bg-amber-100 border-amber-300 text-amber-900'
+                        : 'bg-white/80 border-black/10'
+                    }`}
+                  >
+                    Bloqueados: {syncResult.bloqueados}
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded border font-bold ${
+                      syncResult.erros > 0
+                        ? 'bg-rose-100 border-rose-300 text-rose-900'
+                        : 'bg-white/80 border-black/10'
+                    }`}
+                  >
+                    Erros: {syncResult.erros}
+                  </span>
+                </div>
               )}
             </div>
-            {syncStatus.ultimaSincronizacaoIso && (
-              <span className="text-[10px] font-mono text-gray-500">
-                Sincronizado em {new Date(syncStatus.ultimaSincronizacaoIso).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}
-              </span>
-            )}
-          </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* Security Guard Banner: Gerência Google Auth required for Cloud Sync & Tokens */}

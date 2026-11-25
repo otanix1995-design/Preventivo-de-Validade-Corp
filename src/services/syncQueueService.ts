@@ -48,7 +48,7 @@ export interface SyncOperation {
 
 const STORAGE_KEY_QUEUE = 'vencimentos_sync_queue_v1';
 const STORAGE_KEY_TOMBSTONES = 'vencimentos_tombstones_v1';
-const STORAGE_KEY_RULE_FIX_RETRY = 'vencimentos_rule_fix_retry_v1';
+const STORAGE_KEY_RULE_FIX_RETRY = 'vencimentos_rule_fix_retry_v2';
 
 class SyncQueueService {
   private _queue: SyncOperation[] = [];
@@ -80,11 +80,7 @@ class SyncQueueService {
           if (!localStorage.getItem(STORAGE_KEY_RULE_FIX_RETRY)) {
             let recovered = false;
             this._queue = this._queue.map((op) => {
-              const msg = String(op?.erroMensagem || '').toLowerCase();
-              if (
-                op?.status === 'ERRO' &&
-                (msg.includes('permission') || msg.includes('permiss') || msg.includes('insufficient'))
-              ) {
+              if (op?.status === 'ERRO') {
                 recovered = true;
                 return { ...op, status: 'PENDENTE', tentativas: 0, erroMensagem: undefined };
               }
@@ -322,8 +318,9 @@ class SyncQueueService {
 
           if (isQuotaError(err)) {
             markQuotaExceeded(err?.message, detectQuotaResourceType(err));
-            op.status = 'ERRO';
-            op.erroMensagem = '[Vencimentos • Coleção: vencimentos] Cota diária temporariamente indisponível. O aplicativo continuará operando localmente.';
+            op.status = 'PENDENTE';
+            op.tentativas = Math.max(0, op.tentativas - 1);
+            op.erroMensagem = undefined;
             this.saveToStorage();
             this.notify();
             break;

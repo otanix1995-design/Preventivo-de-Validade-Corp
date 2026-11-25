@@ -35,6 +35,7 @@ import { isvService } from '../services/isvService';
 import { nuvemSyncEngine } from '../services/nuvemSyncEngine';
 import { productRepository } from '../services/productRepository';
 import { spcoiSyncService } from '../services/spcoiSyncService';
+import { syncQueueService } from '../services/syncQueueService';
 import { MetadadosBase } from '../types';
 import { NuvemV3PreparacaoModal } from './NuvemV3PreparacaoModal';
 
@@ -77,6 +78,8 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
   const [isSearching, setIsSearching] = useState(false);
   const [searchResult, setSearchResult] = useState<any>(null);
 
+  const [queueDiagVersion, setQueueDiagVersion] = useState(0);
+
   const [statusNuvem, setStatusNuvem] = useState<StatusNuvemHibrida>(() => ({
     conectado: typeof navigator === 'undefined' ? true : navigator.onLine,
     projectId: 'gen-lang-client-0352860977',
@@ -115,9 +118,17 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
   }, []);
 
   React.useEffect(() => {
-    if (isOpen) {
-      void carregarStatusReal();
-    }
+    if (!isOpen) return;
+    void carregarStatusReal();
+    const bump = () => setQueueDiagVersion((v) => v + 1);
+    const unsubQueue = syncQueueService.subscribe(bump);
+    const unsubNuvem = nuvemSyncEngine.subscribe(bump);
+    const unsubComercial = comercialSyncService.subscribeStatus(bump);
+    return () => {
+      unsubQueue();
+      unsubNuvem();
+      unsubComercial();
+    };
   }, [isOpen, carregarStatusReal]);
 
   if (!isOpen) return null;
@@ -209,7 +220,7 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
   const sincronizarComercial = async (): Promise<ServicoResultadoUI> => {
     const colecao = 'promotores / agencias / vinculos_promotor_industria / vinculosPromotorAgencia';
     try {
-      const res = await comercialSyncService.sincronizarAgora();
+      const res = await comercialSyncService.sincronizarAgora({ reconciliar: true });
       const statusCom = comercialSyncService.getStatus();
       const msg = res.sucesso
         ? res.mensagem
@@ -237,6 +248,9 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
   const sincronizarVencimentos = async (): Promise<ServicoResultadoUI> => {
     const colecao = 'vencimentos / filiais/172/vencimentos';
     try {
+      await syncQueueService.retryErroredOperations();
+      await syncQueueService.processQueue();
+      await nuvemSyncEngine.reprocessarErros();
       const filaRes = await nuvemSyncEngine.processarFila();
       const deltaRes = await nuvemSyncEngine.executarSincronizacaoIncremental('172');
       const locais = productRepository.getVencimentos();
@@ -256,7 +270,9 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
         };
       }
 
-      if (filaRes.erros > 0) {
+      const erroQueueV1 = syncQueueService.hasErrors() ? syncQueueService.getLastError() : undefined;
+      const contadoresV3 = nuvemSyncEngine.getContadores();
+      if (erroQueueV1 || contadoresV3.erros > 0 || filaRes.erros > 0) {
         const erroOp = nuvemSyncEngine.getFila().find((o) => o.status === 'ERRO' && o.erroMensagem);
         return {
           id: 'VENCIMENTOS',
@@ -264,8 +280,20 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
           colecao,
           sucesso: false,
           mensagem:
+            erroQueueV1 ||
             erroOp?.erroMensagem ||
-            `[Vencimentos • Coleção: ${colecao}] ${filaRes.erros} operação(ões) na fila retornaram erro.`,
+            `[Vencimentos • Coleção: ${colecao}] ${contadoresV3.erros || filaRes.erros} operação(ões) na fila retornaram erro.`,
+        };
+      }
+
+      const pendentesRestantes = syncQueueService.getPendingCount() + contadoresV3.pendentes;
+      if (pendentesRestantes > 0) {
+        return {
+          id: 'VENCIMENTOS',
+          nome: 'Vencimentos',
+          colecao,
+          sucesso: false,
+          mensagem: `Vencimentos com ${pendentesRestantes} operação(ões) pendente(s) aguardando envio (${filaRes.processadas} enviadas, ${deltaRes.atualizados} deltas recebidos).`,
         };
       }
 
@@ -467,7 +495,61 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
     }
   };
 
+  void queueDiagVersion;
   const comercialState = comercialSyncService.getStatus();
+  const queueV1Erros = syncQueueService.getQueue().filter((op) => op.status === 'ERRO');
+  const queueV1Pendentes = syncQueueService.getPendingCount();
+  const nuvemContadores = nuvemSyncEngine.getContadores();
+  const nuvemErrosLista = nuvemSyncEngine.getFila().filter((op) => op.status === 'ERRO');
+  const temErroEmFilas =
+    queueV1Erros.length > 0 ||
+    nuvemContadores.erros > 0 ||
+    comercialState.estado === 'ERRO' ||
+    Boolean(comercialState.ultimoErro);
+
+  const handleReprocessarFilasComErro = async () => {
+    if (isBusy) return;
+    setSyncingService('RECOVERY');
+    setSyncBannerErro(null);
+    setSyncBannerOk(null);
+    try {
+      await syncQueueService.retryErroredOperations();
+      await syncQueueService.processQueue();
+      await nuvemSyncEngine.reprocessarErros();
+      const resCom = await comercialSyncService.sincronizarAgora({ reconciliar: true });
+
+      const v1AindaErro = syncQueueService.hasErrors();
+      const v3AindaErro = nuvemSyncEngine.getContadores().erros > 0;
+      if (v1AindaErro || v3AindaErro || !resCom.sucesso) {
+        const msgs: string[] = [];
+        if (v1AindaErro) msgs.push(syncQueueService.getLastError() || 'Erro na fila V1 de vencimentos.');
+        if (v3AindaErro) {
+          const e3 = nuvemSyncEngine.getFila().find((o) => o.status === 'ERRO')?.erroMensagem;
+          msgs.push(e3 || 'Erro na fila V3 de vencimentos.');
+        }
+        if (!resCom.sucesso) msgs.push(resCom.mensagem);
+        setSyncBannerErro(msgs.join(' | '));
+      } else {
+        setSyncBannerOk('Filas reprocessadas e sincronizadas com sucesso.');
+      }
+      await carregarStatusReal();
+      onRefreshData();
+    } finally {
+      setSyncingService(null);
+    }
+  };
+
+  const handleLimparErrosIrrecuperaveis = async () => {
+    if (isBusy) return;
+    const remV1 = syncQueueService.clearErroredOperations();
+    const remV3 = nuvemSyncEngine.limparErros();
+    setSyncBannerErro(null);
+    setSyncBannerOk(
+      `${remV1 + remV3} registro(s) com erro irrecuperável removido(s) das filas locais.`
+    );
+    await carregarStatusReal();
+    onRefreshData();
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/70 backdrop-blur-xs overflow-y-auto">
@@ -552,6 +634,61 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
                   {err.mensagemUsuario}
                 </p>
               ))}
+            </div>
+          )}
+
+          {/* Diagnóstico de Filas & Recuperação de Erros ("ERRO NUVEM") */}
+          {temErroEmFilas && (
+            <div
+              id="diagnostico-filas-erro-nuvem"
+              className="bg-rose-50 border border-rose-300 rounded-xl p-3.5 space-y-2.5 text-xs text-rose-950"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <p className="font-black uppercase flex items-center gap-1.5 text-rose-900">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  Diagnóstico de Filas &amp; Recuperação de Erros ({queueV1Erros.length + nuvemErrosLista.length + (comercialState.ultimoErro ? 1 : 0)} ocorrência(s))
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    id="btn-reprocessar-filas-erro"
+                    onClick={handleReprocessarFilasComErro}
+                    disabled={isBusy}
+                    className="px-2.5 py-1.5 rounded-lg bg-rose-700 hover:bg-rose-800 disabled:opacity-50 text-white font-black text-[11px] uppercase cursor-pointer"
+                  >
+                    {syncingService === 'RECOVERY' ? 'Reprocessando...' : 'Reprocessar Filas com Erro'}
+                  </button>
+                  {(queueV1Erros.length > 0 || nuvemErrosLista.length > 0) && (
+                    <button
+                      type="button"
+                      id="btn-limpar-erros-irrecuperaveis"
+                      onClick={handleLimparErrosIrrecuperaveis}
+                      disabled={isBusy}
+                      className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-rose-100 border border-rose-300 text-rose-900 font-black text-[11px] uppercase cursor-pointer"
+                    >
+                      Limpar Erros Irrecuperáveis
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-1.5 font-mono text-[11px]">
+                {queueV1Erros.map((op) => (
+                  <p key={op.operationId} className="bg-white/90 p-2 rounded border border-rose-200 break-words">
+                    [Fila Vencimentos V1 • {op.tipoOperacao} • {op.registroId}] {op.erroMensagem || 'Erro sem detalhe'}
+                  </p>
+                ))}
+                {nuvemErrosLista.map((op) => (
+                  <p key={op.opId} className="bg-white/90 p-2 rounded border border-rose-200 break-words">
+                    [Fila Vencimentos V3 • {op.tipo} • {op.loteId}] {op.erroMensagem || 'Erro sem detalhe'}
+                  </p>
+                ))}
+                {(comercialState.estado === 'ERRO' || comercialState.ultimoErro) && (
+                  <p className="bg-white/90 p-2 rounded border border-rose-200 break-words">
+                    [Comercial Outbox] {comercialState.ultimoErro || 'Falha na fila ou leitura comercial.'}
+                  </p>
+                )}
+              </div>
             </div>
           )}
 
@@ -722,12 +859,20 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
               {/* 2. Comercial */}
               <div className="bg-white border border-slate-200 rounded-xl p-3 flex flex-col justify-between gap-2.5">
                 <div>
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <span className="font-black text-slate-900 text-xs flex items-center gap-1.5">
                       <Users className="w-3.5 h-3.5 text-indigo-600" />
                       Comercial (Promotores/Agências)
                     </span>
-                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800">
+                    <span
+                      className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                        comercialState.estado === 'ERRO'
+                          ? 'bg-rose-100 text-rose-800'
+                          : comercialState.estado === 'AGUARDANDO_GERENCIA' || comercialState.pendentesCount > 0
+                          ? 'bg-amber-100 text-amber-900'
+                          : 'bg-indigo-50 text-indigo-800'
+                      }`}
+                    >
                       {comercialState.estado}
                     </span>
                   </div>
@@ -739,8 +884,15 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
                   </p>
                   <p className="text-[11px] text-slate-500">
                     Pendentes fila: {comercialState.pendentesCount}
-                    {!statusNuvem.gerenciaAdminAutenticada ? ' • Escrita exige Gerência' : ''}
+                    {comercialState.estado === 'AGUARDANDO_GERENCIA' || !statusNuvem.gerenciaAdminAutenticada
+                      ? ' • Escrita exige login Gerência'
+                      : ''}
                   </p>
+                  {comercialState.ultimoErro && (
+                    <p className="text-[11px] text-rose-700 font-semibold mt-1 break-words">
+                      {comercialState.ultimoErro}
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap gap-1.5 pt-1 border-t border-slate-100">
@@ -749,7 +901,7 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
                     disabled={isBusy}
                     className="px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-[11px] font-bold cursor-pointer"
                   >
-                    {syncingService === 'COMERCIAL' ? 'Sincronizando...' : 'Sincronizar Comercial'}
+                    {syncingService === 'COMERCIAL' ? 'Reconciliando...' : 'Sincronizar Comercial'}
                   </button>
                 </div>
                 {resultadosServicos.COMERCIAL && (
@@ -782,7 +934,10 @@ export const SincronizacaoCentralModal: React.FC<SincronizacaoCentralModalProps>
                     {statusNuvem.vencimentosCount.toLocaleString('pt-BR')} lotes locais
                   </p>
                   <p className="text-[11px] text-slate-500">
-                    Pendentes fila: {nuvemSyncEngine.getContadores().pendentes}
+                    Pendentes: {nuvemContadores.pendentes + queueV1Pendentes} • Erros:{' '}
+                    <span className={nuvemContadores.erros + queueV1Erros.length > 0 ? 'text-rose-700 font-bold' : ''}>
+                      {nuvemContadores.erros + queueV1Erros.length}
+                    </span>
                   </p>
                 </div>
 

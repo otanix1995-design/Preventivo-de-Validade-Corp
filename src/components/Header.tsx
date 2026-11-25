@@ -82,17 +82,33 @@ export const Header: React.FC<HeaderProps> = ({
       await syncQueueService.processQueue();
       await nuvemSyncEngine.reprocessarErros();
       await nuvemSyncEngine.processarFila();
-      // 2. Puxar alterações mais recentes da nuvem (vencimentos + comercial)
+      // 2. Puxar alterações mais recentes da nuvem (vencimentos + reconciliação comercial)
       await cloudSyncService.pullVencimentosFromCloud();
-      await comercialSyncService.sincronizarAgora();
+      const comRes = await comercialSyncService.sincronizarAgora({ reconciliar: true });
       // 3. Sincronizar catálogo/geral
       const res = await productRepository.syncWithCloud();
-      setSyncToast(res.message || 'Sincronização concluída com sucesso.');
-      setTimeout(() => setSyncToast(null), 4500);
+
+      const temErroV1 = syncQueueService.hasErrors();
+      const temErroV3 = nuvemSyncEngine.getContadores().erros > 0;
+
+      if (temErroV1 || temErroV3) {
+        const detalhe =
+          syncQueueService.getLastError() ||
+          nuvemSyncEngine.getFila().find((o) => o.status === 'ERRO')?.erroMensagem ||
+          'Falha persistente na fila de vencimentos.';
+        setSyncToast(`Atenção — erro na fila de vencimentos: ${detalhe}`);
+      } else if (!comRes.sucesso || comRes.bloqueados > 0 || comRes.erros > 0) {
+        setSyncToast(comRes.mensagem);
+      } else if (!res.success) {
+        setSyncToast(res.message || 'Falha parcial na sincronização.');
+      } else {
+        setSyncToast(res.message || 'Sincronização concluída com sucesso.');
+      }
+      setTimeout(() => setSyncToast(null), 6000);
     } catch (e: any) {
       console.warn('Sync failed:', e);
-      setSyncToast('Erro ao sincronizar com a nuvem.');
-      setTimeout(() => setSyncToast(null), 4500);
+      setSyncToast(`Erro ao sincronizar com a nuvem: ${e?.message || 'falha inesperada'}`);
+      setTimeout(() => setSyncToast(null), 5000);
     } finally {
       setIsManualSyncing(false);
     }
