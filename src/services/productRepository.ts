@@ -711,6 +711,10 @@ class ProductRepository {
     );
   }
 
+  public matchesGramagem(p: ProdutoSMG, gramagemFilter: string): boolean {
+    return this._matchesGramagem(p, gramagemFilter);
+  }
+
   /**
    * Pesquisa de alto desempenho com índices O(1) em memória e índice invertido
    * de palavras para descrições. Evita varreduras lineares O(N) nos 11.600+ produtos.

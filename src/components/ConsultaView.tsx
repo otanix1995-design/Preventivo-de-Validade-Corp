@@ -38,6 +38,10 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { calcularPosicaoEstoque, cleanEanCode, isProdutoPesavel, parseEmbalagem } from '../services/codeParser';
+import {
+  filtrarProdutosConsulta,
+  FiltroEstoqueConsulta,
+} from '../services/consultaFiltroService';
 import { formatarMoedaBR } from '../services/deviceId';
 import { isvService } from '../services/isvService';
 import { productRepository } from '../services/productRepository';
@@ -71,6 +75,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
 }) => {
   const [inputQuery, setInputQuery] = useState(initialSearchQuery);
   const [debouncedQuery, setDebouncedQuery] = useState(initialSearchQuery);
+  const [estoqueFilter, setEstoqueFilter] = useState<FiltroEstoqueConsulta>('COM_ESTOQUE');
   const [gramagemFilter, setGramagemFilter] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const resultsContainerRef = useRef<HTMLDivElement>(null);
@@ -91,10 +96,10 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
     setCurrentPage(1);
   }, [initialSearchQuery]);
 
-  // Reset to page 1 whenever debounced query or gramagem filter changes
+  // Reset to page 1 whenever debounced query, estoque filter or gramagem filter changes
   useEffect(() => {
     setCurrentPage(1);
-  }, [debouncedQuery, gramagemFilter]);
+  }, [debouncedQuery, estoqueFilter, gramagemFilter]);
 
   // Verifica se a busca textual tem menos de 3 caracteres (números e chaves podem pesquisar direto)
   const isSearchTextShort = useMemo(() => {
@@ -105,7 +110,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
     return !isDigits && !hasSep && q.length < 3;
   }, [debouncedQuery]);
 
-  // All matching results for current query com índices O(1) e busca invertida
+  // All matching results for current query com índices O(1) e busca invertida (dados locais IndexedDB)
   const allQueryResults = useMemo(() => {
     const q = debouncedQuery.trim();
     if (!q || isSearchTextShort) {
@@ -113,7 +118,9 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
     }
 
     const currentSeq = ++searchSeqRef.current;
-    const results = productRepository.searchProducts(debouncedQuery, { limit: 100 });
+    const results = productRepository.searchProducts(debouncedQuery, {
+      limit: Math.max(1000, produtos.length),
+    });
 
     // Se uma nova busca foi disparada enquanto calculava, cancelar resultado obsoleto
     if (currentSeq !== searchSeqRef.current) {
@@ -121,33 +128,44 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
     }
 
     return results;
-  }, [debouncedQuery, isSearchTextShort]);
+  }, [debouncedQuery, isSearchTextShort, produtos]);
 
-  // Contextual Gramagem options extracted dynamically from matching query results
-  const gramagensDisponiveis = useMemo(() => {
-    if (allQueryResults.length === 0) return [];
-    return productRepository.getGramagensDisponiveis(allQueryResults);
-  }, [allQueryResults]);
-
-  // Filtered results after applying Gramagem filter
-  const filteredResults = useMemo(() => {
+  // Filtragem combinada (Estoque consolidado EMB1+EMB9 -> Gramagem -> Paginação), 100% local
+  const {
+    totalTodos,
+    totalComEstoque,
+    totalSemEstoque,
+    resultadosPorEstoque,
+    gramagensDisponiveis,
+    totalResults,
+    totalPages,
+    safePage,
+    startIndex,
+    endIndex,
+    visibleProducts,
+  } = useMemo(() => {
     if (!debouncedQuery.trim() || isSearchTextShort) {
-      return [];
+      return {
+        totalTodos: 0,
+        totalComEstoque: 0,
+        totalSemEstoque: 0,
+        resultadosPorEstoque: [] as ProdutoSMG[],
+        gramagensDisponiveis: [],
+        filteredResults: [] as ProdutoSMG[],
+        totalResults: 0,
+        totalPages: 1,
+        safePage: 1,
+        startIndex: 0,
+        endIndex: 0,
+        visibleProducts: [] as ProdutoSMG[],
+      };
     }
-    if (!gramagemFilter) {
-      return allQueryResults;
-    }
-    return productRepository.searchProducts(debouncedQuery, { gramagem: gramagemFilter, limit: 100 });
-  }, [debouncedQuery, gramagemFilter, allQueryResults, isSearchTextShort]);
 
-  // Pagination (10 items per page)
-  const totalResults = filteredResults.length;
-  const totalPages = Math.max(1, Math.ceil(totalResults / PAGE_SIZE));
-  const startIndex = (currentPage - 1) * PAGE_SIZE;
-  const endIndex = Math.min(startIndex + PAGE_SIZE, totalResults);
-  const visibleProducts = useMemo(() => {
-    return filteredResults.slice(startIndex, startIndex + PAGE_SIZE);
-  }, [filteredResults, startIndex]);
+    return filtrarProdutosConsulta(allQueryResults, estoqueFilter, gramagemFilter, {
+      currentPage,
+      pageSize: PAGE_SIZE,
+    });
+  }, [debouncedQuery, isSearchTextShort, allQueryResults, estoqueFilter, gramagemFilter, currentPage]);
 
   const handleSearchChange = (val: string) => {
     setInputQuery(val);
@@ -1049,8 +1067,62 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
         </div>
       </div>
 
+      {/* FILTRO DE ESTOQUE (imediatamente acima do filtro de gramagem/apresentação) */}
+      <div
+        id="consulta-filtro-estoque"
+        className="bg-white rounded-xl p-3.5 border border-gray-200 shadow-2xs space-y-2"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-bold text-gray-600 flex items-center gap-1.5 uppercase tracking-wider">
+            <Boxes className="w-3.5 h-3.5 text-[#F36B0B]" />
+            Filtrar por Estoque:
+          </span>
+          {estoqueFilter !== 'COM_ESTOQUE' && (
+            <button
+              type="button"
+              onClick={() => setEstoqueFilter('COM_ESTOQUE')}
+              className="text-[11px] font-bold text-[#C94F00] hover:underline flex items-center gap-1 cursor-pointer"
+            >
+              <span>Restaurar padrão</span>
+            </button>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {[
+            { id: 'TODOS' as const, label: 'Todos', count: totalTodos },
+            { id: 'COM_ESTOQUE' as const, label: 'Com estoque', count: totalComEstoque },
+            { id: 'SEM_ESTOQUE' as const, label: 'Sem estoque', count: totalSemEstoque },
+          ].map((opt) => {
+            const isSelected = estoqueFilter === opt.id;
+            const mostrarContagem = Boolean(debouncedQuery.trim() && !isSearchTextShort);
+            return (
+              <button
+                key={opt.id}
+                id={`btn-consulta-estoque-${opt.id.toLowerCase().replace('_', '-')}`}
+                type="button"
+                aria-pressed={isSelected}
+                onClick={() => setEstoqueFilter(opt.id)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all select-none flex items-center gap-1 cursor-pointer ${
+                  isSelected
+                    ? 'bg-[#F36B0B] text-white shadow-2xs'
+                    : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
+                }`}
+              >
+                <span>{opt.label}</span>
+                {mostrarContagem && (
+                  <span className={isSelected ? 'text-orange-100 text-[10px]' : 'text-gray-500 text-[10px]'}>
+                    ({opt.count})
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* FILTROS CONTEXTUAIS DE GRAMAGEM (quando há busca ativa) */}
-      {debouncedQuery.trim() && gramagensDisponiveis.length > 0 && (
+      {debouncedQuery.trim() && !isSearchTextShort && (gramagensDisponiveis.length > 0 || gramagemFilter !== null) && (
         <div className="bg-white rounded-xl p-3.5 border border-gray-200 shadow-2xs space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold text-gray-600 flex items-center gap-1.5 uppercase tracking-wider">
@@ -1059,6 +1131,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             </span>
             {gramagemFilter && (
               <button
+                type="button"
                 onClick={() => setGramagemFilter(null)}
                 className="text-[11px] font-bold text-[#C94F00] hover:underline flex items-center gap-1 cursor-pointer"
               >
@@ -1078,7 +1151,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                   : 'bg-gray-100 text-gray-700 hover:bg-gray-200 border border-gray-200'
               }`}
             >
-              Todas ({allQueryResults.length})
+              Todas ({resultadosPorEstoque.length})
             </button>
 
             {gramagensDisponiveis.map((g) => {
@@ -1173,12 +1246,67 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
             </h3>
             {totalPages > 1 && (
               <span className="text-xs font-bold text-gray-500">
-                Pág. {currentPage} de {totalPages}
+                Pág. {safePage} de {totalPages}
               </span>
             )}
           </div>
 
           {totalResults === 0 ? (
+            allQueryResults.length > 0 ? (
+              <div className="bg-white rounded-xl p-8 border border-gray-200 text-center space-y-4 shadow-xs">
+                <div className="w-12 h-12 rounded-full bg-orange-50 flex items-center justify-center mx-auto text-[#F36B0B]">
+                  <Boxes className="w-6 h-6 stroke-[2]" />
+                </div>
+
+                <div className="space-y-1">
+                  <h4 className="text-sm font-black text-gray-900 uppercase tracking-wide">
+                    Nenhum produto com os filtros selecionados
+                  </h4>
+                  <p className="text-xs text-gray-500 max-w-md mx-auto">
+                    Encontramos <strong className="text-gray-800">{allQueryResults.length}</strong>{' '}
+                    {allQueryResults.length === 1 ? 'produto' : 'produtos'} para "{debouncedQuery}", mas nenhum corresponde ao filtro{' '}
+                    <strong>
+                      {estoqueFilter === 'COM_ESTOQUE'
+                        ? 'Com estoque'
+                        : estoqueFilter === 'SEM_ESTOQUE'
+                        ? 'Sem estoque'
+                        : 'Todos'}
+                    </strong>
+                    {gramagemFilter ? ` e gramagem "${gramagemFilter}"` : ''}.
+                  </p>
+                </div>
+
+                <div className="flex items-center justify-center gap-2 flex-wrap">
+                  {gramagemFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setGramagemFilter(null)}
+                      className="px-3.5 py-2 rounded-lg text-xs font-bold bg-gray-100 hover:bg-gray-200 text-gray-800 border border-gray-200 transition-colors cursor-pointer"
+                    >
+                      Limpar gramagem ({gramagemFilter})
+                    </button>
+                  )}
+                  {estoqueFilter === 'COM_ESTOQUE' && totalSemEstoque > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setEstoqueFilter('SEM_ESTOQUE')}
+                      className="px-3.5 py-2 rounded-lg text-xs font-bold bg-gray-100 hover:bg-gray-200 text-gray-800 border border-gray-200 transition-colors cursor-pointer"
+                    >
+                      Ver Sem estoque ({totalSemEstoque})
+                    </button>
+                  )}
+                  {estoqueFilter !== 'TODOS' && (
+                    <button
+                      type="button"
+                      onClick={() => setEstoqueFilter('TODOS')}
+                      className="px-3.5 py-2 rounded-lg text-xs font-black bg-[#F36B0B] hover:bg-[#C94F00] text-white shadow-2xs transition-colors cursor-pointer"
+                    >
+                      Exibir Todos ({totalTodos})
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
             <div className="bg-white rounded-xl p-8 border border-gray-200 text-center space-y-4 shadow-xs">
               <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mx-auto text-slate-400">
                 <Package className="w-6 h-6 stroke-[2]" />
@@ -1221,6 +1349,7 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
                 </div>
               )}
             </div>
+            )
           ) : (
             <div className="space-y-2.5">
               {visibleProducts.map((prod) => {
@@ -1354,8 +1483,8 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               <button
                 type="button"
                 id="btn-pagina-anterior"
-                onClick={() => handlePageChange(Math.max(1, currentPage - 1))}
-                disabled={currentPage === 1}
+                onClick={() => handlePageChange(Math.max(1, safePage - 1))}
+                disabled={safePage <= 1}
                 className="flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
               >
                 <ChevronLeft className="w-4 h-4" />
@@ -1363,15 +1492,15 @@ export const ConsultaView: React.FC<ConsultaViewProps> = ({
               </button>
 
               <div className="text-xs font-bold text-gray-700">
-                Página <span className="font-black text-[#C94F00]">{currentPage}</span> de{' '}
+                Página <span className="font-black text-[#C94F00]">{safePage}</span> de{' '}
                 <span className="font-black text-gray-900">{totalPages}</span>
               </div>
 
               <button
                 type="button"
                 id="btn-pagina-proxima"
-                onClick={() => handlePageChange(Math.min(totalPages, currentPage + 1))}
-                disabled={currentPage === totalPages}
+                onClick={() => handlePageChange(Math.min(totalPages, safePage + 1))}
+                disabled={safePage >= totalPages}
                 className="flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-bold text-gray-700 bg-gray-100 hover:bg-gray-200 disabled:opacity-40 disabled:pointer-events-none transition-colors cursor-pointer"
               >
                 <span>Próxima</span>
